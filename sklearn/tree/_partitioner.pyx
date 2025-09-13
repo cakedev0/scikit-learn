@@ -27,6 +27,7 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 
 # Allow for 32 bit float comparisons
 cdef float32_t INFINITY_32t = np.inf
+cdef float64_t INFINITY = np.inf
 
 
 @final
@@ -153,29 +154,42 @@ cdef class DensePartitioner:
         max_feature_value_out[0] = max_feature_value
         self.n_missing = n_missing
 
-    cdef inline void next_p(self, intp_t* p_prev, intp_t* p) noexcept nogil:
+    cdef inline float64_t next_p(self, intp_t* p_ptr) noexcept nogil:
         """Compute the next p_prev and p for iterating over feature values.
 
         The missing values are not included when iterating through the feature values.
         """
         cdef float32_t[::1] feature_values = self.feature_values
+        cdef intp_t p = p_ptr[0]
         cdef intp_t end_non_missing = (
             self.end if self.missing_on_the_left
             else self.end - self.n_missing)
 
-        if p[0] == end_non_missing and not self.missing_on_the_left:
-            p[0] = self.end
-            p_prev[0] = self.end
+        if p == end_non_missing and not self.missing_on_the_left:
+            p = self.end
         else:
-            if self.missing_on_the_left and p[0] == self.start:
-                p[0] = self.start + self.n_missing
-            p[0] += 1
+            if self.missing_on_the_left and p == self.start:
+                p = self.start + self.n_missing
+            p += 1
             while (
-                p[0] < end_non_missing and
-                feature_values[p[0]] <= feature_values[p[0] - 1] + FEATURE_THRESHOLD
+                p < end_non_missing and
+                feature_values[p] <= feature_values[p - 1] + FEATURE_THRESHOLD
             ):
-                p[0] += 1
-            p_prev[0] = p[0] - 1
+                p += 1
+
+        p_ptr[0] = p
+        if p >= end_non_missing:
+            # split with the right node being only the missing values
+            return INFINITY
+        elif feature_values[p] == INFINITY_32t:
+            return feature_values[p - 1]
+        elif feature_values[p - 1] == -INFINITY_32t:
+            return -INFINITY
+        else:
+            # sum of halves is used to avoid infinite value
+            return (
+                feature_values[p - 1] / 2.0 + feature_values[p] / 2.0
+            )
 
     cdef inline intp_t partition_samples(
         self,

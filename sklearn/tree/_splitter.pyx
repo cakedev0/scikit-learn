@@ -41,7 +41,6 @@ ctypedef fused Partitioner:
 
 
 cdef float64_t INFINITY = np.inf
-cdef bint DEBUG = False
 
 
 cdef inline void _init_split(SplitRecord* self, intp_t start_pos) noexcept nogil:
@@ -309,7 +308,6 @@ cdef inline int node_split_best(
     cdef intp_t f_i = n_features
     cdef intp_t f_j
     cdef intp_t p
-    cdef intp_t p_prev
 
     cdef intp_t n_visited_features = 0
     # Number of features discovered to be constant during the split search
@@ -411,7 +409,7 @@ cdef inline int node_split_best(
             p = start
 
             while p < end:
-                partitioner.next_p(&p_prev, &p)
+                current_split.threshold = partitioner.next_p(&p)
                 if p == end:
                     continue
 
@@ -445,20 +443,6 @@ cdef inline int node_split_best(
 
                 if current_proxy_improvement > best_proxy_improvement:
                     best_proxy_improvement = current_proxy_improvement
-                    if p == end_non_missing and not missing_go_to_left:
-                        # split with the right node being only the missing values
-                        current_split.threshold = INFINITY
-                    else:
-                        # split between two non-missing values
-                        # sum of halves is used to avoid infinite value
-                        current_split.threshold = (
-                            feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
-                        )
-                        if (
-                            current_split.threshold == INFINITY or
-                            current_split.threshold == -INFINITY
-                        ):
-                            current_split.threshold = feature_values[p_prev]
 
                     current_split.n_missing = n_missing
 
