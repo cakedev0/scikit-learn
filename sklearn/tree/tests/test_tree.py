@@ -20,7 +20,12 @@ from sklearn import clone, datasets, tree
 from sklearn.dummy import DummyRegressor
 from sklearn.exceptions import NotFittedError
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, mean_poisson_deviance, mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    mean_pinball_loss,
+    mean_poisson_deviance,
+    mean_squared_error,
+)
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.random_projection import _sparse_random_matrix
@@ -36,7 +41,7 @@ from sklearn.tree._classes import (
     DENSE_SPLITTERS,
     SPARSE_SPLITTERS,
 )
-from sklearn.tree._criterion import _py_precompute_absolute_errors
+from sklearn.tree._criterion import _py_precompute_pinball_losses
 from sklearn.tree._partitioner import _py_sort
 from sklearn.tree._tree import (
     NODE_DTYPE,
@@ -1822,8 +1827,8 @@ def test_criterion_copy():
             assert n_outputs == n_outputs_
             assert_array_equal(n_classes, n_classes_)
 
-        for _, typename in CRITERIA_REG.items():
-            criteria = typename(n_outputs, n_samples)
+        for name, typename in CRITERIA_REG.items():
+            criteria = DecisionTreeRegressor(criterion=name).criterion
             result = copy_func(criteria).__reduce__()
             typename_, (n_outputs_, n_samples_), _ = result
             assert typename == typename_
@@ -2885,7 +2890,8 @@ def test_sort_log2_build():
     assert_array_equal(samples, expected_samples)
 
 
-def test_absolute_errors_precomputation_function(global_random_seed):
+@pytest.mark.parametrize("q", [0.5, 0.2, 0.9])
+def test_pinball_loss_precomputation_function(q, global_random_seed):
     """
     Test the main bit of logic of the MAE(RegressionCriterion) class
     (used by DecisionTreeRegressor(criterion="absolute_error")).
@@ -2896,20 +2902,27 @@ def test_absolute_errors_precomputation_function(global_random_seed):
     it can be safely removed.
     """
 
-    def compute_prefix_abs_errors_naive(y: np.ndarray, w: np.ndarray):
+    def compute_prefix_losses_naive(y: np.ndarray, w: np.ndarray):
+        """
+        Computes the pinball loss for all (y[:i], w[:i])
+        Naive: O(n^2 log n)
+        """
         y = y.ravel()
-        return np.array([compute_abs_error(y[:i], w[:i]) for i in range(1, y.size + 1)])
+        return np.array(
+            [compute_pinball_loss(y[:i], w[:i]) for i in range(1, y.size + 1)]
+        )
 
-    def compute_abs_error(y: np.ndarray, w: np.ndarray):
+    def compute_pinball_loss(y: np.ndarray, w: np.ndarray):
         # 1) compute the weighted median
         # i.e. once ordered by y, search for i such that:
-        # sum(w[:i]) <= 1/2  and sum(w[i+1:]) <= 1/2
+        # sum(w[:i]) <= q*sum(w) and sum(w[i+1:]) >= q*sum(w)
         sorter = np.argsort(y)
         wc = np.cumsum(w[sorter])
-        idx = np.searchsorted(wc, wc[-1] / 2)
-        median = y[sorter[idx]]
-        # 2) compute the AE
-        return (np.abs(y - median) * w).sum()
+        idx = np.searchsorted(wc, wc[-1] * q)
+        quantile = y[sorter[idx]]
+        y_pred = np.full(y.size, quantile)
+        # 2) compute the pinball loss
+        return mean_pinball_loss(y, y_pred, sample_weight=w, alpha=q) * w.sum()
 
     rng = np.random.RandomState(global_random_seed)
 
@@ -2917,12 +2930,12 @@ def test_absolute_errors_precomputation_function(global_random_seed):
         y = rng.uniform(size=(n, 1))
         w = rng.rand(n)
         indices = np.arange(n)
-        abs_errors = _py_precompute_absolute_errors(y, w, indices, 0, n)
-        expected = compute_prefix_abs_errors_naive(y, w)
+        abs_errors = _py_precompute_pinball_losses(y, w, indices, 0, n, q=q)
+        expected = compute_prefix_losses_naive(y, w)
         assert np.allclose(abs_errors, expected)
 
-        abs_errors = _py_precompute_absolute_errors(y, w, indices, n - 1, -1)
-        expected = compute_prefix_abs_errors_naive(y[::-1], w[::-1])[::-1]
+        abs_errors = _py_precompute_pinball_losses(y, w, indices, n - 1, -1, q=q)
+        expected = compute_prefix_losses_naive(y[::-1], w[::-1])[::-1]
         assert np.allclose(abs_errors, expected)
 
         x = rng.rand(n)
@@ -2931,10 +2944,10 @@ def test_absolute_errors_precomputation_function(global_random_seed):
         y_sorted = y[indices]
         w_sorted = w[indices]
 
-        abs_errors = _py_precompute_absolute_errors(y, w, indices, 0, n)
-        expected = compute_prefix_abs_errors_naive(y_sorted, w_sorted)
+        abs_errors = _py_precompute_pinball_losses(y, w, indices, 0, n, q=q)
+        expected = compute_prefix_losses_naive(y_sorted, w_sorted)
         assert np.allclose(abs_errors, expected)
 
-        abs_errors = _py_precompute_absolute_errors(y, w, indices, n - 1, -1)
-        expected = compute_prefix_abs_errors_naive(y_sorted[::-1], w_sorted[::-1])[::-1]
+        abs_errors = _py_precompute_pinball_losses(y, w, indices, n - 1, -1, q=q)
+        expected = compute_prefix_losses_naive(y_sorted[::-1], w_sorted[::-1])[::-1]
         assert np.allclose(abs_errors, expected)
