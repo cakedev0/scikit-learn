@@ -13,7 +13,7 @@ and sparse data stored in a Compressed Sparse Column (CSC) format.
 from cython cimport final
 from libc.math cimport isnan, log2
 from libc.stdlib cimport qsort
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 
 from ._utils cimport swap_array_slices
 
@@ -28,6 +28,8 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 # Allow for 32 bit float comparisons
 cdef float32_t INFINITY_32t = np.inf
 
+cdef intp_t MAX_N_CAT = 64
+
 
 @final
 cdef class DensePartitioner:
@@ -38,15 +40,28 @@ cdef class DensePartitioner:
     def __init__(
         self,
         const float32_t[:, :] X,
+        const float64_t[:, :] y,
+        const float64_t[::1] sample_weight,
         intp_t[::1] samples,
         float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ):
         self.X = X
+        self.y = y
+        self.sample_weight = sample_weight
         self.samples = samples
         self.feature_values = feature_values
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
+        self.n_categories_in_feature = n_categories_in_feature
         self.missing_on_the_left = False
+
+        # for breiman shortcut:
+        self.counts = np.empty(MAX_N_CAT, dtype=np.intp)
+        self.weighted_counts = np.empty(MAX_N_CAT, dtype=np.float64)
+        self.means = np.empty(MAX_N_CAT, dtype=np.float64)
+        self.sorted_cat = np.empty(MAX_N_CAT, dtype=np.intp)
+        self.offsets = np.empty(MAX_N_CAT, dtype=np.intp)
 
     cdef inline void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize splitter at the beginning of node_split."""
@@ -98,9 +113,75 @@ cdef class DensePartitioner:
             for i in range(self.start, self.end):
                 feature_values[i] = X[samples[i], current_feature]
 
-        sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
+        if self.n_categories_in_feature is None or self.n_categories_in_feature[current_feature] <= 0:
+            # no a categorical feature
+            sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
+        else:
+            self._breiman_sort_categories(self.n_categories_in_feature[current_feature])
         self.missing_on_the_left = False
         self.n_missing = n_missing
+
+    cdef void _breiman_sort_categories(self, intp_t nc) noexcept nogil:
+        """ O(n + nc log nc)"""
+        cdef:
+            intp_t* counts = &self.counts[0]
+            float64_t* weighted_counts = &self.weighted_counts[0]
+            float64_t* means = &self.means[0]
+            intp_t* sorted_cat = &self.sorted_cat[0]
+            intp_t* offsets = &self.offsets[0]
+            float32_t* feature_values = &self.feature_values[0]
+            intp_t* samples = &self.samples[0]
+            intp_t c, r, p, new_p
+            float64_t w = 1.
+
+        memset(means, 0, nc * sizeof(float64_t))
+        memset(counts, 0, nc * sizeof(intp_t))
+        memset(weighted_counts, 0, nc * sizeof(float64_t))
+
+        # compute counts, weighted_counts and means
+        for p in range(self.start, self.end):
+            c = <int> feature_values[p]
+            counts[c] += 1
+            # FIXME: overflow risk + float32 downcast: precision issues?
+            # `sort` only supports float32 for now, that's why means is float32
+            # maybe we can use some templating to extend sort to float64
+            means[c] += self.y[samples[p], 0]
+            if self.sample_weight is not None:
+                w = self.sample_weight[samples[p]]
+            self.weighted_counts[c] += w
+
+        for c in range(nc):
+            # TODO: weighted counts
+            if weighted_counts[c] > 0:
+                means[c] /= weighted_counts[c]
+
+        # sorted_cat[i] = i-th categories sorted my ascending means
+        for c in range(nc):
+            sorted_cat[c] = c
+        sort(means, sorted_cat, nc)
+
+        # ) build offsets such that:
+        # offsets[c] = sum( counts[x] for all x s.t. rank(x) <= rank(c) ) - 1
+        cdef intp_t offset = 0
+        for r in range(nc):
+            c = sorted_cat[r]
+            offset += counts[c]
+            offsets[c] = offset - 1
+
+        # sort feature_values & samples such that they are ordered by
+        # the mean of the category
+        # while ensuring samples of the same categories are contiguous
+        p = self.start
+        while p < self.end:
+            # XXX: not sure this works
+            c = <int> feature_values[p]
+            new_p = offsets[c]
+            if new_p > p:
+                swap(feature_values, samples, p, new_p)
+                # ^ preserves invariant: feature[p] = X[samples[p], f]
+                offsets[c] -= 1
+            else:
+                p += 1
 
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         """
@@ -665,26 +746,30 @@ def _py_sort(float32_t[::1] feature_values, intp_t[::1] samples, intp_t n):
     sort(&feature_values[0], &samples[0], n)
 
 
+ctypedef fused floating_t:
+    float32_t
+    float64_t
+
 # Sort n-element arrays pointed to by feature_values and samples, simultaneously,
 # by the values in feature_values. Algorithm: Introsort (Musser, SP&E, 1997).
-cdef inline void sort(float32_t* feature_values, intp_t* samples, intp_t n) noexcept nogil:
+cdef inline void sort(floating_t* feature_values, intp_t* samples, intp_t n) noexcept nogil:
     if n == 0:
         return
     cdef intp_t maxd = 2 * <intp_t>log2(n)
     introsort(feature_values, samples, n, maxd)
 
 
-cdef inline void swap(float32_t* feature_values, intp_t* samples,
+cdef inline void swap(floating_t* feature_values, intp_t* samples,
                       intp_t i, intp_t j) noexcept nogil:
     # Helper for sort
     feature_values[i], feature_values[j] = feature_values[j], feature_values[i]
     samples[i], samples[j] = samples[j], samples[i]
 
 
-cdef inline float32_t median3(float32_t* feature_values, intp_t n) noexcept nogil:
+cdef inline floating_t median3(floating_t* feature_values, intp_t n) noexcept nogil:
     # Median of three pivot selection, after Bentley and McIlroy (1993).
     # Engineering a sort function. SP&E. Requires 8/3 comparisons on average.
-    cdef float32_t a = feature_values[0], b = feature_values[n / 2], c = feature_values[n - 1]
+    cdef floating_t a = feature_values[0], b = feature_values[n / 2], c = feature_values[n - 1]
     if a < b:
         if b < c:
             return b
@@ -703,9 +788,9 @@ cdef inline float32_t median3(float32_t* feature_values, intp_t n) noexcept nogi
 
 # Introsort with median of 3 pivot selection and 3-way partition function
 # (robust to repeated elements, e.g. lots of zero features).
-cdef void introsort(float32_t* feature_values, intp_t *samples,
+cdef void introsort(floating_t* feature_values, intp_t *samples,
                     intp_t n, intp_t maxd) noexcept nogil:
-    cdef float32_t pivot
+    cdef floating_t pivot
     cdef intp_t i, l, r
 
     while n > 1:
@@ -736,7 +821,7 @@ cdef void introsort(float32_t* feature_values, intp_t *samples,
         n -= r
 
 
-cdef inline void sift_down(float32_t* feature_values, intp_t* samples,
+cdef inline void sift_down(floating_t* feature_values, intp_t* samples,
                            intp_t start, intp_t end) noexcept nogil:
     # Restore heap order in feature_values[start:end] by moving the max element to start.
     cdef intp_t child, maxind, root
@@ -759,7 +844,7 @@ cdef inline void sift_down(float32_t* feature_values, intp_t* samples,
             root = maxind
 
 
-cdef void heapsort(float32_t* feature_values, intp_t* samples, intp_t n) noexcept nogil:
+cdef void heapsort(floating_t* feature_values, intp_t* samples, intp_t n) noexcept nogil:
     cdef intp_t start, end
 
     # heapify

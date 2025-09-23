@@ -84,6 +84,7 @@ cdef class Splitter:
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1
 
     cdef int node_reset(

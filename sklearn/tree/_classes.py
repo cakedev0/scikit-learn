@@ -472,7 +472,15 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
-        builder.build(self.tree_, X, y, sample_weight, missing_values_in_feature_mask)
+        n_categories_in_feature = np.zeros(self.n_features_in_, dtype=np.intp)
+        builder.build(
+            self.tree_,
+            X,
+            y,
+            sample_weight,
+            missing_values_in_feature_mask,
+            n_categories_in_feature,
+        )
 
         if self.n_outputs_ == 1 and is_classifier(self):
             self.n_classes_ = self.n_classes_[0]

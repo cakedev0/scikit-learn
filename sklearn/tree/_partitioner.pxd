@@ -68,13 +68,22 @@ cdef class DensePartitioner:
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
     """
     cdef const float32_t[:, :] X
+    cdef const float64_t[:, :] y
+    cdef const float64_t[::1] sample_weight
     cdef intp_t[::1] samples
     cdef float32_t[::1] feature_values
     cdef intp_t start
     cdef intp_t end
     cdef intp_t n_missing
     cdef const uint8_t[::1] missing_values_in_feature_mask
+    cdef const intp_t[::1] n_categories_in_feature
     cdef bint missing_on_the_left
+
+    cdef intp_t[::1] counts
+    cdef float64_t[::1] weighted_counts
+    cdef float64_t[::1] means
+    cdef intp_t[::1] sorted_cat
+    cdef intp_t[::1] offsets
 
     cdef void sort_samples_and_feature_values(
         self, intp_t current_feature
@@ -108,6 +117,7 @@ cdef class DensePartitioner:
         intp_t best_feature,
         bint best_missing_go_to_left,
     ) noexcept nogil
+    cdef void _breiman_sort_categories(self, intp_t nc) noexcept nogil
 
 
 cdef class SparsePartitioner:

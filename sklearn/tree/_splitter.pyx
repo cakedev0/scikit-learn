@@ -129,6 +129,7 @@ cdef class Splitter:
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1:
         """Initialize the splitter.
 
@@ -755,10 +756,12 @@ cdef class BestSplitter(Splitter):
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask, n_categories_in_feature)
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X, y, sample_weight, self.samples, self.feature_values,
+            missing_values_in_feature_mask, n_categories_in_feature
         )
 
     cdef int node_split(
@@ -783,8 +786,9 @@ cdef class BestSparseSplitter(Splitter):
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask, n_categories_in_feature)
         self.partitioner = SparsePartitioner(
             X, self.samples, self.n_samples, self.feature_values, missing_values_in_feature_mask
         )
@@ -811,10 +815,12 @@ cdef class RandomSplitter(Splitter):
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask, n_categories_in_feature)
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X, y, sample_weight, self.samples, self.feature_values,
+            missing_values_in_feature_mask, n_categories_in_feature
         )
 
     cdef int node_split(
@@ -839,8 +845,9 @@ cdef class RandomSparseSplitter(Splitter):
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1:
-        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask, n_categories_in_feature)
         self.partitioner = SparsePartitioner(
             X, self.samples, self.n_samples, self.feature_values, missing_values_in_feature_mask
         )
