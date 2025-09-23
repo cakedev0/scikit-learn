@@ -28,7 +28,7 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 # Allow for 32 bit float comparisons
 cdef float32_t INFINITY_32t = np.inf
 
-cdef intp_t MAX_N_CAT = 64
+cdef intp_t MAX_N_CAT = 32
 
 
 @final
@@ -182,6 +182,18 @@ cdef class DensePartitioner:
                 offsets[c] -= 1
             else:
                 p += 1
+
+    cdef uint32_t _split_pos_to_bitset(self, intp_t p, intp_t nc):
+        cdef uint32_t bitset = 0
+        cdef intp_t r, c
+        cdef intp_t offset = 0
+        for r in range(nc):
+            c = self.sorted_cat[r]
+            bitset |= 1 << c
+            offset += self.counts[c]
+            if offset >= p:
+                break
+        return bitset
 
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         """
