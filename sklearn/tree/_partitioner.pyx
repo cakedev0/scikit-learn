@@ -15,7 +15,7 @@ from libc.math cimport isnan, log2
 from libc.stdlib cimport qsort
 from libc.string cimport memcpy, memset
 
-from ._utils cimport swap_array_slices
+from ._utils cimport SplitValue, swap_array_slices
 
 import numpy as np
 from scipy.sparse import issparse
@@ -28,7 +28,7 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 # Allow for 32 bit float comparisons
 cdef float32_t INFINITY_32t = np.inf
 
-cdef intp_t MAX_N_CAT = 32
+cdef intp_t MAX_N_CAT = 64
 
 
 @final
@@ -183,8 +183,8 @@ cdef class DensePartitioner:
             else:
                 p += 1
 
-    cdef uint32_t _split_pos_to_bitset(self, intp_t p, intp_t nc):
-        cdef uint32_t bitset = 0
+    cdef inline uint64_t _split_pos_to_bitset(self, intp_t p, intp_t nc) noexcept nogil:
+        cdef uint64_t bitset = 0
         cdef intp_t r, c
         cdef intp_t offset = 0
         for r in range(nc):
@@ -599,6 +599,17 @@ cdef class SparsePartitioner:
                                          index_to_samples,
                                          feature_values,
                                          &self.end_negative, &self.start_positive)
+
+
+cdef inline bint goes_left(
+    SplitValue split_value, bint missing_go_to_left, bint is_categorical, float32_t value
+) noexcept nogil:
+    if isnan(value):
+        return missing_go_to_left
+    elif is_categorical:
+        return split_value.cat_split & (1 << (<uint8_t> value))
+    else:
+        return value <= split_value.threshold
 
 
 cdef int compare_SIZE_t(const void* a, const void* b) noexcept nogil:

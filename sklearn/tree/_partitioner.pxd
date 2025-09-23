@@ -4,7 +4,7 @@
 # See _partitioner.pyx for details.
 
 from ..utils._typedefs cimport (
-    float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t
+    float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t, uint64_t
 )
 from ._splitter cimport SplitRecord
 
@@ -118,6 +118,7 @@ cdef class DensePartitioner:
         bint best_missing_go_to_left,
     ) noexcept nogil
     cdef void _breiman_sort_categories(self, intp_t nc) noexcept nogil
+    cdef inline uint64_t _split_pos_to_bitset(self, intp_t p, intp_t nc) noexcept nogil
 
 
 cdef class SparsePartitioner:
