@@ -740,6 +740,7 @@ cdef inline void extract_nnz_binary_search(const int32_t[::1] X_indices,
           n_samples * log(n_indices)).
     """
     cdef intp_t n_samples
+    # printf("Is sorted: %d\n", is_samples_sorted[0])
 
     if not is_samples_sorted[0]:
         n_samples = end - start

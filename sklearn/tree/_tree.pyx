@@ -773,7 +773,7 @@ cdef class Tree:
 
     # TODO: Convert n_classes to cython.integral memory view once
     #  https://github.com/cython/cython/issues/5243 is fixed
-    def __cinit__(self, intp_t n_features, cnp.ndarray n_classes, intp_t n_outputs):
+    def __cinit__(self, intp_t n_features, cnp.ndarray n_classes, intp_t n_outputs, cnp.ndarray is_categorical):
         """Constructor."""
         cdef intp_t dummy = 0
         size_t_dtype = np.array(dummy).dtype
@@ -795,8 +795,12 @@ cdef class Tree:
 
         self.is_categorical = NULL
         safe_realloc(&self.is_categorical, n_features)
-        for f in range(n_features):
-            self.is_categorical[f] = False
+        if is_categorical is None:
+            for f in range(n_features):
+                self.is_categorical[f] = False
+        else:
+            for f in range(n_features):
+                self.is_categorical[f] = is_categorical[f]
 
         # Inner structures
         self.max_depth = 0
@@ -815,9 +819,12 @@ cdef class Tree:
 
     def __reduce__(self):
         """Reduce re-implementation, for pickling."""
-        return (Tree, (self.n_features,
-                       sizet_ptr_to_ndarray(self.n_classes, self.n_outputs),
-                       self.n_outputs), self.__getstate__())
+        return (Tree, (
+            self.n_features,
+            sizet_ptr_to_ndarray(self.n_classes, self.n_outputs),
+            self.n_outputs,
+            sizet_ptr_to_ndarray(self.is_categorical, self.n_features)
+        ), self.__getstate__())
 
     def __getstate__(self):
         """Getstate re-implementation, for pickling."""
