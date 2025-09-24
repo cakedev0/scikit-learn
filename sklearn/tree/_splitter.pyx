@@ -49,7 +49,6 @@ cdef inline void _init_split(SplitRecord* self, intp_t start_pos) noexcept nogil
     self.impurity_right = INFINITY
     self.pos = start_pos
     self.feature = 0
-    self.threshold = 0.
     self.improvement = -INFINITY
     self.missing_go_to_left = False
     self.n_missing = 0
@@ -446,21 +445,7 @@ cdef inline int node_split_best(
 
                 if current_proxy_improvement > best_proxy_improvement:
                     best_proxy_improvement = current_proxy_improvement
-                    if p == end_non_missing and not missing_go_to_left:
-                        # split with the right node being only the missing values
-                        current_split.threshold = INFINITY
-                    else:
-                        # split between two non-missing values
-                        # sum of halves is used to avoid infinite value
-                        current_split.threshold = (
-                            feature_values[p_prev] / 2.0 + feature_values[p] / 2.0
-                        )
-                        if (
-                            current_split.threshold == INFINITY or
-                            current_split.threshold == -INFINITY
-                        ):
-                            current_split.threshold = feature_values[p_prev]
-
+                    current_split.value = partitioner.pos_to_threshold(p_prev, p)
                     current_split.n_missing = n_missing
 
                     # if there are no missing values in the training data, during
@@ -477,7 +462,7 @@ cdef inline int node_split_best(
     if best_split.pos < end:
         partitioner.partition_samples_final(
             best_split.pos,
-            best_split.threshold,
+            best_split.value,
             best_split.feature,
             best_split.missing_go_to_left
         )
@@ -636,7 +621,7 @@ cdef inline int node_split_random(
         has_missing = n_missing != 0
 
         # Draw a random threshold
-        current_split.threshold = rand_uniform(
+        current_split.value.threshold = rand_uniform(
             min_feature_value,
             max_feature_value,
             random_state,
@@ -656,12 +641,12 @@ cdef inline int node_split_random(
         else:
             missing_go_to_left = 0
 
-        if current_split.threshold == max_feature_value:
-            current_split.threshold = min_feature_value
+        if current_split.value.threshold == max_feature_value:
+            current_split.value.threshold = min_feature_value
 
         # Partition
         current_split.pos = partitioner.partition_samples(
-            current_split.threshold, missing_go_to_left
+            current_split.value.threshold, missing_go_to_left
         )
 
         n_left = current_split.pos - start
@@ -715,7 +700,7 @@ cdef inline int node_split_random(
         if current_split.feature != best_split.feature:
             partitioner.partition_samples_final(
                 best_split.pos,
-                best_split.threshold,
+                best_split.value,
                 best_split.feature,
                 best_split.missing_go_to_left
             )

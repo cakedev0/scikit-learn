@@ -8,6 +8,7 @@ from ..utils._typedefs cimport (
 )
 from ._criterion cimport Criterion
 from ._tree cimport ParentInfo
+from ._utils cimport SplitValue
 
 
 cdef struct SplitRecord:
@@ -16,7 +17,7 @@ cdef struct SplitRecord:
     intp_t pos             # Split samples array at the given position,
     #                      # i.e. count of samples below threshold for feature.
     #                      # pos is >= end if the node is a leaf.
-    float64_t threshold       # Threshold to split at.
+    SplitValue value       # Threshold/Bitset to split at.
     float64_t improvement     # Impurity improvement given parent node.
     float64_t impurity_left   # Impurity of the left split.
     float64_t impurity_right  # Impurity of the right split.

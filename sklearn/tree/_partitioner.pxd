@@ -7,6 +7,7 @@ from ..utils._typedefs cimport (
     float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t, uint64_t
 )
 from ._splitter cimport SplitRecord
+from ._utils cimport SplitValue
 
 
 # Mitigate precision differences between 32 bit and 64 bit
@@ -78,6 +79,7 @@ cdef class DensePartitioner:
     cdef const uint8_t[::1] missing_values_in_feature_mask
     cdef const intp_t[::1] n_categories_in_feature
     cdef bint missing_on_the_left
+    cdef intp_t n_categories
 
     cdef intp_t[::1] counts
     cdef float64_t[::1] weighted_counts
@@ -105,6 +107,9 @@ cdef class DensePartitioner:
         intp_t* p_prev,
         intp_t* p
     ) noexcept nogil
+    cdef inline SplitValue pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil
     cdef intp_t partition_samples(
         self,
         float64_t current_threshold,
@@ -113,7 +118,7 @@ cdef class DensePartitioner:
     cdef void partition_samples_final(
         self,
         intp_t best_pos,
-        float64_t best_threshold,
+        SplitValue split_value,
         intp_t best_feature,
         bint best_missing_go_to_left,
     ) noexcept nogil
@@ -143,6 +148,7 @@ cdef class SparsePartitioner:
     cdef intp_t end
     cdef intp_t n_missing
     cdef const uint8_t[::1] missing_values_in_feature_mask
+    cdef intp_t n_categories
 
     cdef void sort_samples_and_feature_values(
         self, intp_t current_feature
@@ -164,6 +170,9 @@ cdef class SparsePartitioner:
         intp_t* p_prev,
         intp_t* p
     ) noexcept nogil
+    cdef inline SplitValue pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil
     cdef intp_t partition_samples(
         self,
         float64_t current_threshold,
@@ -172,7 +181,7 @@ cdef class SparsePartitioner:
     cdef void partition_samples_final(
         self,
         intp_t best_pos,
-        float64_t best_threshold,
+        SplitValue split_value,
         intp_t best_feature,
         bint best_missing_go_to_left,
     ) noexcept nogil
