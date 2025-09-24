@@ -1013,8 +1013,8 @@ cdef class Tree:
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
-                    if self.is_categorical[node.feature]:
-                        if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
+                    elif self.is_categorical[node.feature]:
+                        if node.categorical_bitset & (1 << (<intp_t> X_i_node_feature)):
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
@@ -1139,6 +1139,7 @@ cdef class Tree:
                     indices[indptr[i + 1]] = <intp_t>(node - self.nodes)
                     indptr[i + 1] += 1
 
+                    # TODO: handle missing values?
                     if self.is_categorical[node.feature]:
                         if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
                             node = &self.nodes[node.left_child]
