@@ -1135,6 +1135,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         class_weight=None,
         ccp_alpha=0.0,
         monotonic_cst=None,
+        categorical_features=None,
     ):
         super().__init__(
             criterion=criterion,
@@ -1150,6 +1151,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
             min_impurity_decrease=min_impurity_decrease,
             monotonic_cst=monotonic_cst,
             ccp_alpha=ccp_alpha,
+            categorical_features=categorical_features,
         )
 
     @_fit_context(prefer_skip_nested_validation=True)
@@ -1512,6 +1514,7 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         min_impurity_decrease=0.0,
         ccp_alpha=0.0,
         monotonic_cst=None,
+        categorical_features=None,
     ):
         super().__init__(
             criterion=criterion,
@@ -1526,6 +1529,7 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
             min_impurity_decrease=min_impurity_decrease,
             ccp_alpha=ccp_alpha,
             monotonic_cst=monotonic_cst,
+            categorical_features=categorical_features,
         )
 
     @_fit_context(prefer_skip_nested_validation=True)

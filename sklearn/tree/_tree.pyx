@@ -799,6 +799,7 @@ cdef class Tree:
             for f in range(n_features):
                 self.is_categorical[f] = False
         else:
+            is_categorical = is_categorical.astype(np.intp)
             for f in range(n_features):
                 self.is_categorical[f] = is_categorical[f]
 
@@ -1005,14 +1006,18 @@ cdef class Tree:
                 node = self.nodes
                 # While node not a leaf
                 while node.left_child != _TREE_LEAF:
-                    X_i_node_feature = X_ndarray[i, node.feature]
                     # ... and node.right_child != _TREE_LEAF:
+                    X_i_node_feature = X_ndarray[i, node.feature]
                     if isnan(X_i_node_feature):
                         if node.missing_go_to_left:
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
-                    # TODO: handle categorical case:
+                    if self.is_categorical[node.feature]:
+                        if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
+                            node = &self.nodes[node.left_child]
+                        else:
+                            node = &self.nodes[node.right_child]
                     elif X_i_node_feature <= node.threshold:
                         node = &self.nodes[node.left_child]
                     else:
@@ -1134,8 +1139,12 @@ cdef class Tree:
                     indices[indptr[i + 1]] = <intp_t>(node - self.nodes)
                     indptr[i + 1] += 1
 
-                    # TODO handle categorical
-                    if X_ndarray[i, node.feature] <= node.threshold:
+                    if self.is_categorical[node.feature]:
+                        if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
+                            node = &self.nodes[node.left_child]
+                        else:
+                            node = &self.nodes[node.right_child]
+                    elif X_ndarray[i, node.feature] <= node.threshold:
                         node = &self.nodes[node.left_child]
                     else:
                         node = &self.nodes[node.right_child]
@@ -1415,7 +1424,7 @@ cdef class Tree:
 
                     if is_target_feature:
                         # In this case, we push left or right child on stack
-                        # TODO: handle categotical (and missing?)
+                        # TODO: handle categorical (and missing?)
                         if X[sample_idx, feature_idx] <= current_node.threshold:
                             node_idx_stack[stack_size] = current_node.left_child
                         else:
