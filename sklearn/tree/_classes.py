@@ -47,7 +47,6 @@ from sklearn.utils.validation import (
     _assert_all_finite_element_wise,
     _check_n_features,
     _check_sample_weight,
-    _is_pandas_df,
     assert_all_finite,
     check_is_fitted,
     validate_data,
@@ -249,8 +248,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
     ):
         random_state = check_random_state(self.random_state)
 
-        self.is_categorical_ = self._check_categorical_features(X)
-
         if check_input:
             # Need to validate separately here.
             # We can't pass multi_output=True because that would allow y to be
@@ -446,6 +443,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
 
+        self.is_categorical_, n_categories_in_feature = (
+            self._check_categorical_features(X, monotonic_cst)
+        )
+
         if not isinstance(self.splitter, Splitter):
             splitter = SPLITTERS[self.splitter](
                 criterion,
@@ -493,14 +494,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
-        n_categories_in_feature = np.full(self.n_features_in_, -1, dtype=np.intp)
-        if self.is_categorical_ is not None:
-            for idx in np.where(self.is_categorical_)[0]:
-                assert np.allclose(X[:, idx].astype(np.intp), X[:, idx])
-                assert X[:, idx].min() >= 0
-                n_categories_in_feature[idx] = X[:, idx].max() + 1
-            assert (n_categories_in_feature <= 64).all()
-
         builder.build(
             self.tree_,
             X,
@@ -518,101 +511,31 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         return self
 
-    def _check_categorical_features(self, X):
-        """Copied from gradient_boosting.py on sept. 2025
-        Check and validate categorical features in X
+    def _check_categorical_features(self, X, monotonic_cst):
+        """Check and validate categorical features in X
 
         Parameters
         ----------
-        X : {array-like, pandas DataFrame} of shape (n_samples, n_features)
-            Input data.
+        X : {array-like} of shape (n_samples, n_features)
+            Input data (after `validate_data` was called)
 
         Return
         ------
         is_categorical : ndarray of shape (n_features,) or None, dtype=bool
             Indicates whether a feature is categorical. If no feature is
             categorical, this is None.
+        n_categories_in_feature: TODO
         """
-        # Special code for pandas because of a bug in recent pandas, which is
-        # fixed in main and maybe included in 2.2.1, see
-        # https://github.com/pandas-dev/pandas/pull/57173.
-        # Also pandas versions < 1.5.1 do not support the dataframe interchange
-        if _is_pandas_df(X):
-            X_is_dataframe = True
-            categorical_columns_mask = np.asarray(X.dtypes == "category")
-        elif hasattr(X, "__dataframe__"):
-            X_is_dataframe = True
-            categorical_columns_mask = np.asarray(
-                [
-                    c.dtype[0].name == "CATEGORICAL"
-                    for c in X.__dataframe__().get_columns()
-                ]
-            )
-        else:
-            X_is_dataframe = False
-            categorical_columns_mask = None
-
-        categorical_features = self.categorical_features
-
-        categorical_by_dtype = (
-            isinstance(categorical_features, str)
-            and categorical_features == "from_dtype"
-        )
-        no_categorical_dtype = categorical_features is None or (
-            categorical_by_dtype and not X_is_dataframe
-        )
-
-        if no_categorical_dtype:
-            return None
-
-        use_pandas_categorical = categorical_by_dtype and X_is_dataframe
-        if use_pandas_categorical:
-            categorical_features = categorical_columns_mask
-        else:
-            categorical_features = np.asarray(categorical_features)
-
-        if categorical_features.size == 0:
-            return None
-
-        if categorical_features.dtype.kind not in ("i", "b", "U", "O"):
-            raise ValueError(
-                "categorical_features must be an array-like of bool, int or "
-                f"str, got: {categorical_features.dtype.name}."
-            )
-
-        if categorical_features.dtype.kind == "O":
-            types = set(type(f) for f in categorical_features)
-            if types != {str}:
-                raise ValueError(
-                    "categorical_features must be an array-like of bool, int or "
-                    f"str, got: {', '.join(sorted(t.__name__ for t in types))}."
-                )
-
         n_features = X.shape[1]
-        # At this point `validate_data` was not called yet because we use the original
-        # dtypes to discover the categorical features. Thus `feature_names_in_`
-        # is not defined yet.
-        feature_names_in_ = getattr(X, "columns", None)
+        categorical_features = np.asarray(self.categorical_features)
 
-        if categorical_features.dtype.kind in ("U", "O"):
-            # check for feature names
-            if feature_names_in_ is None:
-                raise ValueError(
-                    "categorical_features should be passed as an array of "
-                    "integers or as a boolean mask when the model is fitted "
-                    "on data without feature names."
-                )
+        if self.categorical_features is None or categorical_features.size == 0:
             is_categorical = np.zeros(n_features, dtype=bool)
-            feature_names = list(feature_names_in_)
-            for feature_name in categorical_features:
-                try:
-                    is_categorical[feature_names.index(feature_name)] = True
-                except ValueError as e:
-                    raise ValueError(
-                        f"categorical_features has a item value '{feature_name}' "
-                        "which is not a valid feature name of the training "
-                        f"data. Observed feature names: {feature_names}"
-                    ) from e
+        elif categorical_features.dtype.kind not in ("i", "b"):
+            raise ValueError(
+                "categorical_features must be an array-like of bool or int, "
+                f"got: {categorical_features.dtype.name}."
+            )
         elif categorical_features.dtype.kind == "i":
             # check for categorical features as indices
             if (
@@ -634,9 +557,24 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 )
             is_categorical = categorical_features
 
-        if not np.any(is_categorical):
-            return None
-        return is_categorical
+        n_categories_in_feature = np.full(self.n_features_in_, -1, dtype=np.intp)
+        MAX_NC = 64  # TODO import from somewhere
+        base_msg = (
+            f"Values for categorical features should be integers in [0, {MAX_NC - 1}]."
+        )
+        for idx in np.where(is_categorical)[0]:
+            if not np.allclose(X[:, idx].astype(np.intp), X[:, idx]):
+                raise ValueError(f"{base_msg} Found non-integer values.")
+            if X[:, idx].min() < 0:
+                raise ValueError(f"{base_msg} Found negative values.")
+            X_idx_max = X[:, idx].max()
+            if X_idx_max >= MAX_NC:
+                raise ValueError(f"{base_msg} Found {X_idx_max}.")
+            n_categories_in_feature[idx] = X_idx_max + 1
+            if monotonic_cst is not None and monotonic_cst[idx] != 0:
+                raise ValueError("Categorical features are incompatible with ")
+
+        return is_categorical, n_categories_in_feature
 
     def _validate_X_predict(self, X, check_input):
         """Validate the training data on predict (probabilities)."""
