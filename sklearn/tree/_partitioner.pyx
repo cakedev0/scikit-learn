@@ -123,6 +123,8 @@ cdef class DensePartitioner:
         if self.n_categories <= 0:
             # no a categorical feature
             sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
+            if n_missing > 0:
+                return False
             return feature_values[self.end - n_missing - 1] <= feature_values[self.start] + FEATURE_THRESHOLD
         else:
             self._breiman_sort_categories(self.n_categories)
@@ -152,9 +154,9 @@ cdef class DensePartitioner:
             # FIXME: overflow risk + float32 downcast: precision issues?
             # `sort` only supports float32 for now, that's why means is float32
             # maybe we can use some templating to extend sort to float64
-            means[c] += self.y[samples[p], 0]
             if self.sample_weight is not None:
                 w = self.sample_weight[samples[p]]
+            means[c] += w * self.y[samples[p], 0]
             self.weighted_counts[c] += w
 
         for c in range(nc):

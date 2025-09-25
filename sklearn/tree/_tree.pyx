@@ -752,6 +752,10 @@ cdef class Tree:
         return self._get_node_ndarray()['threshold'][:self.node_count]
 
     @property
+    def categorical_bitset(self):
+        return self._get_node_ndarray()['categorical_bitset'][:self.node_count]
+
+    @property
     def impurity(self):
         return self._get_node_ndarray()['impurity'][:self.node_count]
 
