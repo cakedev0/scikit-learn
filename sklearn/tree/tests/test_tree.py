@@ -2061,11 +2061,13 @@ def to_categorical(x, nc):
 
 
 def test_different_endianness_pickle():
-    X, y = datasets.make_classification(random_state=0)
-    X[:, 0] = to_categorical(X[:, 0], 5)
+    X, y = datasets.make_classification(random_state=0, n_redundant=0, shuffle=False)
+    X[:, 0] = to_categorical(X[:, 0], 50)
 
     clf = DecisionTreeClassifier(random_state=0, max_depth=3, categorical_features=[0])
     clf.fit(X, y)
+    assert 0 < clf.feature_importances_[0] < 1
+    # ^ ensures some splits are categorical, some are continuous
     score = clf.score(X, y)
 
     def reduce_ndarray(arr):
@@ -2088,10 +2090,12 @@ def test_different_endianness_pickle():
 
 def test_different_endianness_joblib_pickle():
     X, y = datasets.make_classification(random_state=0)
-    X[:, 0] = to_categorical(X[:, 0], 5)
+    X[:, 0] = to_categorical(X[:, 0], 50)
 
     clf = DecisionTreeClassifier(random_state=0, max_depth=3, categorical_features=[0])
     clf.fit(X, y)
+    assert 0 < clf.feature_importances_[0] < 1
+    # ^ ensures some splits are categorical, some are continuous
     score = clf.score(X, y)
 
     class NonNativeEndiannessNumpyPickler(NumpyPickler):
@@ -2872,16 +2876,18 @@ def test_sort_log2_build():
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
 def test_categorical(Tree):
+    rng = np.random.default_rng(3)
     n = 40
-    c = np.random.randint(0, 20, size=n)
+    c = rng.integers(0, 20, size=n)
     y = c % 2
 
-    X = np.random.rand(n, 3)
+    X = rng.random((n, 3))
     X[:, 0] = c
 
-    tree = Tree(categorical_features=[0], max_depth=1)
+    tree = Tree(categorical_features=[0], max_depth=1, random_state=8)
     # assert perfect tree was reached in one split
     assert tree.fit(X, y).score(X, y) == 1
+    assert tree.feature_importances_[0] == 1
 
     # assert it's not the case without using categorical_features
     tree = Tree(max_depth=1)
