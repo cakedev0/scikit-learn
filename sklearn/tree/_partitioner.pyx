@@ -131,7 +131,21 @@ cdef class DensePartitioner:
             return feature_values[self.start] == feature_values[self.end - 1]
 
     cdef void _breiman_sort_categories(self, intp_t nc) noexcept nogil:
-        """ O(n + nc log nc)"""
+        """
+        Order self.sorted_cat by ascending average target value
+        and order self.features_values & self.samples such that
+        - self.features_values is ordered according to the order of sorted_cat
+        - the relation `self.features_values[p] = self.X[f, self.samples[p]]` is
+          preserved
+
+        E.g. sorted_cat is [2 0 1]
+             features_values is [2 2 2 0 0 1 1 1 1]
+
+        This ordering ensures the optimal split will be among the candidate splits
+        evaluated by the splitter (this is called the Brieman shortcut).
+
+        Time complexity: O(n + nc log nc)
+        """
         cdef:
             intp_t* counts = &self.counts[0]
             float64_t* weighted_counts = &self.weighted_counts[0]
@@ -151,9 +165,6 @@ cdef class DensePartitioner:
         for p in range(self.start, self.end):
             c = <int> feature_values[p]
             counts[c] += 1
-            # FIXME: overflow risk + float32 downcast: precision issues?
-            # `sort` only supports float32 for now, that's why means is float32
-            # maybe we can use some templating to extend sort to float64
             if self.sample_weight is not None:
                 w = self.sample_weight[samples[p]]
             means[c] += w * self.y[samples[p], 0]
@@ -182,7 +193,6 @@ cdef class DensePartitioner:
         # while ensuring samples of the same categories are contiguous
         p = self.start
         while p < self.end:
-            # XXX: not sure this works
             c = <int> feature_values[p]
             new_p = offsets[c]
             if new_p > p:
