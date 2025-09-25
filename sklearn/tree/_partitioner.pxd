@@ -87,7 +87,7 @@ cdef class DensePartitioner:
     cdef intp_t[::1] sorted_cat
     cdef intp_t[::1] offsets
 
-    cdef void sort_samples_and_feature_values(
+    cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
     cdef void shift_missing_to_the_left(self) noexcept nogil
@@ -150,7 +150,7 @@ cdef class SparsePartitioner:
     cdef const uint8_t[::1] missing_values_in_feature_mask
     cdef intp_t n_categories
 
-    cdef void sort_samples_and_feature_values(
+    cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
     cdef void shift_missing_to_the_left(self) noexcept nogil

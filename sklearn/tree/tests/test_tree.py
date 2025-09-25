@@ -2053,10 +2053,18 @@ def test_criterion_entropy_same_as_log_loss(Tree, n_classes):
     assert_allclose(tree_log_loss.predict(X), tree_entropy.predict(X))
 
 
+def to_categorical(x, nc):
+    q = np.linspace(0, 1, num=nc + 1)[1:-1]
+    quantiles = np.quantile(x, q)
+    cats = np.searchsorted(quantiles, x)
+    return np.random.permutation(nc)[cats]
+
+
 def test_different_endianness_pickle():
     X, y = datasets.make_classification(random_state=0)
+    X[:, 0] = to_categorical(X[:, 0], 5)
 
-    clf = DecisionTreeClassifier(random_state=0, max_depth=3)
+    clf = DecisionTreeClassifier(random_state=0, max_depth=3, categorical_features=[0])
     clf.fit(X, y)
     score = clf.score(X, y)
 
@@ -2080,8 +2088,9 @@ def test_different_endianness_pickle():
 
 def test_different_endianness_joblib_pickle():
     X, y = datasets.make_classification(random_state=0)
+    X[:, 0] = to_categorical(X[:, 0], 5)
 
-    clf = DecisionTreeClassifier(random_state=0, max_depth=3)
+    clf = DecisionTreeClassifier(random_state=0, max_depth=3, categorical_features=[0])
     clf.fit(X, y)
     score = clf.score(X, y)
 
@@ -2859,3 +2868,21 @@ def test_sort_log2_build():
     ]
     # fmt: on
     assert_array_equal(samples, expected_samples)
+
+
+@pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
+def test_categorical(Tree):
+    n = 40
+    c = np.random.randint(0, 20, size=n)
+    y = c % 2
+
+    X = np.random.rand(n, 3)
+    X[:, 0] = c
+
+    tree = Tree(categorical_features=[0], max_depth=1)
+    # assert perfect tree was reached in one split
+    assert tree.fit(X, y).score(X, y) == 1
+
+    # assert it's not the case without using categorical_features
+    tree = Tree(max_depth=1)
+    assert tree.fit(X, y).score(X, y) < 1

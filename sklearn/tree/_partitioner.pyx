@@ -71,7 +71,7 @@ cdef class DensePartitioner:
         self.end = end
         self.n_missing = 0
 
-    cdef inline void sort_samples_and_feature_values(
+    cdef inline bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil:
         """Simultaneously sort based on the feature_values.
@@ -115,14 +115,18 @@ cdef class DensePartitioner:
             for i in range(self.start, self.end):
                 feature_values[i] = X[samples[i], current_feature]
 
+        self.missing_on_the_left = False
+        self.n_missing = n_missing
         self.n_categories = self.n_categories_in_feature[current_feature]
+        if n_missing == self.end - self.start:
+            return True
         if self.n_categories <= 0:
             # no a categorical feature
             sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
+            return feature_values[self.end - n_missing - 1] <= feature_values[self.start] + FEATURE_THRESHOLD
         else:
             self._breiman_sort_categories(self.n_categories)
-        self.missing_on_the_left = False
-        self.n_missing = n_missing
+            return feature_values[self.start] == feature_values[self.end - 1]
 
     cdef void _breiman_sort_categories(self, intp_t nc) noexcept nogil:
         """ O(n + nc log nc)"""
@@ -249,12 +253,20 @@ cdef class DensePartitioner:
         cdef intp_t end_non_missing = (
             self.end if self.missing_on_the_left
             else self.end - self.n_missing)
+        cdef float32_t c
 
         if p[0] == end_non_missing and not self.missing_on_the_left:
             # skip the missing values up to the end
             # (which will end the for loop in the best split function)
             p[0] = self.end
             p_prev[0] = self.end
+        elif self.n_categories > 0:
+            c = self.feature_values[p[0]]
+            p[0] += 1
+            while p[0] < end_non_missing and self.feature_values[p[0]] == c:
+                p[0] += 1
+
+            # p_prev is unused in this case
         else:
             if self.missing_on_the_left and p[0] == self.start:
                 # skip the missing values up to the first non-missing value:
@@ -270,11 +282,11 @@ cdef class DensePartitioner:
     cdef inline SplitValue pos_to_threshold(
         self, intp_t p_prev, intp_t p
     ) noexcept nogil:
+        cdef SplitValue split
         cdef intp_t end_non_missing = (
             self.end if self.missing_on_the_left
             else self.end - self.n_missing)
 
-        cdef SplitValue split
         if self.n_categories > 0:
             split.cat_split = self._split_pos_to_bitset(p, self.n_categories)
             return split
@@ -407,7 +419,7 @@ cdef class SparsePartitioner:
         self.is_samples_sorted = 0
         self.n_missing = 0
 
-    cdef inline void sort_samples_and_feature_values(
+    cdef inline bint sort_samples_and_feature_values(
         self,
         intp_t current_feature
     ) noexcept nogil:
@@ -445,6 +457,8 @@ cdef class SparsePartitioner:
         # XXX: When sparse supports missing values, this should be set to the
         # number of missing values for current_feature
         self.n_missing = 0
+
+        return feature_values[self.end - 1] <= feature_values[self.start] + FEATURE_THRESHOLD
 
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         pass  # missing values not support for sparse
@@ -740,7 +754,6 @@ cdef inline void extract_nnz_binary_search(const int32_t[::1] X_indices,
           n_samples * log(n_indices)).
     """
     cdef intp_t n_samples
-    # printf("Is sorted: %d\n", is_samples_sorted[0])
 
     if not is_samples_sorted[0]:
         n_samples = end - start

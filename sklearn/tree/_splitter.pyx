@@ -281,7 +281,6 @@ cdef inline int node_split_best(
     # Find the best split
     cdef intp_t start = splitter.start
     cdef intp_t end = splitter.end
-    cdef intp_t end_non_missing
     cdef intp_t n_missing = 0
     cdef bint has_missing = 0
     cdef intp_t n_searches
@@ -292,7 +291,6 @@ cdef inline int node_split_best(
     cdef intp_t[::1] constant_features = splitter.constant_features
     cdef intp_t n_features = splitter.n_features
 
-    cdef float32_t[::1] feature_values = splitter.feature_values
     cdef intp_t max_features = splitter.max_features
     cdef intp_t min_samples_leaf = splitter.min_samples_leaf
     cdef float64_t min_weight_leaf = splitter.min_weight_leaf
@@ -308,6 +306,7 @@ cdef inline int node_split_best(
 
     cdef intp_t f_i = n_features
     cdef intp_t f_j
+    cdef bint is_constant
     cdef intp_t p
     cdef intp_t p_prev
 
@@ -367,16 +366,10 @@ cdef inline int node_split_best(
         f_j += n_found_constants
         # f_j in the interval [n_total_constants, f_i[
         current_split.feature = features[f_j]
-        partitioner.sort_samples_and_feature_values(current_split.feature)
+        is_constant = partitioner.sort_samples_and_feature_values(current_split.feature)
         n_missing = partitioner.n_missing
-        end_non_missing = end - n_missing
 
-        if (
-            # All values for this feature are missing, or
-            end_non_missing == start or
-            # This feature is considered constant (max - min <= FEATURE_THRESHOLD)
-            feature_values[end_non_missing - 1] <= feature_values[start] + FEATURE_THRESHOLD
-        ):
+        if is_constant:
             # We consider this feature constant in this case.
             # Since finding a split among constant feature is not valuable,
             # we do not consider this feature for splitting.
