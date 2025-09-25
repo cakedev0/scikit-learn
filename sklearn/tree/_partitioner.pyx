@@ -135,7 +135,7 @@ cdef class DensePartitioner:
         Order self.sorted_cat by ascending average target value
         and order self.features_values & self.samples such that
         - self.features_values is ordered according to the order of sorted_cat
-        - the relation `self.features_values[p] = self.X[f, self.samples[p]]` is
+        - the relation `self.features_values[p] = self.X[self.samples[p], f]` is
           preserved
 
         E.g. sorted_cat is [2 0 1]
@@ -171,16 +171,15 @@ cdef class DensePartitioner:
             self.weighted_counts[c] += w
 
         for c in range(nc):
-            # TODO: weighted counts
             if weighted_counts[c] > 0:
                 means[c] /= weighted_counts[c]
 
-        # sorted_cat[i] = i-th categories sorted my ascending means
+        # sorted_cat[i] = i-th categories sorted by ascending means
         for c in range(nc):
             sorted_cat[c] = c
         sort(means, sorted_cat, nc)
 
-        # ) build offsets such that:
+        # build offsets such that:
         # offsets[c] = sum( counts[x] for all x s.t. rank(x) <= rank(c) ) - 1
         cdef intp_t offset = 0
         for r in range(nc):
@@ -188,8 +187,8 @@ cdef class DensePartitioner:
             offset += counts[c]
             offsets[c] = offset - 1
 
-        # sort feature_values & samples such that they are ordered by
-        # the mean of the category
+        # sort feature_values & samples in-place such that
+        # they are ordered by the mean of the category
         # while ensuring samples of the same categories are contiguous
         p = self.start
         while p < self.end:
@@ -197,7 +196,7 @@ cdef class DensePartitioner:
             new_p = offsets[c]
             if new_p > p:
                 swap(feature_values, samples, p, new_p)
-                # ^ preserves invariant: feature[p] = X[samples[p], f]
+                # swap preserves invariant: feature[p] = X[samples[p], f]
                 offsets[c] -= 1
             else:
                 p += 1
