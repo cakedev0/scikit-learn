@@ -960,7 +960,7 @@ cdef class Tree:
                 node.categorical_bitset = cat_split
             else:
                 node.threshold = threshold
-                node.categorical_bitset = cat_split
+                node.categorical_bitset = 0
             node.missing_go_to_left = missing_go_to_left
 
         self.node_count += 1

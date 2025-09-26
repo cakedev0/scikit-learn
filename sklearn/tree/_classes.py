@@ -127,7 +127,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         "monotonic_cst": ["array-like", None],
         "categorical_features": [
             "array-like",
-            StrOptions({"from_dtype"}),
             None,
         ],
     }
@@ -563,6 +562,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             f"Values for categorical features should be integers in [0, {MAX_NC - 1}]."
         )
         for idx in np.where(is_categorical)[0]:
+            if np.isnan(X[:, idx]).any():
+                raise ValueError(
+                    "Missing values are not supported in categorical features"
+                )
             if not np.allclose(X[:, idx].astype(np.intp), X[:, idx]):
                 raise ValueError(f"{base_msg} Found non-integer values.")
             if X[:, idx].min() < 0:
@@ -572,7 +575,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 raise ValueError(f"{base_msg} Found {X_idx_max}.")
             n_categories_in_feature[idx] = X_idx_max + 1
             if monotonic_cst is not None and monotonic_cst[idx] != 0:
-                raise ValueError("Categorical features are incompatible with ")
+                raise ValueError(
+                    "A categorical feature cannot have a non-null monotonic"
+                    " constraint. "
+                )
 
         return is_categorical, n_categories_in_feature
 

@@ -121,7 +121,7 @@ cdef class DensePartitioner:
         if n_missing == self.end - self.start:
             return True
         if self.n_categories <= 0:
-            # no a categorical feature
+            # not a categorical feature
             sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
             if n_missing > 0:
                 return False
