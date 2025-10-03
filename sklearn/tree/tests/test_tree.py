@@ -20,7 +20,12 @@ from sklearn import clone, datasets, tree
 from sklearn.dummy import DummyRegressor
 from sklearn.exceptions import NotFittedError
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, mean_poisson_deviance, mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    mean_pinball_loss,
+    mean_poisson_deviance,
+    mean_squared_error,
+)
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.random_projection import _sparse_random_matrix
@@ -36,7 +41,7 @@ from sklearn.tree._classes import (
     DENSE_SPLITTERS,
     SPARSE_SPLITTERS,
 )
-from sklearn.tree._criterion import _py_precompute_absolute_errors
+from sklearn.tree._criterion import _py_precompute_pinball_losses
 from sklearn.tree._partitioner import _py_sort
 from sklearn.tree._tree import (
     NODE_DTYPE,
@@ -1855,13 +1860,15 @@ def test_criterion_copy():
             assert n_outputs == n_outputs_
             assert_array_equal(n_classes, n_classes_)
 
-        for _, typename in CRITERIA_REG.items():
-            criteria = typename(n_outputs, n_samples)
+        for name, typename in CRITERIA_REG.items():
+            args = (n_outputs, n_samples)
+            if name == "absolute_error" or name == "pinball":
+                args = (*args, 0.5)
+            criteria = typename(*args)
             result = copy_func(criteria).__reduce__()
-            typename_, (n_outputs_, n_samples_), _ = result
+            typename_, args_, _ = result
             assert typename == typename_
-            assert n_outputs == n_outputs_
-            assert n_samples == n_samples_
+            assert args == args_
 
 
 @pytest.mark.parametrize("sparse_container", [None] + CSC_CONTAINERS)
@@ -2918,7 +2925,8 @@ def test_sort_log2_build():
     assert_array_equal(samples, expected_samples)
 
 
-def test_absolute_errors_precomputation_function(global_random_seed):
+@pytest.mark.parametrize("q", [0.5, 0.2, 0.9, 0.4, 0.75])
+def test_pinball_loss_precomputation_function(q, global_random_seed):
     """
     Test the main bit of logic of the MAE(RegressionCriterion) class
     (used by DecisionTreeRegressor(criterion="absolute_error")).
@@ -2928,33 +2936,39 @@ def test_absolute_errors_precomputation_function(global_random_seed):
     part of the computation, in case of major refactor of the MAE class,
     it can be safely removed.
     """
+    global_random_seed = np.random.choice(10**7)
 
-    def compute_prefix_abs_errors_naive(y, w):
+    def compute_prefix_losses_naive(y, w):
+        """
+        Computes the pinball loss for all (y[:i], w[:i])
+        Naive: O(n^2 log n)
+        """
         y = y.ravel().copy()
-        medians = [
-            _weighted_percentile(y[:i], w[:i], 50, average=True)
+        quantiles = [
+            _weighted_percentile(y[:i], w[:i], q * 100, average=True)
             for i in range(1, y.size + 1)
         ]
-        errors = [
-            (np.abs(y[:i] - m) * w[:i]).sum()
-            for i, m in zip(range(1, y.size + 1), medians)
+        losses = [
+            mean_pinball_loss(y[:i], np.full(i, quantile), sample_weight=w[:i], alpha=q)
+            * w[:i].sum()
+            for i, quantile in zip(range(1, y.size + 1), quantiles)
         ]
-        return np.array(errors), np.array(medians)
+        return np.array(losses), np.array(quantiles)
 
     def assert_same_results(y, w, indices, reverse=False):
         args = (n - 1, -1) if reverse else (0, n)
-        abs_errors, medians = _py_precompute_absolute_errors(y, w, indices, *args)
+        losses, quantiles = _py_precompute_pinball_losses(y, w, indices, *args, q=q)
         y_sorted = y[indices]
         w_sorted = w[indices]
         if reverse:
             y_sorted = y_sorted[::-1]
             w_sorted = w_sorted[::-1]
-        abs_errors_, medians_ = compute_prefix_abs_errors_naive(y_sorted, w_sorted)
+        losses_, quantiles_ = compute_prefix_losses_naive(y_sorted, w_sorted)
         if reverse:
-            abs_errors_ = abs_errors_[::-1]
-            medians_ = medians_[::-1]
-        assert_allclose(abs_errors, abs_errors_, atol=1e-12)
-        assert_allclose(medians, medians_, atol=1e-12)
+            losses_ = losses_[::-1]
+            quantiles_ = quantiles_[::-1]
+        assert_allclose(losses, losses_, atol=1e-12)
+        assert_allclose(quantiles, quantiles_, atol=1e-12)
 
     rng = np.random.default_rng(global_random_seed)
 
