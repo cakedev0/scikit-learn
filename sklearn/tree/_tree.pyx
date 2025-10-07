@@ -1121,6 +1121,7 @@ cdef class Tree:
         # Extract input
         cdef const float32_t[:, :] X_ndarray = X
         cdef intp_t n_samples = X.shape[0]
+        cdef float32_t X_i_node_feature
 
         # Initialize output
         cdef intp_t[:] indptr = np.zeros(n_samples + 1, dtype=np.intp)
@@ -1142,14 +1143,18 @@ cdef class Tree:
                     # ... and node.right_child != _TREE_LEAF:
                     indices[indptr[i + 1]] = <intp_t>(node - self.nodes)
                     indptr[i + 1] += 1
-
-                    # TODO: handle missing values?
-                    if self.is_categorical[node.feature]:
+                    X_i_node_feature = X_ndarray[i, node.feature]
+                    if isnan(X_i_node_feature):
+                        if node.missing_go_to_left:
+                            node = &self.nodes[node.left_child]
+                        else:
+                            node = &self.nodes[node.right_child]
+                    elif self.is_categorical[node.feature]:
                         if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
-                    elif X_ndarray[i, node.feature] <= node.threshold:
+                    elif X_i_node_feature <= node.threshold:
                         node = &self.nodes[node.left_child]
                     else:
                         node = &self.nodes[node.right_child]

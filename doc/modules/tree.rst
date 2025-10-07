@@ -567,9 +567,9 @@ Mean Poisson deviance:
 
 Setting `criterion="poisson"` might be a good choice if your target is a count
 or a frequency (count per some unit). In any case, :math:`y >= 0` is a
-necessary condition to use this criterion. Note that it fits much slower than
-the MSE criterion. For performance reasons the actual implementation minimizes
-the half mean poisson deviance, i.e. the mean poisson deviance divided by 2.
+necessary condition to use this criterion. For performance reasons the actual
+implementation minimizes the half mean poisson deviance, i.e. the mean poisson
+deviance divided by 2.
 
 Mean Absolute Error:
 
@@ -593,10 +593,6 @@ the splits are determined in a greedy fashion.
 support for missing values for `splitter='random'`, where the splits
 are determined randomly. For more details on how the splitter differs on
 non-missing values, see the :ref:`Forest section <forest>`.
-
-The criterion supported when there are missing values are
-`'gini'`, `'entropy'`, or `'log_loss'`, for classification or
-`'squared_error'`, `'friedman_mse'`, or `'poisson'` for regression.
 
 First we will describe how :class:`DecisionTreeClassifier`, :class:`DecisionTreeRegressor`
 handle missing-values in the data.
