@@ -200,9 +200,9 @@ def bitset_to_set(v: np.uint64):
     return [c for c in range(64) if v & (1 << c)]
 
 
-@pytest.mark.parametrize("sparse", ["x"])
+@pytest.mark.parametrize("sparse", ["x", "sparse"])
 @pytest.mark.parametrize("categorical", ["x", "categorical"])
-@pytest.mark.parametrize("missing_values", ["x"])
+@pytest.mark.parametrize("missing_values", ["x", "missing_values"])
 @pytest.mark.parametrize(
     "criterion",
     ["gini", "log_loss", "squared_error", "friedman_mse", "poisson"],
