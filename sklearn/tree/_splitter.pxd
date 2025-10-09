@@ -8,6 +8,7 @@ from sklearn.utils._typedefs cimport (
 )
 from sklearn.tree._criterion cimport Criterion
 from sklearn.tree._tree cimport ParentInfo
+from sklearn.tree._utils cimport SplitValue
 
 
 cdef struct SplitRecord:
@@ -16,7 +17,7 @@ cdef struct SplitRecord:
     intp_t pos             # Split samples array at the given position,
     #                      # i.e. count of samples below threshold for feature.
     #                      # pos is >= end if the node is a leaf.
-    float64_t threshold       # Threshold to split at.
+    SplitValue value       # Threshold/Bitset to split at.
     float64_t improvement     # Impurity improvement given parent node.
     float64_t impurity_left   # Impurity of the left split.
     float64_t impurity_right  # Impurity of the right split.
@@ -84,6 +85,7 @@ cdef class Splitter:
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[::1] n_categories_in_feature,
     ) except -1
 
     cdef int node_reset(
