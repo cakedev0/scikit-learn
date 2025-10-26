@@ -274,6 +274,7 @@ def set_huber_delta(loss, y_true, raw_prediction, sample_weight=None):
     """Calculate and set self.closs.delta based on self.quantile."""
     abserr = np.abs(y_true - raw_prediction.squeeze())
     # sample_weight is always a ndarray, never None.
+    assert (sample_weight == 1.).all()
     print((np.sort(abserr) * 10000).round(4))
     delta = np.quantile(
         abserr, loss.quantile, axis=0, weights=sample_weight, method="inverted_cdf"
