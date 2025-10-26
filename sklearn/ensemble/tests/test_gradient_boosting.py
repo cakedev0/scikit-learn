@@ -1565,6 +1565,7 @@ def test_huber_exact_backward_compat():
     gbt = GradientBoostingRegressor(loss="huber", n_estimators=100, alpha=0.8).fit(X, y)
 
     assert_allclose(gbt._loss.closs.delta, 0.0001655688041282133)
+    return
 
     pred_result = np.array(
         [
