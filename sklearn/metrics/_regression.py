@@ -23,10 +23,10 @@ from sklearn.utils._array_api import (
     get_namespace,
     get_namespace_and_device,
     size,
+    xpx,
 )
 from sklearn.utils._array_api import _xlogy as xlogy
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
-from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
     _check_sample_weight,
     _num_samples,
@@ -923,8 +923,12 @@ def median_absolute_error(
     if sample_weight is None:
         output_errors = _median(xp.abs(y_pred - y_true), axis=0)
     else:
-        output_errors = _weighted_percentile(
-            xp.abs(y_pred - y_true), sample_weight=sample_weight, average=True
+        output_errors = xpx.quantile(
+            xp.abs(y_pred - y_true),
+            0.5,
+            axis=0,
+            weights=sample_weight,
+            method="averaged_inverted_cdf",
         )
     if isinstance(multioutput, str):
         if multioutput == "raw_values":
@@ -1820,17 +1824,11 @@ def d2_pinball_score(
         multioutput="raw_values",
     )
 
-    if sample_weight is None:
-        y_quantile = np.tile(
-            np.percentile(y_true, q=alpha * 100, axis=0), (len(y_true), 1)
-        )
-    else:
-        y_quantile = np.tile(
-            _weighted_percentile(
-                y_true, sample_weight=sample_weight, percentile_rank=alpha * 100
-            ),
-            (len(y_true), 1),
-        )
+    method = "linear" if sample_weight is None else "averaged_inverted_cdf"
+    y_quantile = np.tile(
+        xpx.quantile(y_true, alpha, axis=0, weights=sample_weight, method=method),
+        (len(y_true), 1),
+    )
 
     denominator = mean_pinball_loss(
         y_true,

@@ -7,13 +7,13 @@ import scipy.sparse as sp
 from sklearn.base import clone
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.exceptions import NotFittedError
+from sklearn.externals import array_api_extra as xpx
 from sklearn.utils._testing import (
     assert_almost_equal,
     assert_array_almost_equal,
     assert_array_equal,
 )
 from sklearn.utils.fixes import CSC_CONTAINERS
-from sklearn.utils.stats import _weighted_percentile
 
 
 def _check_predict_proba(clf, X, y):
@@ -631,11 +631,12 @@ def test_dummy_regressor_sample_weight(global_random_seed, n_samples=10):
     est = DummyRegressor(strategy="mean").fit(X, y, sample_weight)
     assert est.constant_ == np.average(y, weights=sample_weight)
 
+    method = "averaged_inverted_cdf"
     est = DummyRegressor(strategy="median").fit(X, y, sample_weight)
-    assert est.constant_ == _weighted_percentile(y, sample_weight, 50.0)
+    assert est.constant_ == xpx.quantile(y, 0.5, weights=sample_weight, method=method)
 
     est = DummyRegressor(strategy="quantile", quantile=0.95).fit(X, y, sample_weight)
-    assert est.constant_ == _weighted_percentile(y, sample_weight, 95.0)
+    assert est.constant_ == xpx.quantile(y, 0.95, weights=sample_weight, method=method)
 
 
 def test_dummy_regressor_on_3D_array():

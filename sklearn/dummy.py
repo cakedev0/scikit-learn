@@ -16,11 +16,11 @@ from sklearn.base import (
     RegressorMixin,
     _fit_context,
 )
+from sklearn.externals import array_api_extra as xpx
 from sklearn.utils import check_random_state
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.multiclass import class_distribution
 from sklearn.utils.random import _random_choice_csc
-from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
     _check_sample_weight,
     _num_samples,
@@ -581,10 +581,13 @@ class DummyRegressor(MultiOutputMixin, RegressorMixin, BaseEstimator):
             if sample_weight is None:
                 self.constant_ = np.median(y, axis=0)
             else:
-                self.constant_ = [
-                    _weighted_percentile(y[:, k], sample_weight, percentile_rank=50.0)
-                    for k in range(self.n_outputs_)
-                ]
+                self.constant_ = xpx.quantile(
+                    y,
+                    0.5,
+                    axis=0,
+                    weights=sample_weight,
+                    method="averaged_inverted_cdf",
+                )
 
         elif self.strategy == "quantile":
             if self.quantile is None:
@@ -592,16 +595,10 @@ class DummyRegressor(MultiOutputMixin, RegressorMixin, BaseEstimator):
                     "When using `strategy='quantile', you have to specify the desired "
                     "quantile in the range [0, 1]."
                 )
-            percentile_rank = self.quantile * 100.0
-            if sample_weight is None:
-                self.constant_ = np.percentile(y, axis=0, q=percentile_rank)
-            else:
-                self.constant_ = [
-                    _weighted_percentile(
-                        y[:, k], sample_weight, percentile_rank=percentile_rank
-                    )
-                    for k in range(self.n_outputs_)
-                ]
+            method = "linear" if sample_weight is None else "averaged_inverted_cdf"
+            self.constant_ = xpx.quantile(
+                y, float(self.quantile), axis=0, weights=sample_weight, method=method
+            )
 
         elif self.strategy == "constant":
             if self.constant is None:

@@ -45,8 +45,8 @@ from sklearn._loss.link import (
     LogLink,
     MultinomialLogit,
 )
+from sklearn.externals import array_api_extra as xpx
 from sklearn.utils import check_scalar
-from sklearn.utils.stats import _weighted_percentile
 
 
 # Note: The shape of raw_prediction for multiclass classifications are
@@ -588,7 +588,13 @@ class AbsoluteError(BaseLoss):
         if sample_weight is None:
             return np.median(y_true, axis=0)
         else:
-            return _weighted_percentile(y_true, sample_weight, 50)
+            return xpx.quantile(
+                y_true,
+                0.5,
+                axis=0,
+                weights=sample_weight,
+                method="averaged_inverted_cdf",
+            )
 
 
 class PinballLoss(BaseLoss):
@@ -646,12 +652,10 @@ class PinballLoss(BaseLoss):
         This is the weighted median of the target, i.e. over the samples
         axis=0.
         """
-        if sample_weight is None:
-            return np.percentile(y_true, 100 * self.closs.quantile, axis=0)
-        else:
-            return _weighted_percentile(
-                y_true, sample_weight, 100 * self.closs.quantile
-            )
+        method = "linear" if sample_weight is None else "averaged_inverted_cdf"
+        return xpx.quantile(
+            y_true, self.closs.quantile, axis=0, method=method, weights=sample_weight
+        )
 
 
 class HuberLoss(BaseLoss):
@@ -718,10 +722,15 @@ class HuberLoss(BaseLoss):
         # not to the residual y_true - raw_prediction. An estimator like
         # HistGradientBoostingRegressor might then call it on the residual, e.g.
         # fit_intercept_only(y_true - raw_prediction).
-        if sample_weight is None:
-            median = np.percentile(y_true, 50, axis=0)
-        else:
-            median = _weighted_percentile(y_true, sample_weight, 50)
+
+        method = "linear" if sample_weight is None else "inverted_cdf"
+        # XXX: it would be better to use method "averaged_inverted_cdf"
+        # for the weighted case
+        # (otherwise passing 1s weights is not equivalent to no weights)
+        # but this would break this test:
+        # ensemble/tests/test_gradient_boosting.py::test_huber_exact_backward_compat
+
+        median = xpx.quantile(y_true, 0.5, axis=0, method=method, weights=sample_weight)
         diff = y_true - median
         term = np.sign(diff) * np.minimum(self.closs.delta, np.abs(diff))
         return median + np.average(term, weights=sample_weight)
