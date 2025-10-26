@@ -47,6 +47,7 @@ from sklearn.ensemble._gradient_boosting import (
     predict_stages,
 )
 from sklearn.exceptions import NotFittedError
+from sklearn.externals import array_api_extra as xpx
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeRegressor
@@ -274,12 +275,11 @@ def set_huber_delta(loss, y_true, raw_prediction, sample_weight=None):
     """Calculate and set self.closs.delta based on self.quantile."""
     abserr = np.abs(y_true - raw_prediction.squeeze())
     # sample_weight is always a ndarray, never None.
-    assert (sample_weight == 1.).all()
-    print((np.sort(abserr) * 10000).round(4))
-    delta = np.quantile(
+    delta = xpx.quantile(
         abserr, loss.quantile, axis=0, weights=sample_weight, method="inverted_cdf"
     )
-    print(delta)
+    # XXX: it would probably be better to use method "averaged_inverted_cdf"
+    # see explanations of why we can't in HuberLoss.fit_intercept_only
     loss.closs.delta = float(delta)
 
 

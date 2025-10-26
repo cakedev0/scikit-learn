@@ -722,7 +722,14 @@ class HuberLoss(BaseLoss):
         # not to the residual y_true - raw_prediction. An estimator like
         # HistGradientBoostingRegressor might then call it on the residual, e.g.
         # fit_intercept_only(y_true - raw_prediction).
-        method = "linear" if sample_weight is None else "averaged_inverted_cdf"
+
+        method = "linear" if sample_weight is None else "inverted_cdf"
+        # XXX: it would be better to use method "averaged_inverted_cdf"
+        # for the weighted case
+        # (otherwise passing 1s weights is not equivalent to no weights)
+        # but this would break this test:
+        # ensemble/tests/test_gradient_boosting.py::test_huber_exact_backward_compat
+
         median = xpx.quantile(y_true, 0.5, axis=0, method=method, weights=sample_weight)
         diff = y_true - median
         term = np.sign(diff) * np.minimum(self.closs.delta, np.abs(diff))
