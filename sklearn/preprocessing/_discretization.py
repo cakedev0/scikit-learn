@@ -8,10 +8,10 @@ from numbers import Integral
 import numpy as np
 
 from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
+from sklearn.externals import array_api_extra as xpx
 from sklearn.preprocessing._encoders import OneHotEncoder
 from sklearn.utils import resample
 from sklearn.utils._param_validation import Interval, Options, StrOptions
-from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
     _check_feature_names_in,
     _check_sample_weight,
@@ -350,27 +350,13 @@ class KBinsDiscretizer(TransformerMixin, BaseEstimator):
                 bin_edges[jj] = np.linspace(col_min, col_max, n_bins[jj] + 1)
 
             elif self.strategy == "quantile":
-                percentile_levels = np.linspace(0, 100, n_bins[jj] + 1)
-
-                # method="linear" is the implicit default for any numpy
-                # version. So we keep it version independent in that case by
-                # using an empty param dict.
-                percentile_kwargs = {}
-                if quantile_method != "linear" and sample_weight is None:
-                    percentile_kwargs["method"] = quantile_method
-
-                if sample_weight is None:
-                    bin_edges[jj] = np.asarray(
-                        np.percentile(column, percentile_levels, **percentile_kwargs),
-                        dtype=np.float64,
-                    )
-                else:
-                    average = (
-                        True if quantile_method == "averaged_inverted_cdf" else False
-                    )
-                    bin_edges[jj] = _weighted_percentile(
-                        column, sample_weight, percentile_levels, average=average
-                    )
+                quantile_levels = np.linspace(0, 1, n_bins[jj] + 1)
+                bin_edges[jj] = xpx.quantile(
+                    column,
+                    quantile_levels,
+                    weights=sample_weight,
+                    method=quantile_method,
+                )
             elif self.strategy == "kmeans":
                 from sklearn.cluster import KMeans  # fixes import loops
 

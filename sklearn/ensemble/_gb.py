@@ -54,7 +54,6 @@ from sklearn.tree._tree import DOUBLE, DTYPE, TREE_LEAF
 from sklearn.utils import check_array, check_random_state, column_or_1d
 from sklearn.utils._param_validation import HasMethods, Interval, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
-from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
     _check_sample_weight,
     check_is_fitted,
@@ -275,7 +274,10 @@ def set_huber_delta(loss, y_true, raw_prediction, sample_weight=None):
     """Calculate and set self.closs.delta based on self.quantile."""
     abserr = np.abs(y_true - raw_prediction.squeeze())
     # sample_weight is always a ndarray, never None.
-    delta = _weighted_percentile(abserr, sample_weight, 100 * loss.quantile)
+    print(abserr, sample_weight)
+    delta = np.quantile(
+        abserr, loss.quantile, axis=0, weights=sample_weight, method="inverted_cdf"
+    )
     loss.closs.delta = float(delta)
 
 

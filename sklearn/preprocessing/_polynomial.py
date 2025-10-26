@@ -16,6 +16,7 @@ from scipy.interpolate import BSpline
 from scipy.special import comb
 
 from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
+from sklearn.externals import array_api_extra as xpx
 from sklearn.preprocessing._csr_polynomial_expansion import (
     _calc_expanded_nnz,
     _calc_total_nnz,
@@ -30,7 +31,6 @@ from sklearn.utils._array_api import (
 from sklearn.utils._mask import _get_mask
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.fixes import parse_version, sp_version
-from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
     FLOAT_DTYPES,
     _check_feature_names_in,
@@ -784,14 +784,18 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
             Knot positions (points) of base interval.
         """
         if knots == "quantile":
-            percentile_ranks = 100 * np.linspace(
-                start=0, stop=1, num=n_knots, dtype=np.float64
-            )
+            quantile_ranks = np.linspace(start=0, stop=1, num=n_knots, dtype=np.float64)
 
             if sample_weight is None:
-                knots = np.nanpercentile(X, percentile_ranks, axis=0)
+                knots = np.nanquantile(X, quantile_ranks, axis=0)
             else:
-                knots = _weighted_percentile(X, sample_weight, percentile_ranks).T
+                knots = xpx.quantile(
+                    X,
+                    quantile_ranks,
+                    axis=0,
+                    weights=sample_weight,
+                    method="averaged_inverted_cdf",
+                )
 
         else:
             # knots == 'uniform':
