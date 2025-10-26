@@ -4,7 +4,8 @@ from collections.abc import Sequence
 from types import ModuleType
 from typing import Literal
 
-from ._lib import _funcs
+from ._lib import _funcs, _quantile
+from ._lib._backends import NUMPY_VERSION
 from ._lib._utils._compat import (
     array_namespace,
     is_cupy_namespace,
@@ -15,10 +16,235 @@ from ._lib._utils._compat import (
     is_torch_namespace,
 )
 from ._lib._utils._compat import device as get_device
-from ._lib._utils._helpers import asarrays
+from ._lib._utils._helpers import asarrays, eager_shape
 from ._lib._utils._typing import Array, DType
 
-__all__ = ["isclose", "nan_to_num", "one_hot", "pad"]
+__all__ = [
+    "cov",
+    "expand_dims",
+    "isclose",
+    "nan_to_num",
+    "one_hot",
+    "pad",
+    "sinc",
+]
+
+
+def cov(m: Array, /, *, xp: ModuleType | None = None) -> Array:
+    """
+    Estimate a covariance matrix.
+
+    Covariance indicates the level to which two variables vary together.
+    If we examine N-dimensional samples, :math:`X = [x_1, x_2, ... x_N]^T`,
+    then the covariance matrix element :math:`C_{ij}` is the covariance of
+    :math:`x_i` and :math:`x_j`. The element :math:`C_{ii}` is the variance
+    of :math:`x_i`.
+
+    This provides a subset of the functionality of ``numpy.cov``.
+
+    Parameters
+    ----------
+    m : array
+        A 1-D or 2-D array containing multiple variables and observations.
+        Each row of `m` represents a variable, and each column a single
+        observation of all those variables.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `m`. Default: infer.
+
+    Returns
+    -------
+    array
+        The covariance matrix of the variables.
+
+    Examples
+    --------
+    >>> import array_api_strict as xp
+    >>> import array_api_extra as xpx
+
+    Consider two variables, :math:`x_0` and :math:`x_1`, which
+    correlate perfectly, but in opposite directions:
+
+    >>> x = xp.asarray([[0, 2], [1, 1], [2, 0]]).T
+    >>> x
+    Array([[0, 1, 2],
+           [2, 1, 0]], dtype=array_api_strict.int64)
+
+    Note how :math:`x_0` increases while :math:`x_1` decreases. The covariance
+    matrix shows this clearly:
+
+    >>> xpx.cov(x, xp=xp)
+    Array([[ 1., -1.],
+           [-1.,  1.]], dtype=array_api_strict.float64)
+
+    Note that element :math:`C_{0,1}`, which shows the correlation between
+    :math:`x_0` and :math:`x_1`, is negative.
+
+    Further, note how `x` and `y` are combined:
+
+    >>> x = xp.asarray([-2.1, -1,  4.3])
+    >>> y = xp.asarray([3,  1.1,  0.12])
+    >>> X = xp.stack((x, y), axis=0)
+    >>> xpx.cov(X, xp=xp)
+    Array([[11.71      , -4.286     ],
+           [-4.286     ,  2.14413333]], dtype=array_api_strict.float64)
+
+    >>> xpx.cov(x, xp=xp)
+    Array(11.71, dtype=array_api_strict.float64)
+
+    >>> xpx.cov(y, xp=xp)
+    Array(2.14413333, dtype=array_api_strict.float64)
+    """
+
+    if xp is None:
+        xp = array_namespace(m)
+
+    if (
+        is_numpy_namespace(xp)
+        or is_cupy_namespace(xp)
+        or is_torch_namespace(xp)
+        or is_dask_namespace(xp)
+        or is_jax_namespace(xp)
+    ):
+        return xp.cov(m)
+
+    return _funcs.cov(m, xp=xp)
+
+
+def expand_dims(
+    a: Array, /, *, axis: int | tuple[int, ...] = (0,), xp: ModuleType | None = None
+) -> Array:
+    """
+    Expand the shape of an array.
+
+    Insert (a) new axis/axes that will appear at the position(s) specified by
+    `axis` in the expanded array shape.
+
+    This is ``xp.expand_dims`` for `axis` an int *or a tuple of ints*.
+    Roughly equivalent to ``numpy.expand_dims`` for NumPy arrays.
+
+    Parameters
+    ----------
+    a : array
+        Array to have its shape expanded.
+    axis : int or tuple of ints, optional
+        Position(s) in the expanded axes where the new axis (or axes) is/are placed.
+        If multiple positions are provided, they should be unique (note that a position
+        given by a positive index could also be referred to by a negative index -
+        that will also result in an error).
+        Default: ``(0,)``.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `a`. Default: infer.
+
+    Returns
+    -------
+    array
+        `a` with an expanded shape.
+
+    Examples
+    --------
+    >>> import array_api_strict as xp
+    >>> import array_api_extra as xpx
+    >>> x = xp.asarray([1, 2])
+    >>> x.shape
+    (2,)
+
+    The following is equivalent to ``x[xp.newaxis, :]`` or ``x[xp.newaxis]``:
+
+    >>> y = xpx.expand_dims(x, axis=0, xp=xp)
+    >>> y
+    Array([[1, 2]], dtype=array_api_strict.int64)
+    >>> y.shape
+    (1, 2)
+
+    The following is equivalent to ``x[:, xp.newaxis]``:
+
+    >>> y = xpx.expand_dims(x, axis=1, xp=xp)
+    >>> y
+    Array([[1],
+           [2]], dtype=array_api_strict.int64)
+    >>> y.shape
+    (2, 1)
+
+    ``axis`` may also be a tuple:
+
+    >>> y = xpx.expand_dims(x, axis=(0, 1), xp=xp)
+    >>> y
+    Array([[[1, 2]]], dtype=array_api_strict.int64)
+
+    >>> y = xpx.expand_dims(x, axis=(2, 0), xp=xp)
+    >>> y
+    Array([[[1],
+            [2]]], dtype=array_api_strict.int64)
+    """
+    if xp is None:
+        xp = array_namespace(a)
+
+    if not isinstance(axis, tuple):
+        axis = (axis,)
+    ndim = a.ndim + len(axis)
+    if axis != () and (min(axis) < -ndim or max(axis) >= ndim):
+        err_msg = (
+            f"a provided axis position is out of bounds for array of dimension {a.ndim}"
+        )
+        raise IndexError(err_msg)
+    axis = tuple(dim % ndim for dim in axis)
+    if len(set(axis)) != len(axis):
+        err_msg = "Duplicate dimensions specified in `axis`."
+        raise ValueError(err_msg)
+
+    if is_numpy_namespace(xp) or is_dask_namespace(xp) or is_jax_namespace(xp):
+        return xp.expand_dims(a, axis=axis)
+
+    return _funcs.expand_dims(a, axis=axis, xp=xp)
+
+
+def atleast_nd(x: Array, /, *, ndim: int, xp: ModuleType | None = None) -> Array:
+    """
+    Recursively expand the dimension of an array to at least `ndim`.
+
+    Parameters
+    ----------
+    x : array
+        Input array.
+    ndim : int
+        The minimum number of dimensions for the result.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `x`. Default: infer.
+
+    Returns
+    -------
+    array
+        An array with ``res.ndim`` >= `ndim`.
+        If ``x.ndim`` >= `ndim`, `x` is returned.
+        If ``x.ndim`` < `ndim`, `x` is expanded by prepending new axes
+        until ``res.ndim`` equals `ndim`.
+
+    Examples
+    --------
+    >>> import array_api_strict as xp
+    >>> import array_api_extra as xpx
+    >>> x = xp.asarray([1])
+    >>> xpx.atleast_nd(x, ndim=3, xp=xp)
+    Array([[[1]]], dtype=array_api_strict.int64)
+
+    >>> x = xp.asarray([[[1, 2],
+    ...                  [3, 4]]])
+    >>> xpx.atleast_nd(x, ndim=1, xp=xp) is x
+    True
+    """
+    if xp is None:
+        xp = array_namespace(x)
+
+    if 1 <= ndim <= 3 and (
+        is_numpy_namespace(xp)
+        or is_jax_namespace(xp)
+        or is_dask_namespace(xp)
+        or is_cupy_namespace(xp)
+        or is_torch_namespace(xp)
+    ):
+        return getattr(xp, f"atleast_{ndim}d")(x)
+
+    return _funcs.atleast_nd(x, ndim=ndim, xp=xp)
 
 
 def isclose(
@@ -326,3 +552,617 @@ def pad(
         return xp.nn.functional.pad(x, tuple(pad_width), value=constant_values)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
 
     return _funcs.pad(x, pad_width, constant_values=constant_values, xp=xp)
+
+
+def sinc(x: Array, /, *, xp: ModuleType | None = None) -> Array:
+    r"""
+    Return the normalized sinc function.
+
+    The sinc function is equal to :math:`\sin(\pi x)/(\pi x)` for any argument
+    :math:`x\ne 0`. ``sinc(0)`` takes the limit value 1, making ``sinc`` not
+    only everywhere continuous but also infinitely differentiable.
+
+    .. note::
+
+        Note the normalization factor of ``pi`` used in the definition.
+        This is the most commonly used definition in signal processing.
+        Use ``sinc(x / xp.pi)`` to obtain the unnormalized sinc function
+        :math:`\sin(x)/x` that is more common in mathematics.
+
+    Parameters
+    ----------
+    x : array
+        Array (possibly multi-dimensional) of values for which to calculate
+        ``sinc(x)``. Must have a real floating point dtype.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `x`. Default: infer.
+
+    Returns
+    -------
+    array
+        ``sinc(x)`` calculated elementwise, which has the same shape as the input.
+
+    Notes
+    -----
+    The name sinc is short for "sine cardinal" or "sinus cardinalis".
+
+    The sinc function is used in various signal processing applications,
+    including in anti-aliasing, in the construction of a Lanczos resampling
+    filter, and in interpolation.
+
+    For bandlimited interpolation of discrete-time signals, the ideal
+    interpolation kernel is proportional to the sinc function.
+
+    References
+    ----------
+    #. Weisstein, Eric W. "Sinc Function." From MathWorld--A Wolfram Web
+       Resource. https://mathworld.wolfram.com/SincFunction.html
+    #. Wikipedia, "Sinc function",
+       https://en.wikipedia.org/wiki/Sinc_function
+
+    Examples
+    --------
+    >>> import array_api_strict as xp
+    >>> import array_api_extra as xpx
+    >>> x = xp.linspace(-4, 4, 41)
+    >>> xpx.sinc(x, xp=xp)
+    Array([-3.89817183e-17, -4.92362781e-02,
+           -8.40918587e-02, -8.90384387e-02,
+           -5.84680802e-02,  3.89817183e-17,
+            6.68206631e-02,  1.16434881e-01,
+            1.26137788e-01,  8.50444803e-02,
+           -3.89817183e-17, -1.03943254e-01,
+           -1.89206682e-01, -2.16236208e-01,
+           -1.55914881e-01,  3.89817183e-17,
+            2.33872321e-01,  5.04551152e-01,
+            7.56826729e-01,  9.35489284e-01,
+            1.00000000e+00,  9.35489284e-01,
+            7.56826729e-01,  5.04551152e-01,
+            2.33872321e-01,  3.89817183e-17,
+           -1.55914881e-01, -2.16236208e-01,
+           -1.89206682e-01, -1.03943254e-01,
+           -3.89817183e-17,  8.50444803e-02,
+            1.26137788e-01,  1.16434881e-01,
+            6.68206631e-02,  3.89817183e-17,
+           -5.84680802e-02, -8.90384387e-02,
+           -8.40918587e-02, -4.92362781e-02,
+           -3.89817183e-17], dtype=array_api_strict.float64)
+    """
+
+    if xp is None:
+        xp = array_namespace(x)
+
+    if not xp.isdtype(x.dtype, "real floating"):
+        err_msg = "`x` must have a real floating data type."
+        raise ValueError(err_msg)
+
+    if (
+        is_numpy_namespace(xp)
+        or is_cupy_namespace(xp)
+        or is_jax_namespace(xp)
+        or is_torch_namespace(xp)
+        or is_dask_namespace(xp)
+    ):
+        return xp.sinc(x)
+
+    return _funcs.sinc(x, xp=xp)
+
+
+def partition(
+    a: Array,
+    kth: int,
+    /,
+    axis: int | None = -1,
+    *,
+    xp: ModuleType | None = None,
+) -> Array:
+    """
+    Return a partitioned copy of an array.
+
+    Creates a copy of the array and partially sorts it in such a way that the value
+    of the element in k-th position is in the position it would be in a sorted array.
+    In the output array, all elements smaller than the k-th element are located to
+    the left of this element and all equal or greater are located to its right.
+    The ordering of the elements in the two partitions on the either side of
+    the k-th element in the output array is undefined.
+
+    Parameters
+    ----------
+    a : Array
+        Input array.
+    kth : int
+        Element index to partition by.
+    axis : int, optional
+        Axis along which to partition. The default is ``-1`` (the last axis).
+        If ``None``, the flattened array is used.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `x`. Default: infer.
+
+    Returns
+    -------
+    partitioned_array
+        Array of the same type and shape as `a`.
+
+    Notes
+    -----
+    If `xp` implements ``partition`` or an equivalent function
+    (e.g. ``topk`` for torch), complexity will likely be O(n).
+    If not, this function simply calls ``xp.sort`` and complexity is O(n log n).
+    """
+    # Validate inputs.
+    if xp is None:
+        xp = array_namespace(a)
+    if a.ndim < 1:
+        msg = "`a` must be at least 1-dimensional"
+        raise TypeError(msg)
+    if axis is None:
+        return partition(xp.reshape(a, (-1,)), kth, axis=0, xp=xp)
+    (size,) = eager_shape(a, axis)
+    if not (0 <= kth < size):
+        msg = f"kth(={kth}) out of bounds [0 {size})"
+        raise ValueError(msg)
+
+    # Delegate where possible.
+    if is_numpy_namespace(xp) or is_cupy_namespace(xp) or is_jax_namespace(xp):
+        return xp.partition(a, kth, axis=axis)
+
+    # Use top-k when possible:
+    if is_torch_namespace(xp):
+        if not (axis == -1 or axis == a.ndim - 1):
+            a = xp.transpose(a, axis, -1)
+
+        out = xp.empty_like(a)
+        ranks = xp.arange(a.shape[-1]).expand_as(a)
+
+        split_value, indices = xp.kthvalue(a, kth + 1, keepdim=True)
+        del indices  # indices won't be used => del ASAP to reduce peak memory usage
+
+        # fill the left-side of the partition
+        mask_src = a < split_value
+        n_left = mask_src.sum(dim=-1, keepdim=True)
+        mask_dest = ranks < n_left
+        out[mask_dest] = a[mask_src]
+
+        # fill the middle of the partition
+        mask_src = a == split_value
+        n_left += mask_src.sum(dim=-1, keepdim=True)
+        mask_dest ^= ranks < n_left
+        out[mask_dest] = a[mask_src]
+
+        # fill the right-side of the partition
+        mask_src = a > split_value
+        mask_dest = ranks >= n_left
+        out[mask_dest] = a[mask_src]
+
+        if not (axis == -1 or axis == a.ndim - 1):
+            out = xp.transpose(out, axis, -1)
+        return out
+
+    # Note: dask topk/argtopk sort the return values, so it's
+    # not much more efficient than sorting everything when
+    # kth is not small compared to x.size
+
+    return _funcs.partition(a, kth, axis=axis, xp=xp)
+
+
+def argpartition(
+    a: Array,
+    kth: int,
+    /,
+    axis: int | None = -1,
+    *,
+    xp: ModuleType | None = None,
+) -> Array:
+    """
+    Perform an indirect partition along the given axis.
+
+    It returns an array of indices of the same shape as `a` that
+    index data along the given axis in partitioned order.
+
+    Parameters
+    ----------
+    a : Array
+        Input array.
+    kth : int
+        Element index to partition by.
+    axis : int, optional
+        Axis along which to partition. The default is ``-1`` (the last axis).
+        If ``None``, the flattened array is used.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `a`. Default: infer.
+
+    Returns
+    -------
+    index_array
+        Array of indices that partition `a` along the specified axis.
+
+    Notes
+    -----
+    If `xp` implements ``argpartition`` or an equivalent function
+    e.g. ``topk`` for torch), complexity will likely be O(n).
+    If not, this function simply calls ``xp.argsort`` and complexity is O(n log n).
+    """
+    # Validate inputs.
+    if xp is None:
+        xp = array_namespace(a)
+    if is_pydata_sparse_namespace(xp):
+        msg = "Not implemented for sparse backend: no argsort"
+        raise NotImplementedError(msg)
+    if a.ndim < 1:
+        msg = "`a` must be at least 1-dimensional"
+        raise TypeError(msg)
+    if axis is None:
+        return argpartition(xp.reshape(a, (-1,)), kth, axis=0, xp=xp)
+    (size,) = eager_shape(a, axis)
+    if not (0 <= kth < size):
+        msg = f"kth(={kth}) out of bounds [0 {size})"
+        raise ValueError(msg)
+
+    # Delegate where possible.
+    if is_numpy_namespace(xp) or is_cupy_namespace(xp) or is_jax_namespace(xp):
+        return xp.argpartition(a, kth, axis=axis)
+
+    # Use top-k when possible:
+    if is_torch_namespace(xp):
+        # see `partition` above for commented details of those steps:
+        if not (axis == -1 or axis == a.ndim - 1):
+            a = xp.transpose(a, axis, -1)
+
+        ranks = xp.arange(a.shape[-1]).expand_as(a)
+        out = xp.empty_like(ranks)
+
+        split_value, indices = xp.kthvalue(a, kth + 1, keepdim=True)
+        del indices  # indices won't be used => del ASAP to reduce peak memory usage
+
+        mask_src = a < split_value
+        n_left = mask_src.sum(dim=-1, keepdim=True)
+        mask_dest = ranks < n_left
+        out[mask_dest] = ranks[mask_src]
+
+        mask_src = a == split_value
+        n_left += mask_src.sum(dim=-1, keepdim=True)
+        mask_dest ^= ranks < n_left
+        out[mask_dest] = ranks[mask_src]
+
+        mask_src = a > split_value
+        mask_dest = ranks >= n_left
+        out[mask_dest] = ranks[mask_src]
+
+        if not (axis == -1 or axis == a.ndim - 1):
+            out = xp.transpose(out, axis, -1)
+        return out
+
+    # Note: dask topk/argtopk sort the return values, so it's
+    # not much more efficient than sorting everything when
+    # kth is not small compared to x.size
+
+    return _funcs.argpartition(a, kth, axis=axis, xp=xp)
+
+
+def isin(
+    a: Array,
+    b: Array,
+    /,
+    *,
+    assume_unique: bool = False,
+    invert: bool = False,
+    kind: str | None = None,
+    xp: ModuleType | None = None,
+) -> Array:
+    """
+    Determine whether each element in `a` is present in `b`.
+
+    Return a boolean array of the same shape as `a` that is True for elements
+    that are in `b` and False otherwise.
+
+    Parameters
+    ----------
+    a : array
+        Input elements.
+    b : array
+        The elements against which to test each element of `a`.
+    assume_unique : bool, optional
+        If True, the input arrays are both assumed to be unique which can speed
+        up the calculation. Default: False.
+    invert : bool, optional
+        If True, the values in the returned array are inverted. Default: False.
+    kind : str | None, optional
+        The algorithm or method to use. This will not affect the final result,
+        but will affect the speed and memory use.
+        For NumPy the options are {None, "sort", "table"}.
+        For Jax the mapped parameter is instead `method` and the options are
+        {"compare_all", "binary_search", "sort", and "auto" (default)}
+        For CuPy, Dask, Torch and the default case this parameter is not present and
+        thus ignored. Default: None.
+    xp : array_namespace, optional
+        The standard-compatible namespace for `a` and `b`. Default: infer.
+
+    Returns
+    -------
+    array
+        An array having the same shape as that of `a` that is True for elements
+        that are in `b` and False otherwise.
+    """
+    if xp is None:
+        xp = array_namespace(a, b)
+
+    if is_numpy_namespace(xp):
+        return xp.isin(a, b, assume_unique=assume_unique, invert=invert, kind=kind)
+    if is_jax_namespace(xp):
+        if kind is None:
+            kind = "auto"
+        return xp.isin(a, b, assume_unique=assume_unique, invert=invert, method=kind)
+    if is_cupy_namespace(xp) or is_torch_namespace(xp) or is_dask_namespace(xp):
+        return xp.isin(a, b, assume_unique=assume_unique, invert=invert)
+
+    return _funcs.isin(a, b, assume_unique=assume_unique, invert=invert, xp=xp)
+
+
+def quantile(
+    a: Array,
+    q: float | Array,
+    /,
+    axis: int | None = None,
+    method: str = "linear",
+    keepdims: bool = False,
+    nan_policy: str = "propagate",
+    *,
+    weights: Array | None = None,
+    xp: ModuleType | None = None,
+) -> Array:
+    """
+    Compute the q-th quantile of the data along the specified axis.
+
+    Parameters
+    ----------
+    a : array_like of real numbers
+        Input array or object that can be converted to an array.
+    q : array_like of float
+        Probability or sequence of probabilities of the quantiles to compute.
+        Values must be between 0 and 1 inclusive.
+    axis : {int, tuple of int, None}, optional
+        Axis or axes along which the quantiles are computed. The default is
+        to compute the quantile(s) along a flattened version of the array.
+    method : str, optional
+        This parameter specifies the method to use for estimating the
+        quantile. There are many different methods.
+        The recommended options, numbered as they appear in [1]_, are:
+
+        1. 'inverted_cdf'
+        2. 'averaged_inverted_cdf'
+        3. 'closest_observation'
+        4. 'interpolated_inverted_cdf'
+        5. 'hazen'
+        6. 'weibull'
+        7. 'linear'  (default)
+        8. 'median_unbiased'
+        9. 'normal_unbiased'
+
+        The first three methods are discontinuous.
+        Only 'linear', 'inverted_cdf' and 'averaged_inverted_cdf' are implemented.
+
+    keepdims : bool, optional
+        If this is set to True, the axes which are reduced are left in
+        the result as dimensions with size one. With this option, the
+        result will broadcast correctly against the original array `a`.
+
+    nan_policy : str, optional
+        'propagate' (default) or 'omit'.
+        'omit' is supported only when `weights` are provided.
+
+    weights : array_like, optional
+        An array of weights associated with the values in `a`. Each value in
+        `a` contributes to the quantile according to its associated weight.
+        The weights array can either be 1-D (in which case its length must be
+        the size of `a` along the given axis) or of the same shape as `a`.
+        If `weights=None`, then all data in `a` are assumed to have a
+        weight equal to one.
+        Only `method="inverted_cdf"` or `method="averaged_inverted_cdf"`
+        support weights. See the notes for more details.
+
+    xp : array_namespace, optional
+        The standard-compatible namespace for `a` and `q`. Default: infer.
+
+    Returns
+    -------
+    scalar or ndarray
+        If `q` is a single probability and `axis=None`, then the result
+        is a scalar. If multiple probability levels are given, first axis
+        of the result corresponds to the quantiles. The other axes are
+        the axes that remain after the reduction of `a`. If the input
+        contains integers or floats smaller than ``float64``, the output
+        data-type is ``float64``. Otherwise, the output data-type is the
+        same as that of the input. If `out` is specified, that array is
+        returned instead.
+
+    Notes
+    -----
+    Given a sample `a` from an underlying distribution, `quantile` provides a
+    nonparametric estimate of the inverse cumulative distribution function.
+
+    By default, this is done by interpolating between adjacent elements in
+    ``y``, a sorted copy of `a`::
+
+        (1-g)*y[j] + g*y[j+1]
+
+    where the index ``j`` and coefficient ``g`` are the integral and
+    fractional components of ``q * (n-1)``, and ``n`` is the number of
+    elements in the sample.
+
+    This is a special case of Equation 1 of H&F [1]_. More generally,
+
+    - ``j = (q*n + m - 1) // 1``, and
+    - ``g = (q*n + m - 1) % 1``,
+
+    where ``m`` may be defined according to several different conventions.
+    The preferred convention may be selected using the ``method`` parameter:
+
+    =============================== =============== ===============
+    ``method``                      number in H&F   ``m``
+    =============================== =============== ===============
+    ``interpolated_inverted_cdf``   4               ``0``
+    ``hazen``                       5               ``1/2``
+    ``weibull``                     6               ``q``
+    ``linear`` (default)            7               ``1 - q``
+    ``median_unbiased``             8               ``q/3 + 1/3``
+    ``normal_unbiased``             9               ``q/4 + 3/8``
+    =============================== =============== ===============
+
+    Note that indices ``j`` and ``j + 1`` are clipped to the range ``0`` to
+    ``n - 1`` when the results of the formula would be outside the allowed
+    range of non-negative indices. The ``- 1`` in the formulas for ``j`` and
+    ``g`` accounts for Python's 0-based indexing.
+
+    The table above includes only the estimators from H&F that are continuous
+    functions of probability `q` (estimators 4-9). NumPy also provides the
+    three discontinuous estimators from H&F (estimators 1-3), where ``j`` is
+    defined as above, ``m`` is defined as follows, and ``g`` is a function
+    of the real-valued ``index = q*n + m - 1`` and ``j``.
+
+    1. ``inverted_cdf``: ``m = 0`` and ``g = int(index - j > 0)``
+    2. ``averaged_inverted_cdf``: ``m = 0`` and
+       ``g = (1 + int(index - j > 0)) / 2``
+    3. ``closest_observation``: ``m = -1/2`` and
+       ``g = 1 - int((index == j) & (j%2 == 1))``
+
+    **Weighted quantiles:**
+    More formally, the quantile at probability level :math:`q` of a cumulative
+    distribution function :math:`F(y)=P(Y \\leq y)` with probability measure
+    :math:`P` is defined as any number :math:`x` that fulfills the
+    *coverage conditions*
+
+    .. math:: P(Y < x) \\leq q \\quad\\text{and}\\quad P(Y \\leq x) \\geq q
+
+    with random variable :math:`Y\\sim P`.
+    Sample quantiles, the result of `quantile`, provide nonparametric
+    estimation of the underlying population counterparts, represented by the
+    unknown :math:`F`, given a data vector `a` of length ``n``.
+
+    Some of the estimators above arise when one considers :math:`F` as the
+    empirical distribution function of the data, i.e.
+    :math:`F(y) = \\frac{1}{n} \\sum_i 1_{a_i \\leq y}`.
+    Then, different methods correspond to different choices of :math:`x` that
+    fulfill the above coverage conditions. Methods that follow this approach
+    are ``inverted_cdf`` and ``averaged_inverted_cdf``.
+
+    For weighted quantiles, the coverage conditions still hold. The
+    empirical cumulative distribution is simply replaced by its weighted
+    version, i.e.
+    :math:`P(Y \\leq t) = \\frac{1}{\\sum_i w_i} \\sum_i w_i 1_{x_i \\leq t}`.
+
+    References
+    ----------
+    .. [1] R. J. Hyndman and Y. Fan,
+       "Sample quantiles in statistical packages,"
+       The American Statistician, 50(4), pp. 361-365, 1996
+    """
+    if xp is None:
+        xp = array_namespace(a)
+    if is_pydata_sparse_namespace(xp):
+        msg = "Sparse backend not supported"
+        raise ValueError(msg)
+
+    methods = {"linear", "inverted_cdf", "averaged_inverted_cdf"}
+    if method not in methods:
+        msg = f"`method` must be one of {methods}"
+        raise ValueError(msg)
+    nan_policies = {"propagate", "omit"}
+    if nan_policy not in nan_policies:
+        msg = f"`nan_policy` must be one of {nan_policies}"
+        raise ValueError(msg)
+
+    a = xp.asarray(a)
+    if not xp.isdtype(a.dtype, ("integral", "real floating")):
+        msg = "`a` must have real dtype."
+        raise ValueError(msg)
+    if not xp.isdtype(xp.asarray(q).dtype, "real floating"):
+        msg = "`q` must have real floating dtype."
+        raise ValueError(msg)
+    weights = None if weights is None else xp.asarray(weights)
+
+    ndim = a.ndim
+    if ndim < 1:
+        msg = "`a` must be at least 1-dimensional."
+        raise TypeError(msg)
+    if axis is not None and ((axis >= ndim) or (axis < -ndim)):
+        msg = "`axis` is not compatible with the dimension of `a`."
+        raise ValueError(msg)
+    if weights is None:
+        if nan_policy != "propagate":
+            msg = "When `weights` aren't provided, `nan_policy` must be 'propagate'."
+            raise ValueError(msg)
+    else:
+        if method not in {"inverted_cdf", "averaged_inverted_cdf"}:
+            msg = f"`method` '{method}' not supported with weights."
+            raise ValueError(msg)
+        if not xp.isdtype(weights.dtype, ("integral", "real floating")):
+            msg = "`weights` must have real dtype."
+            raise ValueError(msg)
+        if ndim > 2:
+            msg = "When weights are provided, dimension of `a` must be 1 or 2."
+            raise ValueError(msg)
+        if a.shape != weights.shape:
+            if axis is None:
+                msg = "Axis must be specified when shapes of `a` and ̀ weights` differ."
+                raise TypeError(msg)
+            if weights.shape != eager_shape(a, axis):
+                msg = (
+                    "Shape of weights must be consistent with shape"
+                    " of a along specified axis."
+                )
+                raise ValueError(msg)
+        if axis is None and ndim == 2:
+            msg = "Axis must be specified when `a` and ̀ weights` are 2d."
+            raise ValueError(msg)
+
+    # Align result dtype with what numpy does:
+    dtype = xp.result_type(
+        xp.float64 if xp.isdtype(a.dtype, "integral") else a,
+        xp.asarray(q),
+        xp.float64,  # at least float64
+    )
+    device = get_device(a)
+    a = xp.asarray(a, dtype=dtype, device=device)
+    q_arr = xp.asarray(q, dtype=dtype, device=device)
+    # TODO: cast weights here? Assert weights are on the same device as `a`?
+
+    if xp.any((q_arr > 1) | (q_arr < 0) | xp.isnan(q_arr)):
+        msg = "`q` values must be in the range [0, 1]"
+        raise ValueError(msg)
+
+    # Delegate when possible.
+    # Note: No delegation for dask: I couldn't make it work.
+    basic_case = method == "linear" and weights is None
+
+    np_2 = NUMPY_VERSION >= (2, 0)
+    np_handles_weights = np_2 and nan_policy == "propagate" and method == "inverted_cdf"
+    if weights is None:
+        if is_numpy_namespace(xp) and (basic_case or np_2):
+            quantile = xp.quantile if nan_policy == "propagate" else xp.nanquantile
+            return quantile(a, q_arr, axis=axis, method=method, keepdims=keepdims)
+    elif is_numpy_namespace(xp) and np_handles_weights:
+        # TODO: call nanquantile for nan_policy == "omit" once
+        # https://github.com/numpy/numpy/issues/29709 is fixed
+        return xp.quantile(
+            a, q_arr, axis=axis, method=method, keepdims=keepdims, weights=weights
+        )
+
+    jax_or_cupy = is_jax_namespace(xp) or is_cupy_namespace(xp)
+    if jax_or_cupy and basic_case and nan_policy == "propagate":
+        return xp.quantile(a, q_arr, axis=axis, method=method, keepdims=keepdims)
+    if is_torch_namespace(xp) and basic_case:
+        quantile = xp.quantile if nan_policy == "propagate" else xp.nanquantile
+        return quantile(a, q_arr, dim=axis, interpolation=method, keepdim=keepdims)
+
+    # Otherwise call our implementation (will sort data)
+    return _quantile.quantile(
+        # XXX: I'm not sure we want to support dask, it seems uterly slow...
+        a,
+        q_arr,
+        axis=axis,
+        method=method,
+        keepdims=keepdims,
+        nan_policy=nan_policy,
+        weights=weights,
+        xp=xp,
+    )

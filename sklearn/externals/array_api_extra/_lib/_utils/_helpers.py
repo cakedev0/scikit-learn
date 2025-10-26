@@ -6,7 +6,7 @@ import io
 import math
 import pickle
 import types
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from functools import wraps
 from types import ModuleType
 from typing import (
@@ -212,10 +212,10 @@ def asarrays(
         }
         kind = same_dtype[type(cast(complex, b))]
         if xp.isdtype(a.dtype, kind):
-            xb = xp.asarray(b, dtype=a.dtype)
+            xb = xp.asarray(b, dtype=a.dtype, device=_compat.device(a))
         else:
             # Undefined behaviour. Let the function deal with it, if it can.
-            xb = xp.asarray(b)
+            xb = xp.asarray(b, device=_compat.device(a))
 
     else:
         # Neither a nor b are Array API objects.
@@ -250,7 +250,7 @@ def ndindex(*x: int) -> Generator[tuple[int, ...]]:
             yield *i, j
 
 
-def eager_shape(x: Array, /) -> tuple[int, ...]:
+def eager_shape(x: Array, /, axis: int | None = None) -> tuple[int, ...]:
     """
     Return shape of an array. Raise if shape is not fully defined.
 
@@ -258,6 +258,8 @@ def eager_shape(x: Array, /) -> tuple[int, ...]:
     ----------
     x : Array
         Input array.
+    axis : int, optional
+        If provided, only returns the tuple (shape[axis],).
 
     Returns
     -------
@@ -265,7 +267,14 @@ def eager_shape(x: Array, /) -> tuple[int, ...]:
         Shape of the array.
     """
     shape = x.shape
-    # Dask arrays uses non-standard NaN instead of None
+    if axis is not None:
+        s = shape[axis]
+        # Dask arrays uses non-standard NaN instead of None
+        if s is None or math.isnan(s):
+            msg = f"Unsupported lazy shape for axis {axis}"
+            raise TypeError(msg)
+        return (s,)
+
     if any(s is None or math.isnan(s) for s in shape):
         msg = "Unsupported lazy shape"
         raise TypeError(msg)
@@ -512,13 +521,24 @@ class _AutoJITWrapper(Generic[T]):  # numpydoc ignore=PR01
     convert them to/from PyTrees.
     """
 
-    obj: T
+    _obj: Any
+    _is_iter: bool
     _registered: ClassVar[bool] = False
-    __slots__: tuple[str, ...] = ("obj",)
+    __slots__: tuple[str, ...] = ("_is_iter", "_obj")
 
     def __init__(self, obj: T) -> None:  # numpydoc ignore=GL08
         self._register()
-        self.obj = obj
+        if isinstance(obj, Iterator):
+            self._obj = list(obj)
+            self._is_iter = True
+        else:
+            self._obj = obj
+            self._is_iter = False
+
+    @property
+    def obj(self) -> T:  # numpydoc ignore=RT01
+        """Return wrapped object."""
+        return iter(self._obj) if self._is_iter else self._obj
 
     @classmethod
     def _register(cls) -> None:  # numpydoc ignore=SS06
@@ -531,7 +551,7 @@ class _AutoJITWrapper(Generic[T]):  # numpydoc ignore=PR01
 
             jax.tree_util.register_pytree_node(
                 cls,
-                lambda obj: pickle_flatten(obj, jax.Array),  # pyright: ignore[reportUnknownArgumentType]
+                lambda instance: pickle_flatten(instance, jax.Array),  # pyright: ignore[reportUnknownArgumentType]
                 lambda aux_data, children: pickle_unflatten(children, aux_data),  # pyright: ignore[reportUnknownArgumentType]
             )
             cls._registered = True
@@ -556,6 +576,7 @@ def jax_autojit(
     - Automatically descend into non-array return values and find ``jax.Array`` objects
       inside them, then rebuild them downstream of exiting the JIT, swapping the JAX
       tracer objects with concrete arrays.
+    - Returned iterators are immediately completely consumed.
 
     See Also
     --------
