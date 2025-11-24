@@ -27,16 +27,16 @@ def generate_data(size, d, duplication_level, ratio_missing):
     return X, y
 
 
-@pytest.mark.parametrize('missing', ['x', 'with_missing'])
-@pytest.mark.parametrize('d', [1, 2, 3, 5, 10, 20, 100])
-@pytest.mark.parametrize('duplication_level', [0, 1, 2])
-@pytest.mark.parametrize('max_depth', [1, 2])
+@pytest.mark.parametrize("missing", ["x", "with_missing"])
+@pytest.mark.parametrize("d", [1, 2, 3, 5, 10, 20, 100])
+@pytest.mark.parametrize("duplication_level", [0, 1, 2])
+@pytest.mark.parametrize("max_depth", [1, 2])
 def test_same_split_sklearn(missing, d, duplication_level, max_depth):
     X, y = generate_data(
         size=10_000,
         d=d,
         duplication_level=duplication_level,
-        ratio_missing=0 if missing == 'x' else 0.1
+        ratio_missing=0 if missing == "x" else 0.1,
     )
     actual = DTRegressor(max_depth=max_depth).fit(X, y).predict(X)
     expected = DecisionTreeRegressor(max_depth=max_depth).fit(X, y).predict(X)

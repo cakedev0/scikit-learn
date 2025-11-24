@@ -1,8 +1,9 @@
 import numpy as np
 
+from sklearn.tree import DecisionTreeRegressor
+
 from .bench import benchmark_tree, kwargs_product
 from .dt import DecisionTreeRegressor as CustomDecisionTreeRegressor
-from sklearn.tree import DecisionTreeRegressor
 
 
 def test_r2_vs_sklearn():

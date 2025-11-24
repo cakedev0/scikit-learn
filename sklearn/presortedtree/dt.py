@@ -149,7 +149,7 @@ def _build_tree_numba(
             left_sum = 0.0
             right_sum = 0.0
             left_w = 0.0
-            w = 1.
+            w = 1.0
             for j in range(s, e - max(1, n_missing)):
                 idx = sorted_idx[f, j]
                 val = y[idx]  # sparse/random reads
@@ -415,7 +415,9 @@ class DecisionTreeRegressor:
             left_child,
             right_child,
             node_count,
-        ) = _build_tree_numba(X, y, None, sorted_idx, cant_split, n_missing, max_depth_int)
+        ) = _build_tree_numba(
+            X, y, None, sorted_idx, cant_split, n_missing, max_depth_int
+        )
 
         # Truncate to actual node_count to keep things clean
         self.node_feature = node_feature[:node_count]

@@ -77,14 +77,16 @@ def _parallel_build_trees_numba(
     all_node_counts : int32 1D array
     """
     n_features, n_samples = X.shape
-    
+
     # Estimate max nodes per tree
     max_nodes_per_tree = 2 * n_samples - 1
-    
+
     # Pre-allocate arrays for all trees
     all_node_features = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
     all_node_thresholds = np.empty((n_estimators, max_nodes_per_tree), dtype=np.float32)
-    all_node_missing_go_left = np.empty((n_estimators, max_nodes_per_tree), dtype=np.bool_)
+    all_node_missing_go_left = np.empty(
+        (n_estimators, max_nodes_per_tree), dtype=np.bool_
+    )
     all_node_values = np.empty((n_estimators, max_nodes_per_tree), dtype=y.dtype)
     all_left_children = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
     all_right_children = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
@@ -93,7 +95,7 @@ def _parallel_build_trees_numba(
     for tree_idx in prange(n_estimators):
         # Get bootstrap indices for this tree
         n_bootstrap = bootstrap_sizes[tree_idx]
-        
+
         # Create bootstrapped dataset
         X_boot = np.empty((n_features, n_bootstrap), dtype=X.dtype)
         y_boot = np.empty(n_bootstrap, dtype=y.dtype)
@@ -112,7 +114,7 @@ def _parallel_build_trees_numba(
             # Sort by feature values
             feature_values = X_boot[f, :]
             # Use argsort with kind='mergesort' for stability, then cast to int32
-            temp_sorted = np.argsort(feature_values, kind='mergesort')
+            temp_sorted = np.argsort(feature_values, kind="mergesort")
             for i in range(n_bootstrap):
                 sorted_idx[f, i] = temp_sorted[i]
 
@@ -140,12 +142,7 @@ def _parallel_build_trees_numba(
             right_child,
             node_count,
         ) = _build_tree_numba(
-            X_boot,
-            y_boot,
-            sorted_idx,
-            cant_split,
-            n_missing_boot,
-            max_depth
+            X_boot, y_boot, sorted_idx, cant_split, n_missing_boot, max_depth
         )
 
         # Store tree data
@@ -251,7 +248,9 @@ class Forest:
         """
         # Preprocess data
         temp_tree = DecisionTreeRegressor(max_depth=self.max_depth)
-        X, y, sorted_idx_base, n_missing, cant_split_base = temp_tree.preprocess_Xy(X, y)
+        X, y, sorted_idx_base, n_missing, cant_split_base = temp_tree.preprocess_Xy(
+            X, y
+        )
 
         n_features, n_samples = X.shape
 
@@ -271,7 +270,9 @@ class Forest:
         bootstrap_indices_array = np.empty(
             (self.n_estimators, n_samples_bootstrap), dtype=np.int32
         )
-        bootstrap_sizes = np.full(self.n_estimators, n_samples_bootstrap, dtype=np.int32)
+        bootstrap_sizes = np.full(
+            self.n_estimators, n_samples_bootstrap, dtype=np.int32
+        )
 
         for i in range(self.n_estimators):
             if self.bootstrap:
@@ -283,7 +284,7 @@ class Forest:
             else:
                 # No bootstrap: use all samples for each tree
                 indices = np.arange(n_samples, dtype=np.int32)
-            
+
             bootstrap_indices_array[i, :] = indices
 
         # Set max_depth for numba function

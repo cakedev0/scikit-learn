@@ -1,14 +1,12 @@
 import itertools
 from time import perf_counter
-from functools import partial
 
 import numpy as np
 
+from sklearn.metrics import r2_score
+
 from .dt import DecisionTreeRegressor as CustomDecisionTreeRegressor
 from .forest import Forest
-from sklearn.metrics import r2_score
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import RandomForestRegressor
 
 
 def benchmark_tree(
@@ -67,14 +65,18 @@ def kwargs_product(**kwargs):
 if __name__ == "__main__":
     for kwargs in kwargs_product(
         duplication_level=[0],
-        max_depth=[12],#[1, 2, 3, 6, 9, 12, None],
-        cls=[Forest], #[partial(RandomForestRegressor, bootstrap=False), Forest],
+        max_depth=[12],  # [1, 2, 3, 6, 9, 12, None],
+        cls=[Forest],  # [partial(RandomForestRegressor, bootstrap=False), Forest],
         n_jobs=[1, 2, 4, 8, 12],
     ):
-        kwargs['n_estimators'] = kwargs['n_jobs'] * 20
+        kwargs["n_estimators"] = kwargs["n_jobs"] * 20
         out = benchmark_tree(**kwargs, size=10_000_000, d=10, n_fit=4, n_skip=1)
         dt, dt_min, dt_max = out["dt"], out["dt_min"], out["dt_max"]
         cls = out["cls"]
-        name = "pre-sorted" if cls in (CustomDecisionTreeRegressor, Forest) else "scikit-learn"
+        name = (
+            "pre-sorted"
+            if cls in (CustomDecisionTreeRegressor, Forest)
+            else "scikit-learn"
+        )
         score = out["score"]
         print(name, f"{dt:.2f} [{dt_min:.2f} - {dt_max:.2f}] (score: {score:.2f})")
