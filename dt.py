@@ -364,6 +364,10 @@ class DecisionTreeRegressor:
 
     def preprocess_Xy(self, X, y):
         y = np.asarray(y, dtype=np.float64).ravel()
+        sorted_indices = np.argsort(y)
+        y = y[sorted_indices]
+        X = X[sorted_indices]
+
         # Global sorted indices per feature
         # sorted_idx[f] is sorted order of samples by X[:, f]
         X = np.asarray(X, dtype=np.float32, order="F").T  # shape (D, N)
@@ -371,23 +375,23 @@ class DecisionTreeRegressor:
         cant_split = np.empty_like(sorted_idx, dtype=bool)
 
         for f, feature_values in enumerate(X):
-            sorted_idx[f, :] = np.argsort(feature_values)
+            sorted_idx[f, :] = np.argsort(feature_values, stable=True)
             v_sorted = feature_values[sorted_idx[f, :]]
             cant_split[f, -1] = True
             cant_split[f, :-1] = np.diff(v_sorted) == 0
 
-        return X, y, sorted_idx, cant_split
+        n_missing = np.isnan(X).sum(axis=1)
 
-    def fit(self, X, y, sorted_idx=None, cant_split=None):
+        return X, y, sorted_idx, n_missing, cant_split
+
+    def fit(self, X, y, sorted_idx=None, n_missing=None, cant_split=None):
         if sorted_idx is None:
-            X, y, sorted_idx, cant_split = self.preprocess_Xy(X, y)
+            X, y, sorted_idx, n_missing, cant_split = self.preprocess_Xy(X, y)
 
         if self.max_depth is None:
             max_depth_int = -1
         else:
             max_depth_int = int(self.max_depth)
-
-        n_missing = np.isnan(X).sum(axis=1)
 
         (
             node_feature,
