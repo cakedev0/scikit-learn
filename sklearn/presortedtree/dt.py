@@ -10,6 +10,22 @@ from numba import njit
 
 
 @njit
+def _compute_max_nodes(n_samples, max_depth):
+    if max_depth == -1:
+        max_nodes = 2 * n_samples - 1
+    else:
+        max_nodes = 1
+        n_nodes_at_d = 2
+        for _ in range(max_depth):
+            max_nodes += n_nodes_at_d
+            n_nodes_at_d *= 2
+            if n_nodes_at_d > 4 * n_samples:
+                break
+        max_nodes = min(2 * n_samples - 1, max_nodes)
+    return max_nodes
+
+
+@njit
 def _build_tree_numba(
     X: np.ndarray,
     y: np.ndarray,
@@ -43,17 +59,7 @@ def _build_tree_numba(
     node_count : int
     """
     n_features, n_samples = X.shape
-    if max_depth == -1:
-        max_nodes = 2 * n_samples - 1
-    else:
-        max_nodes = 1
-        n_nodes_at_d = 2
-        for _ in range(max_depth):
-            max_nodes += n_nodes_at_d
-            n_nodes_at_d *= 2
-            if n_nodes_at_d > 4 * n_samples:
-                break
-        max_nodes = min(2 * n_samples - 1, max_nodes)
+    max_nodes = _compute_max_nodes(n_samples, max_depth)
 
     # Tree arrays
     node_feature = -1 * np.ones(max_nodes, dtype=np.int32)  # -1 => leaf
@@ -118,9 +124,9 @@ def _build_tree_numba(
                 sum_w += w
             sum_y += val
             sum_y2 += val * val
-        mean_y = sum_y / n
         if sample_weights is None:
             sum_w = n
+        mean_y = sum_y / sum_w
 
         # Leaf conditions
         leaf = False
@@ -376,11 +382,13 @@ class DecisionTreeRegressor:
         self.max_depth = max_depth or 100
         self._fitted = False
 
-    def preprocess_Xy(self, X, y):
+    def preprocess_Xy(self, X, y, sample_weight=None):
         y = np.asarray(y, dtype=np.float64).ravel()
         sorted_indices = np.argsort(y)
         y = y[sorted_indices]
         X = X[sorted_indices]
+        if sample_weight is not None:
+            sample_weight = sample_weight[sorted_indices]
 
         # Global sorted indices per feature
         # sorted_idx[f] is sorted order of samples by X[:, f]
@@ -396,11 +404,15 @@ class DecisionTreeRegressor:
 
         n_missing = np.isnan(X).sum(axis=1)
 
-        return X, y, sorted_idx, n_missing, cant_split
+        return X, y, sorted_idx, n_missing, cant_split, sample_weight
 
-    def fit(self, X, y, sorted_idx=None, n_missing=None, cant_split=None):
+    def fit(
+        self, X, y, sorted_idx=None, n_missing=None, cant_split=None, sample_weight=None
+    ):
         if sorted_idx is None:
-            X, y, sorted_idx, n_missing, cant_split = self.preprocess_Xy(X, y)
+            X, y, sorted_idx, n_missing, cant_split, sample_weight = self.preprocess_Xy(
+                X, y, sample_weight
+            )
 
         if self.max_depth is None:
             max_depth_int = -1
@@ -416,7 +428,7 @@ class DecisionTreeRegressor:
             right_child,
             node_count,
         ) = _build_tree_numba(
-            X, y, None, sorted_idx, cant_split, n_missing, max_depth_int
+            X, y, sample_weight, sorted_idx, cant_split, n_missing, max_depth_int
         )
 
         # Truncate to actual node_count to keep things clean
