@@ -13,6 +13,7 @@ from numba import njit
 def _build_tree_numba(
     X: np.ndarray,
     y: np.ndarray,
+    sample_weights: np.ndarray | None,
     sorted_idx: np.ndarray,
     cant_split: np.ndarray,
     n_missing_per_feature: np.ndarray,
@@ -107,21 +108,25 @@ def _build_tree_numba(
 
         sum_y = 0.0
         sum_y2 = 0.0
+        sum_w = 0.0
         for j in range(s, e):
             idx = sorted_idx[0, j]
             val = y[idx]
+            if sample_weights is not None:
+                w = sample_weights[idx]
+                val *= w
+                sum_w += w
             sum_y += val
             sum_y2 += val * val
         mean_y = sum_y / n
-        var_y = sum_y2 / n - mean_y * mean_y
+        if sample_weights is None:
+            sum_w = n
 
         # Leaf conditions
         leaf = False
         if max_depth >= 0 and depth >= max_depth:
             leaf = True
         elif n <= 1:
-            leaf = True
-        elif var_y <= 1e-12:
             leaf = True
 
         if leaf:
@@ -143,23 +148,28 @@ def _build_tree_numba(
             # Scan split positions with missing on the right:
             left_sum = 0.0
             right_sum = 0.0
-            left_n = 0
+            left_w = 0.0
+            w = 1.
             for j in range(s, e - max(1, n_missing)):
                 idx = sorted_idx[f, j]
-                left_sum += y[idx]  # sparse/random reads
-                left_n += 1
+                val = y[idx]  # sparse/random reads
+                if sample_weights is not None:
+                    w = sample_weights[idx]  # sparse/random reads
+                    val *= w
+                left_sum += val
+                left_w += w
 
                 if cant_split[f, j]:
                     continue
 
-                right_n = n - left_n
+                right_w = sum_w - left_w
                 right_sum = sum_y - left_sum
 
                 # SSE = sum(y^2) - sum(y)^2 / n
                 sse = (
                     sum_y2
-                    - (left_sum * left_sum) / left_n
-                    - (right_sum * right_sum) / right_n
+                    - (left_sum * left_sum) / left_w
+                    - (right_sum * right_sum) / right_w
                 )
 
                 if sse < best_sse:
@@ -173,23 +183,27 @@ def _build_tree_numba(
 
             # Scan split positions with missing on the left
             left_sum = right_sum
-            left_n = n_missing
+            left_w = right_w
             for j in range(s, e - n_missing - 1):
                 idx = sorted_idx[f, j]
-                left_sum += y[idx]  # sparse/random reads
-                left_n += 1
+                val = y[idx]  # sparse/random reads
+                if sample_weights is not None:
+                    w = sample_weights[idx]  # sparse/random reads
+                    val *= w
+                left_sum += val
+                left_w += w
 
                 if cant_split[f, j]:
                     continue
 
-                right_n = n - left_n
+                right_w = sum_w - left_w
                 right_sum = sum_y - left_sum
 
                 # SSE = sum(y^2) - sum(y)^2 / n
                 sse = (
                     sum_y2
-                    - (left_sum * left_sum) / left_n
-                    - (right_sum * right_sum) / right_n
+                    - (left_sum * left_sum) / left_w
+                    - (right_sum * right_sum) / right_w
                 )
 
                 if sse < best_sse:
@@ -401,7 +415,7 @@ class DecisionTreeRegressor:
             left_child,
             right_child,
             node_count,
-        ) = _build_tree_numba(X, y, sorted_idx, cant_split, n_missing, max_depth_int)
+        ) = _build_tree_numba(X, y, None, sorted_idx, cant_split, n_missing, max_depth_int)
 
         # Truncate to actual node_count to keep things clean
         self.node_feature = node_feature[:node_count]
