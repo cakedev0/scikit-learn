@@ -4,6 +4,8 @@
 import numpy as np
 from numba import njit
 
+from sklearn.presortedtree.criterion import MSE, Criterion
+
 # ============================================================
 # Numba core: tree building
 # ============================================================
@@ -34,6 +36,8 @@ def _build_tree_numba(
     cant_split: np.ndarray,
     n_missing_per_feature: np.ndarray,
     max_depth: int,
+    criterion: Criterion,
+    min_impurity_decrease: float,
 ):
     """
     Build a regression tree minimizing MSE.
@@ -127,21 +131,10 @@ def _build_tree_numba(
             node_value[node] = 0.0
             continue
 
-        sum_y = 0.0
-        sum_y2 = 0.0
-        sum_w = 0.0
-        for j in range(s, e):
-            idx = sorted_idx[0, j]
-            val = y[idx]
-            if sample_weights is not None:
-                w = sample_weights[idx]
-                val *= w
-                sum_w += w
-            sum_y += val
-            sum_y2 += val * val
-        if sample_weights is None:
-            sum_w = n
-        mean_y = sum_y / sum_w
+        # Initialize criterion with indices from feature 0's segment
+        indices = sorted_idx[0, s:e]
+        node_impurity, node_val = criterion.init_node(y, sample_weights, indices)
+        node_value[node] = node_val
 
         # Leaf conditions
         leaf = False
@@ -152,13 +145,12 @@ def _build_tree_numba(
 
         if leaf:
             node_feature[node] = -1  # leaf
-            node_value[node] = mean_y
             continue
 
         # --------------------------------------------------------
         # Find best split over all features
         # --------------------------------------------------------
-        best_sse = np.inf
+        best_improvement = -np.inf
         best_feature = -1
         best_j = -1
         best_missing_go_left = False
@@ -167,34 +159,22 @@ def _build_tree_numba(
             n_missing = ns_missing[f]
 
             # Scan split positions with missing on the right:
-            left_sum = 0.0
-            right_sum = 0.0
-            left_w = 0.0
+            criterion.reset()
             w = 1.0
             for j in range(s, e - max(1, n_missing)):
                 idx = sorted_idx[f, j]
                 val = y[idx]  # sparse/random reads
                 if sample_weights is not None:
                     w = sample_weights[idx]  # sparse/random reads
-                    val *= w
-                left_sum += val
-                left_w += w
+                criterion.update(val, w)
 
                 if cant_split[f, j]:
                     continue
 
-                right_w = sum_w - left_w
-                right_sum = sum_y - left_sum
+                improvement = criterion.impurity_improvement()
 
-                # SSE = sum(y^2) - sum(y)^2 / n
-                sse = (
-                    sum_y2
-                    - (left_sum * left_sum) / left_w
-                    - (right_sum * right_sum) / right_w
-                )
-
-                if sse < best_sse:
-                    best_sse = sse
+                if improvement > best_improvement:
+                    best_improvement = improvement
                     best_feature = f
                     best_j = j
                     best_missing_go_left = False
@@ -203,40 +183,29 @@ def _build_tree_numba(
                 continue
 
             # Scan split positions with missing on the left
-            left_sum = right_sum
-            left_w = right_w
+            criterion.reverse_reset()
             for j in range(s, e - n_missing - 1):
                 idx = sorted_idx[f, j]
                 val = y[idx]  # sparse/random reads
                 if sample_weights is not None:
                     w = sample_weights[idx]  # sparse/random reads
-                    val *= w
-                left_sum += val
-                left_w += w
+                criterion.update(val, w)
 
                 if cant_split[f, j]:
                     continue
 
-                right_w = sum_w - left_w
-                right_sum = sum_y - left_sum
+                improvement = criterion.impurity_improvement()
 
-                # SSE = sum(y^2) - sum(y)^2 / n
-                sse = (
-                    sum_y2
-                    - (left_sum * left_sum) / left_w
-                    - (right_sum * right_sum) / right_w
-                )
-
-                if sse < best_sse:
-                    best_sse = sse
+                if improvement > best_improvement:
+                    best_improvement = improvement
                     best_feature = f
                     best_j = j
                     best_missing_go_left = True
 
         # If no valid split found -> leaf
-        if best_feature == -1:
+        normalized_imp = best_improvement / criterion.sum_w
+        if best_feature == -1 or normalized_imp < min_impurity_decrease:
             node_feature[node] = -1
-            node_value[node] = mean_y
             continue
 
         # --------------------------------------------------------
@@ -251,7 +220,6 @@ def _build_tree_numba(
         right_child[node] = right_id
 
         node_feature[node] = best_feature
-        node_value[node] = mean_y  # not used for prediction, but can store parent mean
         node_missing_go_left[node] = best_missing_go_left
 
         if best_j == e - n_missing - 1:
@@ -429,7 +397,7 @@ def _predict_numba(
 
 
 class DecisionTreeRegressor:
-    def __init__(self, max_depth=None):
+    def __init__(self, max_depth=None, min_impurity_decrease=0.0):
         """
         Parameters
         ----------
@@ -437,6 +405,7 @@ class DecisionTreeRegressor:
             Maximum depth of the tree. If None, no depth limit.
         """
         self.max_depth = max_depth or 100
+        self.min_impurity_decrease = min_impurity_decrease
         self._fitted = False
 
     def preprocess_Xy(self, X, y, sample_weight=None):
@@ -476,6 +445,8 @@ class DecisionTreeRegressor:
         else:
             max_depth_int = int(self.max_depth)
 
+        criterion = MSE()
+
         (
             node_feature,
             node_threshold,
@@ -485,7 +456,15 @@ class DecisionTreeRegressor:
             right_child,
             node_count,
         ) = _build_tree_numba(
-            X, y, sample_weight, sorted_idx, cant_split, n_missing, max_depth_int
+            X,
+            y,
+            sample_weight,
+            sorted_idx,
+            cant_split,
+            n_missing,
+            max_depth_int,
+            criterion,
+            self.min_impurity_decrease,
         )
 
         # Truncate to actual node_count to keep things clean
