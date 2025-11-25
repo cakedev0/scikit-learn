@@ -4,27 +4,13 @@
 import numpy as np
 from numba import njit
 
-from sklearn.presortedtree.criterion import MSE, Criterion
+from sklearn.presortedtree.criterion import MSE, Criterion, Gini
 
 # ============================================================
 # Numba core: tree building
 # ============================================================
 
-
-@njit
-def _compute_max_nodes(n_samples, max_depth):
-    if max_depth == -1:
-        max_nodes = 2 * n_samples - 1
-    else:
-        max_nodes = 1
-        n_nodes_at_d = 2
-        for _ in range(max_depth):
-            max_nodes += n_nodes_at_d
-            n_nodes_at_d *= 2
-            if n_nodes_at_d > 4 * n_samples:
-                break
-        max_nodes = min(2 * n_samples - 1, max_nodes)
-    return max_nodes
+EPS = np.finfo("double").eps
 
 
 @njit
@@ -38,6 +24,12 @@ def _build_tree_numba(
     max_depth: int,
     criterion: Criterion,
     min_impurity_decrease: float,
+    node_feature: np.ndarray,
+    node_threshold: np.ndarray,
+    node_missing_go_left: np.ndarray,
+    left_child: np.ndarray,
+    right_child: np.ndarray,
+    node_value: np.ndarray,
 ):
     """
     Build a regression tree minimizing MSE.
@@ -57,7 +49,6 @@ def _build_tree_numba(
     -------
     node_feature : int32 1D array (size <= 2*N)
     node_threshold : float32 1D array
-    node_value : float32 1D array
     left_child : int32 1D array
     right_child : int32 1D array
     node_count : int
@@ -77,16 +68,6 @@ def _build_tree_numba(
                 n_nonzero, mask, sorted_idx, cant_split, n_missing_per_feature
             )
             n_samples = sorted_idx.shape[1]
-
-    max_nodes = _compute_max_nodes(n_samples, max_depth)
-
-    # Tree arrays
-    node_feature = -1 * np.ones(max_nodes, dtype=np.int32)  # -1 => leaf
-    node_threshold = np.zeros(max_nodes, dtype=np.float32)
-    node_missing_go_left = np.zeros(max_nodes, dtype=np.bool_)
-    node_value = np.zeros(max_nodes, dtype=y.dtype)
-    left_child = -1 * np.ones(max_nodes, dtype=np.int32)
-    right_child = -1 * np.ones(max_nodes, dtype=np.int32)
 
     # Stack for iterative DFS: node index + depth
     max_stack_size = max_depth + 1
@@ -138,10 +119,9 @@ def _build_tree_numba(
 
         # Leaf conditions
         leaf = False
-        if max_depth >= 0 and depth >= max_depth:
-            leaf = True
-        elif n <= 1:
-            leaf = True
+        leaf = (
+            (max_depth >= 0 and depth >= max_depth) or (node_impurity < EPS) or (n <= 1)
+        )
 
         if leaf:
             node_feature[node] = -1  # leaf
@@ -204,7 +184,7 @@ def _build_tree_numba(
 
         # If no valid split found -> leaf
         normalized_imp = best_improvement / criterion.sum_w
-        if best_feature == -1 or normalized_imp < min_impurity_decrease:
+        if best_feature == -1 or normalized_imp + EPS < min_impurity_decrease:
             node_feature[node] = -1
             continue
 
@@ -296,18 +276,7 @@ def _build_tree_numba(
         stack_n_missing[stack_size, :] = ns_missing_left
         stack_size += 1
 
-    # Done, but leaf nodes don't all have node_value yet (we set mean at leaf creation).
-    # Actually we already set node_value for leaves.
-
-    return (
-        node_feature,
-        node_threshold,
-        node_missing_go_left,
-        node_value,
-        left_child,
-        right_child,
-        node_count,
-    )
+    return node_count
 
 
 @njit
@@ -391,13 +360,50 @@ def _predict_numba(
     return preds
 
 
+@njit
+def _predict_proba_numba(
+    X,
+    node_feature,
+    node_threshold,
+    node_missing_go_left,
+    node_value,
+    left_child,
+    right_child,
+):
+    N, D = X.shape
+    n_classes = node_value.shape[1]
+    proba = np.empty((N, n_classes), dtype=np.float64)
+
+    for i in range(N):
+        node = 0  # root
+        while True:
+            f = node_feature[node]
+            if f == -1:  # leaf
+                proba[i, :] = node_value[node, :]
+                break
+            v = X[i, f]
+            if np.isnan(v):
+                go_left = node_missing_go_left[node]
+            else:
+                go_left = v <= node_threshold[node]
+
+            if go_left:
+                node = left_child[node]
+            else:
+                node = right_child[node]
+
+    return proba
+
+
 # ============================================================
 # Python wrapper class
 # ============================================================
 
 
-class DecisionTreeRegressor:
-    def __init__(self, max_depth=None, min_impurity_decrease=0.0):
+class DecisionTree:
+    def __init__(
+        self, max_depth=None, min_impurity_decrease=0.0, criterion="squared_error"
+    ):
         """
         Parameters
         ----------
@@ -406,7 +412,8 @@ class DecisionTreeRegressor:
         """
         self.max_depth = max_depth or 100
         self.min_impurity_decrease = min_impurity_decrease
-        self._fitted = False
+        self.criterion = criterion
+        self.is_clf = criterion == "gini"
 
     def preprocess_Xy(self, X, y, sample_weight=None):
         y = np.asarray(y, dtype=np.float64).ravel()
@@ -432,6 +439,17 @@ class DecisionTreeRegressor:
 
         return X, y, sorted_idx, n_missing, cant_split, sample_weight
 
+    def get_max_n_nodes(self, n_samples: int):
+        if self.max_depth is None:
+            return 2 * n_samples - 1
+
+        max_nodes = 1
+        n_nodes_at_d = 2
+        for _ in range(self.max_depth):
+            max_nodes += n_nodes_at_d
+            n_nodes_at_d *= 2
+        return min(2 * n_samples - 1, max_nodes)
+
     def fit(
         self, X, y, sorted_idx=None, n_missing=None, cant_split=None, sample_weight=None
     ):
@@ -440,22 +458,32 @@ class DecisionTreeRegressor:
                 X, y, sample_weight
             )
 
+        n_samples, _ = X.shape
+
         if self.max_depth is None:
             max_depth_int = -1
         else:
             max_depth_int = int(self.max_depth)
 
-        criterion = MSE()
+        max_n_nodes = self.get_max_n_nodes(n_samples)
 
-        (
-            node_feature,
-            node_threshold,
-            node_missing_go_left,
-            node_value,
-            left_child,
-            right_child,
-            node_count,
-        ) = _build_tree_numba(
+        if self.is_clf:
+            y = y.astype("uint8")
+            n_classes = y.max() + 1
+            value_shape = (max_n_nodes, n_classes)
+            criterion = Gini(n_classes)
+        else:
+            value_shape = (max_n_nodes,)
+            criterion = MSE()
+
+        self.node_feature = -1 * np.ones(max_n_nodes, dtype=np.int32)
+        self.node_threshold = np.zeros(max_n_nodes, dtype=np.float32)
+        self.node_missing_go_left = np.zeros(max_n_nodes, dtype=np.bool_)
+        self.left_child = -1 * np.ones(max_n_nodes, dtype=np.int32)
+        self.right_child = -1 * np.ones(max_n_nodes, dtype=np.int32)
+        self.node_value = np.empty(value_shape, dtype=np.float64)
+
+        node_count = _build_tree_numba(
             X,
             y,
             sample_weight,
@@ -465,26 +493,52 @@ class DecisionTreeRegressor:
             max_depth_int,
             criterion,
             self.min_impurity_decrease,
+            self.node_feature,
+            self.node_threshold,
+            self.node_missing_go_left,
+            self.left_child,
+            self.right_child,
+            self.node_value,
         )
 
         # Truncate to actual node_count to keep things clean
-        self.node_feature = node_feature[:node_count]
-        self.node_threshold = node_threshold[:node_count]
-        self.node_missing_go_left = node_missing_go_left[:node_count]
-        self.node_value = node_value[:node_count]
-        self.left_child = left_child[:node_count]
-        self.right_child = right_child[:node_count]
+        self.node_feature = self.node_feature[:node_count]
+        self.node_threshold = self.node_threshold[:node_count]
+        self.node_missing_go_left = self.node_missing_go_left[:node_count]
+        self.node_value = self.node_value[:node_count]
+        self.left_child = self.left_child[:node_count]
+        self.right_child = self.right_child[:node_count]
 
         self.n_nodes_ = node_count
         self._X_dtype = X.dtype
-        self._fitted = True
         return self
 
     def predict(self, X):
-        if not self._fitted:
-            raise RuntimeError("DecisionTreeRegressor is not fitted yet.")
         X = np.asarray(X, dtype=np.float32)
-        return _predict_numba(
+        args = (
+            X,
+            self.node_feature,
+            self.node_threshold,
+            self.node_missing_go_left,
+            self.node_value,
+            self.left_child,
+            self.right_child,
+        )
+        if not self.is_clf:
+            return _predict_numba(*args)
+
+        proba = _predict_proba_numba(*args)
+        return np.argmax(proba, axis=1)
+
+    def predict_proba(self, X):
+        if not self.is_clf:
+            raise ValueError(
+                "predict_proba is only available for classification. "
+                "This tree was fitted with criterion='{}'".format(self.criterion)
+            )
+
+        X = np.asarray(X, dtype=np.float32)
+        return _predict_proba_numba(
             X,
             self.node_feature,
             self.node_threshold,

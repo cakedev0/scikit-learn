@@ -1,12 +1,14 @@
+# Authors: The scikit-learn developers
+# SPDX-License-Identifier: BSD-3-Clause
+
 import itertools
 from time import perf_counter
 
 import numpy as np
 
 from sklearn.metrics import r2_score
-
-from .dt import DecisionTreeRegressor as CustomDecisionTreeRegressor
-from .forest import Forest
+from sklearn.presortedtree.dt import DecisionTree as CustomDecisionTreeRegressor
+from sklearn.presortedtree.forest import Forest
 
 
 def benchmark_tree(

@@ -4,16 +4,28 @@
 import numpy as np
 from numba import njit, prange, set_num_threads
 
-from sklearn.presortedtree.dt import (
-    DecisionTreeRegressor,
-    _build_tree_numba,
-    _compute_max_nodes,
-)
+from sklearn.presortedtree.criterion import MSE, Gini
+from sklearn.presortedtree.dt import DecisionTree, _build_tree_numba
 
 
 @njit(parallel=True)
 def _parallel_build_trees_numba(
-    X, y, sorted_idx, cant_split, n_missing, max_depth, n_estimators, n_bootstrap
+    X,
+    y,
+    sorted_idx,
+    cant_split,
+    n_missing,
+    max_depth,
+    n_bootstrap,
+    min_impurity_decrease,
+    criteria,
+    all_node_features,
+    all_node_thresholds,
+    all_node_missing_go_left,
+    all_node_values,
+    all_left_children,
+    all_right_children,
+    all_node_counts,
 ):
     """
     Build multiple trees in parallel using numba prange with sample weights.
@@ -27,46 +39,34 @@ def _parallel_build_trees_numba(
     ----------
     X : float32 2D array, shape (D, N)
     y : float64 1D array, shape (N,)
-    sorted_idx_base : int32 2D array, shape (D, N)
+    sorted_idx : int32 2D array, shape (D, N)
         Base sorted indices (shared across all trees, not modified).
-    cant_split_base : bool 2D array, shape (D, N)
+    cant_split : bool 2D array, shape (D, N)
         Base cant_split array (will be copied for each tree).
     n_missing : int32 1D array, shape (D,)
         Number of missing values per feature.
     max_depth : int
         Maximum depth of trees.
-    n_estimators : int
-        Number of trees to build.
-    bootstrap_indices_array : int32 2D array, shape (n_estimators, max_bootstrap_size)
-        Bootstrap sample indices for each tree (padded with -1).
-    bootstrap_sizes : int32 1D array, shape (n_estimators,)
-        Actual size of bootstrap sample for each tree.
+    n_bootstrap : int
+        Number of bootstrap samples per tree (0 means no bootstrap).
+    min_impurity_decrease : float
+        Minimum impurity decrease required for a split.
+    criteria : list of Criterion objects
+        Pre-instantiated criterion objects, one per tree.
+    all_node_features : int32 2D array (pre-allocated)
+    all_node_thresholds : float32 2D array (pre-allocated)
+    all_node_missing_go_left : bool 2D array (pre-allocated)
+    all_node_values : float64 2D array (pre-allocated)
+    all_left_children : int32 2D array (pre-allocated)
+    all_right_children : int32 2D array (pre-allocated)
+    all_node_counts : int32 1D array (pre-allocated)
 
     Returns
     -------
-    all_node_features : int32 2D array
-    all_node_thresholds : float32 2D array
-    all_node_missing_go_left : bool 2D array
-    all_node_values : float64 2D array
-    all_left_children : int32 2D array
-    all_right_children : int32 2D array
-    all_node_counts : int32 1D array
+    None (modifies arrays in-place)
     """
     n_features, n_samples = X.shape
-
-    # Estimate max nodes per tree
-    max_nodes_per_tree = _compute_max_nodes(n_samples, max_depth)
-
-    # Pre-allocate arrays for all trees
-    all_node_features = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
-    all_node_thresholds = np.empty((n_estimators, max_nodes_per_tree), dtype=np.float32)
-    all_node_missing_go_left = np.empty(
-        (n_estimators, max_nodes_per_tree), dtype=np.bool_
-    )
-    all_node_values = np.empty((n_estimators, max_nodes_per_tree), dtype=y.dtype)
-    all_left_children = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
-    all_right_children = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
-    all_node_counts = np.empty(n_estimators, dtype=np.int32)
+    n_estimators = all_node_features.shape[0]
 
     for tree_idx in prange(n_estimators):
         if n_bootstrap > 0:
@@ -74,16 +74,19 @@ def _parallel_build_trees_numba(
         else:
             sample_weights = None
 
+        # Get pre-allocated arrays for this tree
+        node_feature = all_node_features[tree_idx, :]
+        node_threshold = all_node_thresholds[tree_idx, :]
+        node_missing_go_left = all_node_missing_go_left[tree_idx, :]
+        node_value = all_node_values[tree_idx, :]
+        left_child = all_left_children[tree_idx, :]
+        right_child = all_right_children[tree_idx, :]
+
+        # Get pre-instantiated criterion for this tree
+        criterion = criteria[tree_idx]
+
         # Build tree using filtered data with sample weights
-        (
-            node_feature,
-            node_threshold,
-            node_missing_go_left,
-            node_value,
-            left_child,
-            right_child,
-            node_count,
-        ) = _build_tree_numba(
+        node_count = _build_tree_numba(
             X,
             y,
             sample_weights,
@@ -91,6 +94,14 @@ def _parallel_build_trees_numba(
             cant_split.copy(),
             n_missing,
             max_depth,
+            criterion,
+            min_impurity_decrease,
+            node_feature,
+            node_threshold,
+            node_missing_go_left,
+            left_child,
+            right_child,
+            node_value,
         )
 
         # Store tree data
@@ -102,16 +113,6 @@ def _parallel_build_trees_numba(
             all_node_values[tree_idx, i] = node_value[i]
             all_left_children[tree_idx, i] = left_child[i]
             all_right_children[tree_idx, i] = right_child[i]
-
-    return (
-        all_node_features,
-        all_node_thresholds,
-        all_node_missing_go_left,
-        all_node_values,
-        all_left_children,
-        all_right_children,
-        all_node_counts,
-    )
 
 
 @njit
@@ -163,6 +164,8 @@ class Forest:
         max_samples=None,
         random_state=None,
         n_jobs=None,
+        min_impurity_decrease=0.0,
+        criterion="squared_error",
     ):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
@@ -170,6 +173,8 @@ class Forest:
         self.max_samples = max_samples
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.min_impurity_decrease = min_impurity_decrease
+        self.criterion = criterion
 
     def _get_n_samples_bootstrap(self, n_samples):
         """
@@ -213,7 +218,7 @@ class Forest:
             Fitted estimator.
         """
         # Preprocess data
-        temp_tree = DecisionTreeRegressor(max_depth=self.max_depth)
+        temp_tree = DecisionTree(max_depth=self.max_depth)
         from time import perf_counter
 
         t = perf_counter()
@@ -223,6 +228,16 @@ class Forest:
         print("presort time", perf_counter() - t)
 
         _, n_samples = X.shape
+        max_nodes_per_tree = temp_tree.get_max_n_nodes(n_samples)
+
+        # Determine if classification or regression
+        is_clf = self.criterion == "gini"
+        if is_clf:
+            y = y.astype("uint8")
+            n_classes = int(y.max()) + 1
+            value_shape = (max_nodes_per_tree, n_classes)
+        else:
+            value_shape = (max_nodes_per_tree,)
 
         # Generate bootstrap indices for each tree
         if self.bootstrap:
@@ -243,9 +258,41 @@ class Forest:
 
             n_threads = os.cpu_count()
 
+        # Estimate max nodes per tree
+
+        # Pre-allocate arrays for all trees
+        shape = (self.n_estimators, max_nodes_per_tree)
+        all_node_features = np.empty(shape, dtype=np.int32)
+        all_node_thresholds = np.empty(shape, dtype=np.float32)
+        all_node_missing_go_left = np.empty(shape, dtype=np.bool_)
+        all_node_values = np.empty((self.n_estimators, *value_shape), dtype=np.float64)
+        all_left_children = np.empty(shape, dtype=np.int32)
+        all_right_children = np.empty(shape, dtype=np.int32)
+        all_node_counts = np.empty(self.n_estimators, dtype=np.int32)
+
+        # Initialize arrays
+        all_node_features[:] = -1
+        all_left_children[:] = -1
+        all_right_children[:] = -1
+
+        # Create criteria list - one per tree
+        if is_clf:
+            criteria = [Gini(n_classes) for _ in range(self.n_estimators)]
+        else:
+            criteria = [MSE() for _ in range(self.n_estimators)]
+
         # Build trees in parallel using numba
         set_num_threads(n_threads)
-        (
+        _parallel_build_trees_numba(
+            X,
+            y,
+            sorted_idx_base,
+            cant_split_base,
+            n_missing,
+            max_depth_int,
+            n_samples_bootstrap,
+            self.min_impurity_decrease,
+            criteria,
             all_node_features,
             all_node_thresholds,
             all_node_missing_go_left,
@@ -253,15 +300,6 @@ class Forest:
             all_left_children,
             all_right_children,
             all_node_counts,
-        ) = _parallel_build_trees_numba(
-            X,
-            y,
-            sorted_idx_base,
-            cant_split_base,
-            n_missing,
-            max_depth_int,
-            self.n_estimators,
-            n_samples_bootstrap,
         )
 
         # Store tree data
@@ -270,7 +308,7 @@ class Forest:
             node_count = all_node_counts[i]
 
             # Create a tree object and set its attributes
-            tree = DecisionTreeRegressor(max_depth=self.max_depth)
+            tree = DecisionTree(max_depth=self.max_depth, criterion=self.criterion)
             tree.node_feature = all_node_features[i, :node_count].copy()
             tree.node_threshold = all_node_thresholds[i, :node_count].copy()
             tree.node_missing_go_left = all_node_missing_go_left[i, :node_count].copy()
@@ -278,18 +316,18 @@ class Forest:
             tree.left_child = all_left_children[i, :node_count].copy()
             tree.right_child = all_right_children[i, :node_count].copy()
             tree.n_nodes_ = node_count
-            tree._fitted = True
-
             self.estimators_.append(tree)
 
         return self
 
     def predict(self, X):
         """
-        Predict regression target for X.
+        Predict target for X.
 
-        The predicted regression target of an input sample is computed as the
-        mean predicted regression targets of the trees in the forest.
+        For regression, the predicted target is computed as the mean of the
+        predictions from all trees.
+        For classification, the predicted class is the one with highest average
+        probability across all trees.
 
         Parameters
         ----------
@@ -299,16 +337,58 @@ class Forest:
         Returns
         -------
         y : ndarray of shape (n_samples,)
-            The predicted values.
+            The predicted values (regression) or class labels (classification).
         """
+        if self.criterion == "gini":
+            # For classification, use predict_proba and take argmax
+            return np.argmax(self.predict_proba(X), axis=1).astype(np.int64)
+        else:
+            # For regression, accumulate predictions
+            X = np.asarray(X, dtype=np.float32)
+            y_hat = np.zeros(X.shape[0], dtype=np.float64)
+            for tree in self.estimators_:
+                y_hat += tree.predict(X)
+            y_hat /= len(self.estimators_)
+            return y_hat
+
+    def predict_proba(self, X):
+        """Predict class probabilities for X.
+
+        For classification, returns the mean predicted class probabilities
+        of the trees in the forest.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        proba : ndarray of shape (n_samples, n_classes)
+            The class probabilities of the input samples. The order of the
+            classes corresponds to that in the fitted attribute classes_.
+
+        Raises
+        ------
+        ValueError
+            If the forest was not fitted with a classification criterion.
+        """
+        if self.criterion != "gini":
+            raise ValueError(
+                "predict_proba is only available for classification. "
+                "This forest was fitted with criterion='{}'".format(self.criterion)
+            )
+
         X = np.asarray(X, dtype=np.float32)
 
-        # Accumulate predictions from all trees
-        y_hat = np.zeros(X.shape[0], dtype=np.float64)
+        # Get first tree's prediction to determine n_classes
+        first_proba = self.estimators_[0].predict_proba(X)
+        n_classes = first_proba.shape[1]
+        y_proba = np.zeros((X.shape[0], n_classes), dtype=np.float64)
 
+        # Accumulate probabilities from all trees
         for tree in self.estimators_:
-            y_hat += tree.predict(X)
+            y_proba += tree.predict_proba(X)
 
-        y_hat /= len(self.estimators_)
-
-        return y_hat
+        y_proba /= len(self.estimators_)
+        return y_proba
