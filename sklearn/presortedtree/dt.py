@@ -58,7 +58,22 @@ def _build_tree_numba(
     right_child : int32 1D array
     node_count : int
     """
-    n_features, n_samples = X.shape
+    n_features, n_samples = sorted_idx.shape
+    samples_support_size = n_samples
+
+    if sample_weights is not None:
+        mask = sample_weights > 0.0
+        n_nonzero = 0
+        for i in range(n_samples):
+            if mask[i]:
+                n_nonzero += 1
+
+        if n_nonzero > 0:
+            sorted_idx, cant_split, n_missing_per_feature = remove_zero_weights(
+                n_nonzero, mask, sorted_idx, cant_split, n_missing_per_feature
+            )
+            n_samples = sorted_idx.shape[1]
+
     max_nodes = _compute_max_nodes(n_samples, max_depth)
 
     # Tree arrays
@@ -81,7 +96,7 @@ def _build_tree_numba(
     # Temp buffers reused for all nodes/features
     idx_buf = np.empty(n_samples, dtype=sorted_idx.dtype)  # for stable partitioning
     ranks_buf = np.empty(n_samples, dtype=np.int32)  # for stable partitioning
-    go_left = np.empty(n_samples, dtype=np.bool_)  # for stable partitioning
+    go_left = np.empty(samples_support_size, dtype=np.bool_)  # for stable partitioning
     ns_missing_left = np.empty(n_features, dtype=np.int32)
 
     # Push root to the stack
@@ -327,6 +342,48 @@ def _build_tree_numba(
     )
 
 
+@njit
+def remove_zero_weights(
+    n_nonzero: int,
+    mask: np.ndarray,
+    sorted_idx: np.ndarray,
+    cant_split: np.ndarray,
+    n_missing: np.ndarray,
+):
+    # Filter sorted_idx to only include samples with non-zero weight
+    # But keep the indices pointing to the original X, y arrays
+    n_features, n_samples = sorted_idx.shape
+
+    # Create filtered sorted indices (still pointing to original sample indices)
+    sorted_idx_filtered = np.empty((n_features, n_nonzero), dtype=sorted_idx.dtype)
+    cant_split_filtered = np.empty((n_features, n_nonzero), dtype=np.bool_)
+    n_missing_filtered = np.zeros_like(n_missing)
+    ranks = np.empty(n_nonzero, dtype=np.int32)
+
+    for f in range(n_features):
+        j = 0
+        rank = 0
+        n_m = 0
+        for i in range(n_samples):
+            old_idx = sorted_idx[f, i]
+            if mask[old_idx]:
+                # Keep original index pointing to X, y
+                sorted_idx_filtered[f, j] = old_idx
+                ranks[j] = rank
+                j += 1
+                n_m += i >= n_samples - n_missing[f]
+            if not cant_split[f, i]:
+                rank += 1
+
+        n_missing_filtered[f] = n_m
+
+        for j in range(n_nonzero - 1):
+            cant_split_filtered[f, j] = ranks[j] == ranks[j + 1]
+        cant_split_filtered[f, n_nonzero - 1] = True
+
+    return sorted_idx_filtered, cant_split_filtered, n_missing_filtered
+
+
 # ============================================================
 # Numba core: prediction
 # ============================================================
@@ -402,7 +459,7 @@ class DecisionTreeRegressor:
             cant_split[f, -1] = True
             cant_split[f, :-1] = np.diff(v_sorted) == 0
 
-        n_missing = np.isnan(X).sum(axis=1)
+        n_missing = np.isnan(X).sum(axis=1).astype(np.int32)
 
         return X, y, sorted_idx, n_missing, cant_split, sample_weight
 

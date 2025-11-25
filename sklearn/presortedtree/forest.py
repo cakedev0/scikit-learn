@@ -2,57 +2,33 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, set_num_threads
 
-from sklearn.presortedtree.dt import DecisionTreeRegressor, _build_tree_numba
-
-MAX_INT = np.iinfo(np.int32).max
-
-
-def _generate_sample_indices(random_state, n_samples, n_samples_bootstrap):
-    """
-    Generate bootstrap sample indices.
-
-    Parameters
-    ----------
-    random_state : int or RandomState
-        Random state for reproducibility.
-    n_samples : int
-        Number of samples in the dataset.
-    n_samples_bootstrap : int
-        Number of samples to draw for the bootstrap sample.
-
-    Returns
-    -------
-    sample_indices : ndarray of shape (n_samples_bootstrap,)
-        The sampled indices (with replacement).
-    """
-    rng = np.random.RandomState(random_state)
-    sample_indices = rng.randint(0, n_samples, n_samples_bootstrap, dtype=np.int32)
-    return sample_indices
+from sklearn.presortedtree.dt import (
+    DecisionTreeRegressor,
+    _build_tree_numba,
+    _compute_max_nodes,
+)
 
 
 @njit(parallel=True)
 def _parallel_build_trees_numba(
-    X,
-    y,
-    sorted_idx_base,
-    cant_split_base,
-    n_missing,
-    max_depth,
-    n_estimators,
-    bootstrap_indices_array,
-    bootstrap_sizes,
+    X, y, sorted_idx, cant_split, n_missing, max_depth, n_estimators, n_bootstrap
 ):
     """
-    Build multiple trees in parallel using numba prange.
+    Build multiple trees in parallel using numba prange with sample weights.
+
+    Instead of creating bootstrapped subsets and resorting, this function:
+    1. Converts bootstrap sample indices to sample weights
+    2. Uses the original sorted indices with weights
+    3. Avoids expensive resorting for each tree
 
     Parameters
     ----------
     X : float32 2D array, shape (D, N)
     y : float64 1D array, shape (N,)
     sorted_idx_base : int32 2D array, shape (D, N)
-        Base sorted indices (will be copied for each tree).
+        Base sorted indices (shared across all trees, not modified).
     cant_split_base : bool 2D array, shape (D, N)
         Base cant_split array (will be copied for each tree).
     n_missing : int32 1D array, shape (D,)
@@ -68,18 +44,18 @@ def _parallel_build_trees_numba(
 
     Returns
     -------
-    all_node_features : list of int32 arrays
-    all_node_thresholds : list of float32 arrays
-    all_node_missing_go_left : list of bool arrays
-    all_node_values : list of float64 arrays
-    all_left_children : list of int32 arrays
-    all_right_children : list of int32 arrays
+    all_node_features : int32 2D array
+    all_node_thresholds : float32 2D array
+    all_node_missing_go_left : bool 2D array
+    all_node_values : float64 2D array
+    all_left_children : int32 2D array
+    all_right_children : int32 2D array
     all_node_counts : int32 1D array
     """
     n_features, n_samples = X.shape
 
     # Estimate max nodes per tree
-    max_nodes_per_tree = 2 * n_samples - 1
+    max_nodes_per_tree = _compute_max_nodes(n_samples, max_depth)
 
     # Pre-allocate arrays for all trees
     all_node_features = np.empty((n_estimators, max_nodes_per_tree), dtype=np.int32)
@@ -93,46 +69,12 @@ def _parallel_build_trees_numba(
     all_node_counts = np.empty(n_estimators, dtype=np.int32)
 
     for tree_idx in prange(n_estimators):
-        # Get bootstrap indices for this tree
-        n_bootstrap = bootstrap_sizes[tree_idx]
+        if n_bootstrap > 0:
+            sample_weights = _perform_bootstrap(n_bootstrap, n_samples)
+        else:
+            sample_weights = None
 
-        # Create bootstrapped dataset
-        X_boot = np.empty((n_features, n_bootstrap), dtype=X.dtype)
-        y_boot = np.empty(n_bootstrap, dtype=y.dtype)
-
-        for i in range(n_bootstrap):
-            idx = bootstrap_indices_array[tree_idx, i]
-            y_boot[i] = y[idx]
-            for f in range(n_features):
-                X_boot[f, i] = X[f, idx]
-
-        # Create sorted indices for bootstrapped data
-        sorted_idx = np.empty((n_features, n_bootstrap), dtype=np.int32)
-        cant_split = np.empty((n_features, n_bootstrap), dtype=np.bool_)
-
-        for f in range(n_features):
-            # Sort by feature values
-            feature_values = X_boot[f, :]
-            # Use argsort with kind='mergesort' for stability, then cast to int32
-            temp_sorted = np.argsort(feature_values, kind="mergesort")
-            for i in range(n_bootstrap):
-                sorted_idx[f, i] = temp_sorted[i]
-
-            # Mark positions where we can't split (duplicate values)
-            for i in range(n_bootstrap - 1):
-                idx_curr = sorted_idx[f, i]
-                idx_next = sorted_idx[f, i + 1]
-                cant_split[f, i] = feature_values[idx_curr] == feature_values[idx_next]
-            cant_split[f, n_bootstrap - 1] = True
-
-        # Count missing values in bootstrapped data
-        n_missing_boot = np.zeros(n_features, dtype=np.int32)
-        for f in range(n_features):
-            for i in range(n_bootstrap):
-                if np.isnan(X_boot[f, i]):
-                    n_missing_boot[f] += 1
-
-        # Build tree
+        # Build tree using filtered data with sample weights
         (
             node_feature,
             node_threshold,
@@ -142,7 +84,13 @@ def _parallel_build_trees_numba(
             right_child,
             node_count,
         ) = _build_tree_numba(
-            X_boot, y_boot, sorted_idx, cant_split, n_missing_boot, max_depth
+            X,
+            y,
+            sample_weights,
+            sorted_idx.copy(),
+            cant_split.copy(),
+            n_missing,
+            max_depth,
         )
 
         # Store tree data
@@ -166,6 +114,21 @@ def _parallel_build_trees_numba(
     )
 
 
+@njit
+def _perform_bootstrap(
+    n_bootstrap: int,
+    n_samples: int,
+):
+    # Convert bootstrap indices to sample weights
+    # Count occurrences of each sample index in the bootstrap sample
+    sample_weights = np.zeros(n_samples, dtype=np.float64)
+    for i in range(n_bootstrap):
+        idx = np.random.choice(n_samples)
+        sample_weights[idx] += 1.0
+
+    return sample_weights
+
+
 class Forest:
     """
     Random Forest Regressor using presorted features and numba parallelization.
@@ -185,6 +148,10 @@ class Forest:
         - If None, draw `n_samples` samples (100%).
     random_state : int or None, default=None
         Random state for reproducibility.
+    n_jobs : int or None, default=None
+        The number of threads to use for parallel tree building:
+        - If None or -1, use all available threads.
+        - If int > 0, use that many threads.
     """
 
     def __init__(
@@ -195,12 +162,14 @@ class Forest:
         bootstrap=True,
         max_samples=None,
         random_state=None,
+        n_jobs=None,
     ):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.bootstrap = bootstrap
         self.max_samples = max_samples
         self.random_state = random_state
+        self.n_jobs = n_jobs
 
     def _get_n_samples_bootstrap(self, n_samples):
         """
@@ -220,15 +189,12 @@ class Forest:
             return n_samples
 
         if isinstance(self.max_samples, int):
-            if self.max_samples > n_samples:
-                raise ValueError(
-                    f"`max_samples` must be <= n_samples={n_samples} "
-                    f"but got value {self.max_samples}"
-                )
             return self.max_samples
 
         if isinstance(self.max_samples, float):
             return max(round(n_samples * self.max_samples), 1)
+
+        raise TypeError()
 
     def fit(self, X, y):
         """
@@ -248,44 +214,21 @@ class Forest:
         """
         # Preprocess data
         temp_tree = DecisionTreeRegressor(max_depth=self.max_depth)
-        X, y, sorted_idx_base, n_missing, cant_split_base = temp_tree.preprocess_Xy(
+        from time import perf_counter
+
+        t = perf_counter()
+        X, y, sorted_idx_base, n_missing, cant_split_base, _ = temp_tree.preprocess_Xy(
             X, y
         )
+        print("presort time", perf_counter() - t)
 
-        n_features, n_samples = X.shape
-
-        # Setup random state
-        if self.random_state is None:
-            rng = np.random.RandomState()
-        else:
-            rng = np.random.RandomState(self.random_state)
+        _, n_samples = X.shape
 
         # Generate bootstrap indices for each tree
         if self.bootstrap:
             n_samples_bootstrap = self._get_n_samples_bootstrap(n_samples)
         else:
-            n_samples_bootstrap = n_samples
-
-        # Create a 2D array to hold all bootstrap indices (padded with -1 if needed)
-        bootstrap_indices_array = np.empty(
-            (self.n_estimators, n_samples_bootstrap), dtype=np.int32
-        )
-        bootstrap_sizes = np.full(
-            self.n_estimators, n_samples_bootstrap, dtype=np.int32
-        )
-
-        for i in range(self.n_estimators):
-            if self.bootstrap:
-                # Use a different seed for each tree
-                tree_seed = rng.randint(0, MAX_INT)
-                indices = _generate_sample_indices(
-                    tree_seed, n_samples, n_samples_bootstrap
-                )
-            else:
-                # No bootstrap: use all samples for each tree
-                indices = np.arange(n_samples, dtype=np.int32)
-
-            bootstrap_indices_array[i, :] = indices
+            n_samples_bootstrap = 0
 
         # Set max_depth for numba function
         if self.max_depth is None:
@@ -293,7 +236,15 @@ class Forest:
         else:
             max_depth_int = int(self.max_depth)
 
+        # Determine number of threads
+        n_threads = self.n_jobs
+        if n_threads is None or n_threads == -1:
+            import os
+
+            n_threads = os.cpu_count()
+
         # Build trees in parallel using numba
+        set_num_threads(n_threads)
         (
             all_node_features,
             all_node_thresholds,
@@ -310,8 +261,7 @@ class Forest:
             n_missing,
             max_depth_int,
             self.n_estimators,
-            bootstrap_indices_array,
-            bootstrap_sizes,
+            n_samples_bootstrap,
         )
 
         # Store tree data
