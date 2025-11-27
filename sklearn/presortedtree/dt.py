@@ -458,7 +458,7 @@ class DecisionTree:
                 X, y, sample_weight
             )
 
-        n_samples, _ = X.shape
+        _, n_samples = X.shape
 
         if self.max_depth is None:
             max_depth_int = -1
