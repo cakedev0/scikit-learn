@@ -7,8 +7,9 @@ from time import perf_counter
 import numpy as np
 
 from sklearn.metrics import r2_score
-from sklearn.presortedtree.dt import DecisionTree as CustomDecisionTreeRegressor
-from sklearn.presortedtree.forest import Forest
+from sklearn.presortedtree.binsortdt import BinSortDecisionTree
+from sklearn.presortedtree.dt import DecisionTree
+from sklearn.tree import DecisionTreeRegressor
 
 
 def benchmark_tree(
@@ -39,7 +40,7 @@ def benchmark_tree(
         if is_clf:
             raise NotImplementedError()
         tree = cls(**kwargs)
-        if isinstance(tree, CustomDecisionTreeRegressor):
+        if isinstance(tree, (DecisionTree, BinSortDecisionTree)):
             args = tree.preprocess_Xy(X, y)
         else:
             args = (X, y)
@@ -66,19 +67,26 @@ def kwargs_product(**kwargs):
 
 if __name__ == "__main__":
     for kwargs in kwargs_product(
-        duplication_level=[0],
-        max_depth=[12],  # [1, 2, 3, 6, 9, 12, None],
-        cls=[Forest],  # [partial(RandomForestRegressor, bootstrap=False), Forest],
-        n_jobs=[1, 2, 4, 8, 12],
+        duplication_level=[0, 1, 2],
+        max_depth=[1, 2, 3, 4, 6, 9, 12],  # [1, 2, 3, 6, 9, 12, None],
+        cls=[
+            DecisionTree,
+            BinSortDecisionTree,
+            DecisionTreeRegressor,
+        ],  # [partial(RandomForestRegressor, bootstrap=False), Forest],
+        # n_jobs=[1, 2, 4, 8, 12],
     ):
-        kwargs["n_estimators"] = kwargs["n_jobs"] * 20
+        # kwargs["n_estimators"] = kwargs["n_jobs"] * 20
         out = benchmark_tree(**kwargs, size=10_000_000, d=10, n_fit=4, n_skip=1)
         dt, dt_min, dt_max = out["dt"], out["dt_min"], out["dt_max"]
         cls = out["cls"]
         name = (
             "pre-sorted"
-            if cls in (CustomDecisionTreeRegressor, Forest)
-            else "scikit-learn"
+            if cls is DecisionTree
+            else ("bin-sorted" if cls is BinSortDecisionTree else "scikit-learn")
         )
         score = out["score"]
-        print(name, f"{dt:.2f} [{dt_min:.2f} - {dt_max:.2f}] (score: {score:.2f})")
+        kwargs.pop("cls")
+        print(
+            kwargs, name, f"{dt:.2f} [{dt_min:.2f} - {dt_max:.2f}] (score: {score:.2f})"
+        )

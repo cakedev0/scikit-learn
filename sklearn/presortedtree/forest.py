@@ -219,13 +219,10 @@ class Forest:
         """
         # Preprocess data
         temp_tree = DecisionTree(max_depth=self.max_depth)
-        from time import perf_counter
 
-        t = perf_counter()
         X, y, sorted_idx_base, n_missing, cant_split_base, _ = temp_tree.preprocess_Xy(
             X, y
         )
-        print("presort time", perf_counter() - t)
 
         _, n_samples = X.shape
         max_nodes_per_tree = temp_tree.get_max_n_nodes(n_samples)

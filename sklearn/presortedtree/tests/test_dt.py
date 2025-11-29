@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
+from sklearn.presortedtree.binsortdt import BinSortDecisionTree
 from sklearn.presortedtree.dt import DecisionTree
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
@@ -54,6 +55,35 @@ def test_same_split_sklearn(
         .fit(**kwargs)
         .predict(kwargs["X"])
     )
+
+    Tree = DecisionTreeClassifier if clf else DecisionTreeRegressor
+    expected = (
+        Tree(max_depth=max_depth, criterion=criterion)
+        .fit(**kwargs)
+        .predict(kwargs["X"])
+    )
+    assert_allclose(actual, expected)
+
+
+@pytest.mark.parametrize("criterion", ["squared_error"])
+@pytest.mark.parametrize("weights", ["x"])
+@pytest.mark.parametrize("missing", ["x"])
+@pytest.mark.parametrize("d", [1, 2, 3, 5, 10, 20])
+@pytest.mark.parametrize("duplication_level", [0, 1, 2])
+@pytest.mark.parametrize("max_depth", [1, 2])
+def test_same_split_sklearn_binsort(
+    weights, missing, d, duplication_level, max_depth, criterion
+):
+    clf = criterion == "gini"
+    kwargs = generate_data(
+        size=np.random.randint(5_000, 20_000),
+        d=d,
+        duplication_level=duplication_level,
+        ratio_missing=0 if missing == "x" else 0.1,
+        weights=weights != "x",
+        clf=clf,
+    )
+    actual = BinSortDecisionTree(max_depth=max_depth).fit(**kwargs).predict(kwargs["X"])
 
     Tree = DecisionTreeClassifier if clf else DecisionTreeRegressor
     expected = (

@@ -26,15 +26,11 @@ def _preprocess_X_binning(X, n_bins=256):
         if nu <= n_bins:
             X_binned[f, :] = idx
             # Mark bins with single unique value as constant
-            for b in range(nu):
-                constant_bins[f, b] = True
+            constant_bins[f, :nu] = True
             n_bins_per_feature[f] = x_u.size
             continue
 
-        step = n_samples // n_bins
-        # TODO: dichoyomy to fnid the optimal step in [max(10, n_samples // (n_bins * 10)), n_samples // n_bins]
-        bin_edges = np.repeat(np.arange(nu), counts)[step::step]
-        bin_edges = np.unique(np.r_[0, bin_edges, nu])
+        bin_edges = optimal_bin_edges(counts, n_samples, n_bins)
         assert bin_edges.size <= n_bins + 1
         X_binned[f, :] = np.searchsorted(bin_edges, idx, side="right") - 1
         nb = bin_edges.size - 1
@@ -42,6 +38,24 @@ def _preprocess_X_binning(X, n_bins=256):
         constant_bins[f, :nb] = (bin_edges[:-1] + 1) == bin_edges[1:]
 
     return X, X_binned, n_bins_per_feature, constant_bins
+
+
+def optimal_bin_edges(counts: np.ndarray, n_samples: int, n_bins: int):
+    nu = counts.size
+    sorted_indices = np.repeat(np.arange(nu), counts)
+    min_step = max(10, n_samples // (n_bins * 10))
+    max_step = (n_samples + n_bins - 1) // n_bins
+    while min_step + 1 < max_step:
+        step = (min_step + max_step) // 2
+        nb = np.unique(sorted_indices[step::step]).size
+        if sorted_indices[step] != 0:
+            nb += 1
+        if nb > n_bins:
+            min_step = step
+        else:
+            max_step = step
+    step = max_step
+    return np.unique(np.r_[0, sorted_indices[step::step], nu])
 
 
 # ============================================================
@@ -61,8 +75,6 @@ def _sort_by_bin_then_refine(
     s,
     e,
 ):
-    n = e - s
-
     # Count samples per bin
     bin_ptrs = np.zeros(n_bins + 1, dtype=np.int32)
     for i in range(s, e):
@@ -99,11 +111,6 @@ def _sort_by_bin_then_refine(
         sorter = np.argsort(x_buf[start:end])
         x_buf[start:end] = x_buf[start:end][sorter]
         y_buf[start:end] = y_buf[start:end][sorter]
-
-    # Copy sorted values back to original arrays
-    for i in range(n):
-        x[s + i] = x_buf[i]
-        y[s + i] = y_buf[i]
 
 
 @njit
@@ -191,9 +198,9 @@ def _partition_inplace(
     Parameters
     ----------
     X : float32 2D array
-        Original feature values (entire dataset)
+        Original feature values (entire dataset) - shape (n_features, n_samples)
     X_binned : uint8 2D array
-        Binned feature values (entire dataset)
+        Binned feature values (entire dataset) - shape (n_features, n_samples)
     y : float64 1D array
         Target values (entire dataset)
     s : int
@@ -214,17 +221,17 @@ def _partition_inplace(
     right = e - 1
 
     while left <= right:
-        val = X[left, split_feature]
+        val = X[split_feature, left]
 
         if val <= split_threshold:
             left += 1
         else:
             # Swap with right
-            for f in range(X.shape[1]):
-                X[left, f], X[right, f] = X[right, f], X[left, f]
-                X_binned[left, f], X_binned[right, f] = (
-                    X_binned[right, f],
-                    X_binned[left, f],
+            for f in range(X.shape[0]):
+                X[f, left], X[f, right] = X[f, right], X[f, left]
+                X_binned[f, left], X_binned[f, right] = (
+                    X_binned[f, right],
+                    X_binned[f, left],
                 )
             y[left], y[right] = y[right], y[left]
             right -= 1
@@ -255,7 +262,7 @@ def _build_tree_numba(
     node_count : int
         Total number of nodes created
     """
-    n_samples, n_features = X.shape
+    n_features, n_samples = X.shape
 
     # Buffers for sorting
     x_buf = np.empty(n_samples, dtype=X.dtype)
@@ -321,8 +328,8 @@ def _build_tree_numba(
             end,
             constant_bins,
             n_bins,
-            x_buf[:n],
-            y_buf[:n],
+            x_buf,
+            y_buf,
         )
 
         normalized_imp = best_imp / n
@@ -441,11 +448,28 @@ class BinSortDecisionTree:
             n_nodes_at_d *= 2
         return min(2 * n_samples - 1, max_nodes)
 
-    def fit(self, X, y, sample_weight=None):
+    def preprocess_Xy(self, X, y, sample_weight=None):
         assert sample_weight is None
-        # Preprocess
+
         X, X_binned, n_bins_per_feature, constant_bins = _preprocess_X_binning(X)
         y = np.asarray(y, dtype=np.float64, copy=True).ravel()
+        return X, y, sample_weight, X_binned, n_bins_per_feature, constant_bins
+
+    def fit(
+        self,
+        X,
+        y,
+        sample_weight=None,
+        X_binned=None,
+        n_bins_per_feature=None,
+        constant_bins=None,
+    ):
+        assert sample_weight is None
+        # Preprocess
+        if X_binned is None:
+            X, y, sample_weight, X_binned, n_bins_per_feature, constant_bins = (
+                self.preprocess_Xy(X, y)
+            )
 
         n_samples = len(y)
         max_depth_int = -1 if self.max_depth is None else int(self.max_depth)
