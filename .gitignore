@@ -11,6 +11,9 @@ build
 sklearn/datasets/__config__.py
 sklearn/**/*.html
 
+datasets/*
+.ipynb_checkpoints/*
+
 dist/
 MANIFEST
 doc/sg_execution_times.rst
