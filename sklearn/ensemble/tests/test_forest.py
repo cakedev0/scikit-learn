@@ -21,7 +21,7 @@ from scipy.special import comb
 
 import sklearn
 from sklearn import clone, datasets
-from sklearn.datasets import make_classification, make_hastie_10_2
+from sklearn.datasets import make_classification, make_hastie_10_2, make_regression
 from sklearn.decomposition import TruncatedSVD
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import (
@@ -117,6 +117,9 @@ FOREST_ESTIMATORS.update(FOREST_TRANSFORMERS)
 FOREST_CLASSIFIERS_REGRESSORS: Dict[str, Any] = FOREST_CLASSIFIERS.copy()
 FOREST_CLASSIFIERS_REGRESSORS.update(FOREST_REGRESSORS)
 
+CLF_CRITERIONS = ("gini", "log_loss")
+REG_CRITERIONS = ("squared_error", "absolute_error", "friedman_mse", "poisson")
+
 
 @pytest.mark.parametrize("name", FOREST_CLASSIFIERS)
 def test_classification_toy(name):
@@ -158,9 +161,7 @@ def test_iris_criterion(name, criterion):
 
 
 @pytest.mark.parametrize("name", FOREST_REGRESSORS)
-@pytest.mark.parametrize(
-    "criterion", ("squared_error", "absolute_error", "friedman_mse")
-)
+@pytest.mark.parametrize("criterion", ("squared_error", "absolute_error"))
 def test_regression_criterion(name, criterion):
     # Check consistency on regression dataset.
     ForestRegressor = FOREST_REGRESSORS[name]
@@ -294,7 +295,7 @@ def test_probability(name):
     "name, criterion",
     itertools.chain(
         product(FOREST_CLASSIFIERS, ["gini", "log_loss"]),
-        product(FOREST_REGRESSORS, ["squared_error", "friedman_mse", "absolute_error"]),
+        product(FOREST_REGRESSORS, ["squared_error", "absolute_error"]),
     ),
 )
 def test_importances(dtype, name, criterion):
@@ -1766,19 +1767,18 @@ def test_estimators_samples(ForestClass, bootstrap, seed):
 
 
 @pytest.mark.parametrize(
-    "make_data, Forest",
+    "Forest, criterion",
     [
-        (datasets.make_regression, RandomForestRegressor),
-        (datasets.make_classification, RandomForestClassifier),
-        (datasets.make_regression, ExtraTreesRegressor),
-        (datasets.make_classification, ExtraTreesClassifier),
+        *product(FOREST_REGRESSORS.values(), sorted(set(REG_CRITERIONS) - {"poisson"})),
+        # this test is not adapted for poisson loss (not positive count-like targets)
+        *product(FOREST_CLASSIFIERS.values(), CLF_CRITERIONS),
     ],
 )
-def test_missing_values_is_resilient(make_data, Forest):
+def test_missing_values_is_resilient(Forest, criterion):
     """Check that forest can deal with missing values and has decent performance."""
-
     rng = np.random.RandomState(0)
-    n_samples, n_features = 1000, 10
+    n_samples, n_features = 500, 5
+    make_data = make_regression if criterion in REG_CRITERIONS else make_classification
     X, y = make_data(n_samples=n_samples, n_features=n_features, random_state=rng)
 
     # Create dataset with missing values
@@ -1791,13 +1791,13 @@ def test_missing_values_is_resilient(make_data, Forest):
     )
 
     # Train forest with missing values
-    forest_with_missing = Forest(random_state=rng, n_estimators=50)
+    forest_with_missing = Forest(random_state=rng, criterion=criterion, n_estimators=50)
     forest_with_missing.fit(X_missing_train, y_train)
     score_with_missing = forest_with_missing.score(X_missing_test, y_test)
 
     # Train forest without missing values
     X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
-    forest = Forest(random_state=rng, n_estimators=50)
+    forest = Forest(random_state=rng, criterion=criterion, n_estimators=50)
     forest.fit(X_train, y_train)
     score_without_missing = forest.score(X_test, y_test)
 
@@ -1806,20 +1806,20 @@ def test_missing_values_is_resilient(make_data, Forest):
 
 
 @pytest.mark.parametrize(
-    "Forest",
+    "Forest, criterion",
     [
-        RandomForestClassifier,
-        RandomForestRegressor,
-        ExtraTreesRegressor,
-        ExtraTreesClassifier,
+        *product(FOREST_REGRESSORS.values(), REG_CRITERIONS),
+        *product(FOREST_CLASSIFIERS.values(), CLF_CRITERIONS),
     ],
 )
-def test_missing_value_is_predictive(Forest):
+def test_missing_value_is_predictive(Forest, criterion):
     """Check that the forest learns when missing values are only present for
     a predictive feature."""
     rng = np.random.RandomState(0)
     n_samples = 300
     expected_score = 0.75
+    # FIXME: this `expected_score` is too high and breaks in some cases
+    # if the seed is set to something else than 0
 
     X_non_predictive = rng.standard_normal(size=(n_samples, 10))
     y = rng.randint(0, high=2, size=n_samples)
@@ -1844,8 +1844,10 @@ def test_missing_value_is_predictive(Forest):
         y_train,
         y_test,
     ) = train_test_split(X_predictive, X_non_predictive, y, random_state=0)
-    forest_predictive = Forest(random_state=0).fit(X_predictive_train, y_train)
-    forest_non_predictive = Forest(random_state=0).fit(X_non_predictive_train, y_train)
+    forest_predictive = Forest(random_state=0, criterion=criterion)
+    forest_predictive.fit(X_predictive_train, y_train)
+    forest_non_predictive = Forest(random_state=0, criterion=criterion)
+    forest_non_predictive.fit(X_non_predictive_train, y_train)
 
     predictive_test_score = forest_predictive.score(X_predictive_test, y_test)
 

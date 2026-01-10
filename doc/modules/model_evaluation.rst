@@ -481,6 +481,7 @@ Some of these are restricted to the binary classification case:
    roc_curve
    class_likelihood_ratios
    det_curve
+   confusion_matrix_at_thresholds
 
 
 Others also work in the multiclass case:
@@ -816,6 +817,26 @@ false negatives and true positives as follows::
   >>> tn, fp, fn, tp
   (2, 1, 2, 3)
 
+With :func:`confusion_matrix_at_thresholds` we can get true negatives, false positives,
+false negatives and true positives for different thresholds::
+
+  >>> from sklearn.metrics import confusion_matrix_at_thresholds
+  >>> y_true = np.array([0., 0., 1., 1.])
+  >>> y_score = np.array([0.1, 0.4, 0.35, 0.8])
+  >>> tns, fps, fns, tps, thresholds = confusion_matrix_at_thresholds(y_true, y_score)
+  >>> tns
+  array([2., 1., 1., 0.])
+  >>> fps
+  array([0., 1., 1., 2.])
+  >>> fns
+  array([1., 1., 0., 0.])
+  >>> tps
+  array([1., 1., 2., 2.])
+  >>> thresholds
+  array([0.8, 0.4, 0.35, 0.1])
+
+Note that the thresholds consist of distinct `y_score` values, in decreasing order.
+
 .. rubric:: Examples
 
 * See :ref:`sphx_glr_auto_examples_model_selection_plot_confusion_matrix.py`
@@ -1113,7 +1134,7 @@ Note the following behaviors when averaging:
 
 * If all labels are included, "micro"-averaging in a multiclass setting will produce
   precision, recall and :math:`F` that are all identical to accuracy.
-* "weighted" averaging may produce a F-score that is not between precision and recall.
+* "weighted" averaging may produce an F-score that is not between precision and recall.
 * "macro" averaging for F-measures is calculated as the arithmetic mean over
   per-label/class F-measures, not the harmonic mean over the arithmetic precision and
   recall means. Both calculations can be seen in the literature but are not equivalent,
@@ -1281,7 +1302,7 @@ is defined by:
   - w_{i, y_i}, 0\right\}
 
 Here is a small example demonstrating the use of the :func:`hinge_loss` function
-with a svm classifier in a binary class problem::
+with an svm classifier in a binary class problem::
 
   >>> from sklearn import svm
   >>> from sklearn.metrics import hinge_loss
@@ -1297,7 +1318,7 @@ with a svm classifier in a binary class problem::
   0.3
 
 Here is an example demonstrating the use of the :func:`hinge_loss` function
-with a svm classifier in a multiclass problem::
+with an svm classifier in a multiclass problem::
 
   >>> X = np.array([[0], [1], [2], [3]])
   >>> Y = np.array([0, 1, 2, 3])
@@ -1988,7 +2009,7 @@ the same does a lower Brier score loss always mean better calibration"
 
 .. [Bella2012] Bella, Ferri, Hernández-Orallo, and Ramírez-Quintana
   `"Calibration of Machine Learning Models"
-  <http://dmip.webs.upv.es/papers/BFHRHandbook2010.pdf>`_
+  <https://dmip.webs.upv.es/papers/BFHRHandbook2010.pdf>`_
   in Khosrow-Pour, M. "Machine learning: concepts, methodologies, tools
   and applications." Hershey, PA: Information Science Reference (2012).
 
@@ -2966,7 +2987,7 @@ quantile regressor via cross-validation:
   ...     random_state=0,
   ... )
   >>> cross_val_score(estimator, X, y, cv=5, scoring=mean_pinball_loss_95p)
-  array([13.6, 9.7, 23.3, 9.5, 10.4])
+  array([14.3,  9.8, 23.9,  9.4, 10.8])
 
 It is also possible to build scorer objects for hyper-parameter tuning. The
 sign of the loss must be switched to ensure that greater means better as

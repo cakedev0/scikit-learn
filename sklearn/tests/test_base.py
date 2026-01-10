@@ -560,7 +560,7 @@ def test_pickle_version_warning_is_issued_when_no_version_info_in_pickle():
         pickle.loads(tree_pickle_noversion)
 
 
-# The test modifies global state by changing the the TreeNoVersion class
+# The test modifies global state by changing the TreeNoVersion class
 @pytest.mark.thread_unsafe
 def test_pickle_version_no_warning_is_issued_with_non_sklearn_estimator():
     iris = datasets.load_iris()
@@ -760,7 +760,7 @@ def test_feature_names_in():
     with pytest.raises(ValueError, match=msg):
         trans.transform(df_bad)
 
-    # warns when fitted on dataframe and transforming a ndarray
+    # warns when fitted on dataframe and transforming an ndarray
     msg = (
         "X does not have valid feature names, but NoOpTransformer was "
         "fitted with feature names"
@@ -768,7 +768,7 @@ def test_feature_names_in():
     with pytest.warns(UserWarning, match=msg):
         trans.transform(X_np)
 
-    # warns when fitted on a ndarray and transforming dataframe
+    # warns when fitted on an ndarray and transforming dataframe
     msg = "X has feature names, but NoOpTransformer was fitted without feature names"
     trans = NoOpTransformer().fit(X_np)
     with pytest.warns(UserWarning, match=msg):
