@@ -46,7 +46,7 @@ from sklearn._loss.link import (
     MultinomialLogit,
 )
 from sklearn.utils import check_scalar
-from sklearn.utils.stats import _weighted_percentile
+from sklearn.utils.stats import _weighted_percentile, weighted_quantile_by_idx
 
 
 # Note: The shape of raw_prediction for multiclass classifications are
@@ -590,6 +590,32 @@ class AbsoluteError(BaseLoss):
         else:
             return _weighted_percentile(y_true, sample_weight, 50)
 
+    def fit_intercept_only_by_idx(self, idx, y_true, sample_weight=None):
+        """Compute raw_prediction of an intercept-only model, by idx.
+
+        This is the weighted median of the target, computed separately for each
+        group defined by idx.
+
+        Parameters
+        ----------
+        idx : array-like of shape (n_samples,)
+            Group indices. Quantiles are computed separately for each unique idx value.
+        y_true : array-like of shape (n_samples,)
+            Observed, true target values.
+        sample_weight : None or array of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        raw_prediction : ndarray of shape (idx.max() + 1,)
+            Array containing the weighted median for each group.
+            Groups not present in idx will have NaN values.
+        """
+        if sample_weight is None:
+            sample_weight = np.ones_like(y_true)
+
+        return weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
+
 
 class PinballLoss(BaseLoss):
     """Quantile loss aka pinball loss, for regression.
@@ -643,7 +669,7 @@ class PinballLoss(BaseLoss):
     def fit_intercept_only(self, y_true, sample_weight=None):
         """Compute raw_prediction of an intercept-only model.
 
-        This is the weighted median of the target, i.e. over the samples
+        This is the weighted quantile of the target, i.e. over the samples
         axis=0.
         """
         if sample_weight is None:
@@ -652,6 +678,34 @@ class PinballLoss(BaseLoss):
             return _weighted_percentile(
                 y_true, sample_weight, 100 * self.closs.quantile
             )
+
+    def fit_intercept_only_by_idx(self, idx, y_true, sample_weight=None):
+        """Compute raw_prediction of an intercept-only model, by idx.
+
+        This is the weighted quantile of the target, computed separately for each
+        group defined by idx.
+
+        Parameters
+        ----------
+        idx : array-like of shape (n_samples,)
+            Group indices. Quantiles are computed separately for each unique idx value.
+        y_true : array-like of shape (n_samples,)
+            Observed, true target values.
+        sample_weight : None or array of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        raw_prediction : ndarray of shape (idx.max() + 1,)
+            Array containing the weighted quantile for each group.
+            Groups not present in idx will have NaN values.
+        """
+        if sample_weight is None:
+            sample_weight = np.ones_like(y_true)
+
+        return weighted_quantile_by_idx(
+            y_true, sample_weight, idx, quantile=self.closs.quantile
+        )
 
 
 class HuberLoss(BaseLoss):
@@ -725,6 +779,51 @@ class HuberLoss(BaseLoss):
         diff = y_true - median
         term = np.sign(diff) * np.minimum(self.closs.delta, np.abs(diff))
         return median + np.average(term, weights=sample_weight)
+
+    def fit_intercept_only_by_idx(self, idx, y_true, sample_weight=None):
+        """Compute raw_prediction of an intercept-only model, by idx.
+
+        This is the weighted median of the target, computed separately for each
+        group defined by idx, with Huber adjustment.
+
+        Parameters
+        ----------
+        idx : array-like of shape (n_samples,)
+            Group indices. Quantiles are computed separately for each unique idx value.
+        y_true : array-like of shape (n_samples,)
+            Observed, true target values.
+        sample_weight : None or array of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        raw_prediction : ndarray of shape (idx.max() + 1,)
+            Array containing the weighted median plus Huber adjustment for each group.
+            Groups not present in idx will have NaN values.
+        """
+        if sample_weight is None:
+            sample_weight = np.ones_like(y_true)
+
+        # Compute weighted median per group (quantile=0.5)
+        median = weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
+
+        # Compute Huber adjustment term per group
+        diff = y_true - median[idx]
+        term = np.sign(diff) * np.minimum(self.closs.delta, np.abs(diff))
+
+        # Weighted sum of terms per group
+        weighted_sum_by_idx = np.bincount(idx, weights=term * sample_weight)
+        # Sum of weights per group
+        weight_sum_by_idx = np.bincount(idx, weights=sample_weight)
+
+        # Compute weighted average per group
+        avg_term = np.zeros(weight_sum_by_idx.size)
+        not_empty = weight_sum_by_idx > 0
+        avg_term[not_empty] = (
+            weighted_sum_by_idx[not_empty] / weight_sum_by_idx[not_empty]
+        )
+
+        return median + avg_term
 
 
 class HalfPoissonLoss(BaseLoss):

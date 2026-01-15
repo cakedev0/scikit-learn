@@ -1,5 +1,6 @@
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
+import numpy as np
 
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
@@ -214,3 +215,62 @@ def _weighted_percentile(
         result = result[..., 0]
 
     return result[0, ...] if n_dim == 1 else result
+
+
+def weighted_quantile_by_idx(y, w, idx, quantile=0.5):
+    """Compute weighted quantile for groups defined by idx.
+
+    Parameters
+    ----------
+    y : array-like
+        Values to compute quantiles from.
+    w : array-like
+        Sample weights for each value in y.
+    idx : array-like
+        Group indices. Quantiles are computed separately for each unique idx value.
+    quantile : float, default=0.5
+        Quantile level to compute, must be between 0 and 1.
+        Default is 0.5 (median).
+
+    Returns
+    -------
+    result : ndarray
+        Array of length (idx.max() + 1) containing the weighted quantile
+        for each group. Groups not present in idx will have NaN values.
+    """
+    # 1. Sort by (idx, y)
+    order = np.lexsort((y, idx))
+    sorted_idx = idx[order]
+    sorted_y = y[order]
+    sorted_w = w[order]
+
+    # 2. Cumulative weights per group
+    cumsum_w = np.cumsum(sorted_w)
+
+    # 3. Total weight per group
+    group_ends = np.r_[np.nonzero(np.diff(sorted_idx))[0], len(sorted_idx) - 1]
+    group_starts = np.r_[0, group_ends[:-1] + 1]
+
+    total_w = cumsum_w[group_ends] - np.r_[0, cumsum_w[group_ends[:-1]]]
+    quantile_w = total_w * quantile
+
+    # 4. Cumulative weight within each group
+    cumsum_w_group = cumsum_w - np.repeat(
+        np.r_[0, cumsum_w[group_ends[:-1]]], group_ends - group_starts + 1
+    )
+
+    # 5. Find first y where cumulative weight >= quantile threshold
+    is_quantile = cumsum_w_group >= np.repeat(quantile_w, group_ends - group_starts + 1)
+
+    quantile_positions = np.zeros(len(group_ends), dtype=int)
+    quantile_positions[:] = group_ends  # default fallback
+
+    first_true = np.flatnonzero(is_quantile)
+    _, first_per_group = np.unique(sorted_idx[first_true], return_index=True)
+    quantile_positions = first_true[first_per_group]
+
+    # 6. Output array (one quantile per idx)
+    result = np.full(idx.max() + 1, np.nan)
+    result[sorted_idx[quantile_positions]] = sorted_y[quantile_positions]
+
+    return result
