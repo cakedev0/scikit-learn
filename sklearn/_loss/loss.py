@@ -46,7 +46,7 @@ from sklearn._loss.link import (
     MultinomialLogit,
 )
 from sklearn.utils import check_scalar
-from sklearn.utils.stats import _weighted_percentile, weighted_quantile_by_idx
+from sklearn.utils.stats import _weighted_percentile, _weighted_quantile_by_idx
 
 
 # Note: The shape of raw_prediction for multiclass classifications are
@@ -614,7 +614,7 @@ class AbsoluteError(BaseLoss):
         if sample_weight is None:
             sample_weight = np.ones_like(y_true)
 
-        return weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
+        return _weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
 
 
 class PinballLoss(BaseLoss):
@@ -703,7 +703,7 @@ class PinballLoss(BaseLoss):
         if sample_weight is None:
             sample_weight = np.ones_like(y_true)
 
-        return weighted_quantile_by_idx(
+        return _weighted_quantile_by_idx(
             y_true, sample_weight, idx, quantile=self.closs.quantile
         )
 
@@ -805,7 +805,7 @@ class HuberLoss(BaseLoss):
             sample_weight = np.ones_like(y_true)
 
         # Compute weighted median per group (quantile=0.5)
-        median = weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
+        median = _weighted_quantile_by_idx(y_true, sample_weight, idx, quantile=0.5)
 
         # Compute Huber adjustment term per group
         diff = y_true - median[idx]

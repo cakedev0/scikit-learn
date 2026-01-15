@@ -217,7 +217,7 @@ def _weighted_percentile(
     return result[0, ...] if n_dim == 1 else result
 
 
-def weighted_quantile_by_idx(y, w, idx, quantile=0.5):
+def _weighted_quantile_by_idx(y, w, idx, quantile=0.5):
     """Compute weighted quantile for groups defined by idx.
 
     Parameters
