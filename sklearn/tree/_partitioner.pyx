@@ -392,7 +392,7 @@ cdef class DensePartitioner:
         cdef intp_t offset = 0
         for r in range(nc):
             c = self.sorted_cat[r]
-            bitset |= 1 << c
+            bitset |= (<uint64_t>1) << c
             offset += self.counts[c]
             if offset >= p:
                 break
@@ -680,7 +680,7 @@ cdef inline bint goes_left(
     if isnan(value):
         return missing_go_to_left
     elif is_categorical:
-        return split_value.cat_split & (1 << (<uint8_t> value))
+        return split_value.cat_split & ((<uint64_t>1) << (<uint8_t> value))
     else:
         return value <= split_value.threshold
 
