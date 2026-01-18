@@ -58,7 +58,6 @@ cdef const float32_t FEATURE_THRESHOLD = 1e-7
 #     ) noexcept nogil
 #     cdef void partition_samples_final(
 #         self,
-#         intp_t best_pos,
 #         float64_t best_threshold,
 #         intp_t best_feature,
 #         bint best_missing_go_to_left
@@ -82,6 +81,7 @@ cdef class DensePartitioner:
     cdef const intp_t[::1] n_categories_in_feature
     cdef bint missing_on_the_left
     cdef intp_t n_categories
+    cdef char[::1] swap_buffer
 
     cdef intp_t[::1] counts
     cdef float64_t[::1] weighted_counts
@@ -194,9 +194,13 @@ cdef class SparsePartitioner:
     ) noexcept nogil
     cdef intp_t _partition(
         self,
-        float64_t threshold,
-        intp_t zero_pos
+        float64_t threshold
     ) noexcept nogil
 
 
 cdef void sort(floating* feature_values, intp_t* samples, intp_t n) noexcept nogil
+
+
+ctypedef fused array_data_type:
+    intp_t
+    float32_t
