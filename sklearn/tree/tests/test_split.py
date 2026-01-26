@@ -35,7 +35,7 @@ REG_TREES = {
 
 def powerset(iterable):
     """returns all the subsets of `iterable`."""
-    s = list(iterable)  # allows handling sets too
+    s = list(iterable)
     return chain.from_iterable(
         combinations(s, r) for r in range(1, (len(s) + 1) // 2 + 1)
     )
@@ -132,7 +132,7 @@ class NaiveSplitter:
             nan_mask = np.isnan(x)
             thresholds = np.unique(x[~nan_mask])
             if self.is_categorical[f]:
-                thresholds = list(powerset(thresholds.astype(int)))
+                thresholds = list(powerset(int(th) for th in thresholds))
             for th in thresholds:
                 yield Split(f, th)
             if not nan_mask.any():
@@ -153,11 +153,11 @@ class NaiveSplitter:
         return min(zip(split_impurities, splits), key=itemgetter(0))
 
 
-def to_categorical(x, nc):
+def to_categorical(x, nc, rng):
     q = np.linspace(0, 1, num=nc + 1)[1:-1]
     quantiles = np.quantile(x, q)
     cats = np.searchsorted(quantiles, x)
-    return np.random.permutation(nc)[cats]
+    return rng.permutation(nc)[cats]
 
 
 def make_simple_dataset(
@@ -176,7 +176,7 @@ def make_simple_dataset(
 
     for idx in np.where(is_categorical)[0]:
         nc = rng.integers(2, 6)  # cant go to high or test will be too slow
-        X_dense[:, idx] = to_categorical(X_dense[:, idx], nc)
+        X_dense[:, idx] = to_categorical(X_dense[:, idx], nc, rng)
     with_duplicates = rng.integers(2) == 0
     if with_duplicates:
         X_dense = X_dense.round(1 if n < 50 else 2)
@@ -221,7 +221,7 @@ def test_split_impurity(
     if categorical and "Extra" in Tree.__name__:
         pytest.skip("Categorical features not implemented for the random splitter")
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(global_random_seed)
 
     ns = [5] * 5 + [10] * 5 + [20, 30, 50, 100]
 
@@ -234,6 +234,7 @@ def test_split_impurity(
         )
         if categorical:
             is_categorical = rng.random(d) < 0.5
+            n_classes = 2
             tree_kwargs["categorical_features"] = is_categorical
         else:
             is_categorical = np.zeros(d, dtype=bool)
