@@ -1018,7 +1018,7 @@ cdef class Tree:
                         else:
                             node = &self.nodes[node.right_child]
                     elif self.is_categorical[node.feature]:
-                        if node.categorical_bitset & (1 << (<intp_t> X_i_node_feature)):
+                        if node.categorical_bitset & ((<uint64_t>1) << (<uint8_t> X_i_node_feature)):
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
@@ -1150,7 +1150,7 @@ cdef class Tree:
                         else:
                             node = &self.nodes[node.right_child]
                     elif self.is_categorical[node.feature]:
-                        if node.categorical_bitset & (1 << (<intp_t> X_ndarray[i, node.feature])):
+                        if node.categorical_bitset & ((<uint64_t>1) << (<uint8_t> X_ndarray[i, node.feature])):
                             node = &self.nodes[node.left_child]
                         else:
                             node = &self.nodes[node.right_child]
