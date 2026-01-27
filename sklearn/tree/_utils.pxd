@@ -15,8 +15,7 @@ ctypedef union SplitValue:
     # features. The floating point view, i.e. ``split_value.threshold`` is used
     # for numerical features, where feature values less than or equal to the
     # threshold go left, and values greater than the threshold go right.
-    #
-    # For categorical features, TODO
+
     float64_t threshold
     uint64_t cat_split  # bitset
 

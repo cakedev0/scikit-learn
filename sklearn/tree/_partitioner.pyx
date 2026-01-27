@@ -359,7 +359,6 @@ cdef class DensePartitioner:
 
     cdef inline void partition_samples_final(
         self,
-        intp_t best_pos,
         SplitValue split_value,
         intp_t best_feature,
         bint best_missing_go_to_left
@@ -577,7 +576,6 @@ cdef class SparsePartitioner:
 
     cdef inline void partition_samples_final(
         self,
-        intp_t best_pos,
         SplitValue split_value,
         intp_t best_feature,
         bint missing_go_to_left

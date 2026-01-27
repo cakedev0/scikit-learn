@@ -32,10 +32,12 @@ cdef const float32_t FEATURE_THRESHOLD = 1e-7
 #     cdef intp_t end
 #     cdef intp_t n_missing
 #     cdef const uint8_t[::1] missing_values_in_feature_mask
+#     cdef intp_t n_categories
 
-#     cdef void sort_samples_and_feature_values(
+#     cdef bint sort_samples_and_feature_values(
 #         self, intp_t current_feature
 #     ) noexcept nogil
+#     cdef void shift_missing_to_the_left(self) noexcept nogil
 #     cdef void init_node_split(
 #         self,
 #         intp_t start,
@@ -52,15 +54,19 @@ cdef const float32_t FEATURE_THRESHOLD = 1e-7
 #         intp_t* p_prev,
 #         intp_t* p
 #     ) noexcept nogil
+#     cdef inline SplitValue pos_to_threshold(
+#         self, intp_t p_prev, intp_t p
+#     ) noexcept nogil
 #     cdef intp_t partition_samples(
 #         self,
-#         float64_t current_threshold
+#         float64_t current_threshold,
+#         bint missing_go_to_left
 #     ) noexcept nogil
 #     cdef void partition_samples_final(
 #         self,
-#         float64_t best_threshold,
+#         SplitValue split_value,
 #         intp_t best_feature,
-#         bint best_missing_go_to_left
+#         bint best_missing_go_to_left,
 #     ) noexcept nogil
 
 
@@ -119,7 +125,6 @@ cdef class DensePartitioner:
     ) noexcept nogil
     cdef void partition_samples_final(
         self,
-        intp_t best_pos,
         SplitValue split_value,
         intp_t best_feature,
         bint best_missing_go_to_left,
@@ -182,7 +187,6 @@ cdef class SparsePartitioner:
     ) noexcept nogil
     cdef void partition_samples_final(
         self,
-        intp_t best_pos,
         SplitValue split_value,
         intp_t best_feature,
         bint best_missing_go_to_left,
