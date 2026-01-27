@@ -3134,3 +3134,32 @@ def test_random_splitter_missing_values_uses_non_missing_min_max(X, y):
 
     assert np.isfinite(threshold)
     assert non_missing.min() <= threshold <= non_missing.max()
+
+
+def test_categorical_random_splitter_raises():
+    X = np.array([[0], [1], [2], [3]], dtype=np.float32)
+    y = np.array([0, 1, 0, 1])
+
+    tree = DecisionTreeClassifier(
+        splitter="random", categorical_features=[0], random_state=0
+    )
+    with pytest.raises(ValueError, match="splitter='random'"):
+        tree.fit(X, y)
+
+
+def test_categorical_multiclass_classification_raises():
+    X = np.array([[0], [1], [2], [3]], dtype=np.float32)
+    y = np.array([0, 1, 2, 0])
+
+    tree = DecisionTreeClassifier(categorical_features=[0], random_state=0)
+    with pytest.raises(ValueError, match="binary classification"):
+        tree.fit(X, y)
+
+
+def test_categorical_multioutput_raises():
+    X = np.array([[0], [1], [2], [3]], dtype=np.float32)
+    y = np.array([[0.0, 1.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+
+    tree = DecisionTreeRegressor(categorical_features=[0], random_state=0)
+    with pytest.raises(ValueError, match="multi-output"):
+        tree.fit(X, y)

@@ -445,6 +445,22 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             self._check_categorical_features(X, monotonic_cst)
         )
 
+        has_categorical = bool(np.any(self.is_categorical_))
+        if has_categorical and self.splitter == "random":
+            raise ValueError(
+                "Categorical features are not supported with splitter='random'. "
+                "Use splitter='best' instead."
+            )
+        if has_categorical and self.n_outputs_ > 1:
+            raise ValueError(
+                "Categorical features are not supported with multi-output targets."
+            )
+        if has_categorical and is_classifier(self) and np.any(self.n_classes_ > 2):
+            raise ValueError(
+                "Categorical features are only supported for binary classification. "
+                f"Found {self.n_classes_.max()} classes."
+            )
+
         if not isinstance(self.splitter, Splitter):
             splitter = SPLITTERS[self.splitter](
                 criterion,
