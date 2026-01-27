@@ -80,9 +80,10 @@ cdef class DensePartitioner:
     ) noexcept nogil:
         """Simultaneously sort based on the feature_values.
 
-        Missing values are stored at the end of feature_values.
-        The number of missing values observed in feature_values is stored
-        in self.n_missing.
+        For numerical features, this is a standard sort. For categorical
+        features, samples are reordered using the Breiman ordering shortcut.
+
+        Returns ``True`` when the feature is constant at the current node.
         """
         cdef:
             intp_t i, current_end
@@ -302,6 +303,12 @@ cdef class DensePartitioner:
     cdef inline SplitValue pos_to_threshold(
         self, intp_t p_prev, intp_t p
     ) noexcept nogil:
+        """Convert a split position into a concrete split value.
+
+        For numerical features, this returns the usual mid-point threshold.
+        For categorical features, it converts the split position into a bitset
+        over categories.
+        """
         cdef SplitValue split
         cdef intp_t end_non_missing = (
             self.end if self.missing_on_the_left
@@ -386,6 +393,7 @@ cdef class DensePartitioner:
                     samples[partition_end], samples[partition_start])
 
     cdef inline uint64_t _split_pos_to_bitset(self, intp_t p, intp_t nc) noexcept nogil:
+        """Convert a split position ``p`` into a categorical bitset."""
         cdef uint64_t bitset = 0
         cdef intp_t r, c
         cdef intp_t offset = 0
@@ -448,7 +456,10 @@ cdef class SparsePartitioner:
         self,
         intp_t current_feature
     ) noexcept nogil:
-        """Simultaneously sort based on the feature_values."""
+        """Simultaneously sort based on the feature_values.
+
+        Returns ``True`` when the feature is constant at the current node.
+        """
         cdef:
             float32_t[::1] feature_values = self.feature_values
             intp_t[::1] index_to_samples = self.index_to_samples
@@ -554,7 +565,7 @@ cdef class SparsePartitioner:
     cdef inline SplitValue pos_to_threshold(
         self, intp_t p_prev, intp_t p
     ) noexcept nogil:
-
+        """Convert a split position into a numerical threshold."""
         cdef SplitValue split
         # split between two non-missing values
         # sum of halves is used to avoid infinite value
@@ -675,6 +686,11 @@ cdef class SparsePartitioner:
 cdef inline bint goes_left(
     SplitValue split_value, bint missing_go_to_left, bint is_categorical, float32_t value
 ) noexcept nogil:
+    """Return whether ``value`` should go to the left child
+
+    This helper centralizes the split semantics for numerical, categorical,
+    and missing values.
+    """
     if isnan(value):
         return missing_go_to_left
     elif is_categorical:

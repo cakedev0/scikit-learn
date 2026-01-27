@@ -152,8 +152,9 @@ cdef class Splitter:
             are assumed to have uniform weight. This is represented
             as a Cython memoryview.
 
-        has_missing : bool
-            At least one missing values is in X.
+        n_categories_in_feature : ndarray, dtype=intp_t
+            Per-feature number of categories for categorical features, and
+            ``-1`` for numerical features.
         """
 
         self.rand_r_state = self.random_state.randint(0, RAND_R_MAX)

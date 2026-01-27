@@ -535,10 +535,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         Return
         ------
-        is_categorical : ndarray of shape (n_features,) or None, dtype=bool
-            Indicates whether a feature is categorical. If no feature is
-            categorical, this is None.
-        n_categories_in_feature: TODO
+        is_categorical : ndarray of shape (n_features,), dtype=bool
+            Boolean mask indicating whether each feature is categorical.
+        n_categories_in_feature : ndarray of shape (n_features,), dtype=intp
+            For categorical features, stores ``max(X[:, idx]) + 1``. For
+            non-categorical features, stores ``-1``.
         """
         n_features = X.shape[1]
         categorical_features = np.asarray(self.categorical_features)
@@ -977,6 +978,19 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 
         .. versionadded:: 1.4
 
+    categorical_features : array-like of int or bool of shape (n_features,) or
+        (n_categorical_features,), default=None
+        Indicates which features are treated as categorical.
+
+        - If array-like of int, the entries are feature indices.
+        - If array-like of bool, it is a boolean mask over features.
+
+        Categorical features are only supported for dense inputs
+        and single-output targets.
+        Values of categorical features must be contiguous integers in ``[0, 63]``
+        (missing values are not supported).
+        Categorical features cannot have non-zero monotonic constraints.
+
     Attributes
     ----------
     classes_ : ndarray of shape (n_classes,) or list of ndarray
@@ -1370,6 +1384,21 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         Read more in the :ref:`User Guide <monotonic_cst_gbdt>`.
 
         .. versionadded:: 1.4
+
+    categorical_features : array-like of int or bool of shape (n_features,) or
+        (n_categorical_features,), default=None
+        Indicates which features are treated as categorical.
+
+        - If array-like of int, the entries are feature indices.
+        - If array-like of bool, it is a boolean mask over features.
+
+        Categorical features are only supported for dense inputs
+        and single-output targets.
+        Values of categorical features must be contiguous integers in ``[0, 63]``
+        (missing values are not supported).
+        Categorical features cannot have non-zero monotonic constraints.
+
+        When these constraints are not met, ``fit`` will raise an error.
 
     Attributes
     ----------
