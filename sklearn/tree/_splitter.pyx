@@ -453,7 +453,6 @@ cdef inline int node_split_best(
     # Reorganize into samples[start:best_split.pos] + samples[best_split.pos:end]
     if best_split.pos < end:
         partitioner.partition_samples_final(
-            best_split.pos,
             best_split.value,
             best_split.feature,
             best_split.missing_go_to_left
@@ -689,7 +688,6 @@ cdef inline int node_split_random(
     if best_split.pos < end:
         if current_split.feature != best_split.feature:
             partitioner.partition_samples_final(
-                best_split.pos,
                 best_split.value,
                 best_split.feature,
                 best_split.missing_go_to_left
