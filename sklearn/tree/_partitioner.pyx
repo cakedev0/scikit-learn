@@ -27,8 +27,54 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 cdef float32_t INFINITY_32t = np.inf
 
 
+cdef class BasePartitioner:
+    """Abstract interface shared by dense and sparse partitioners."""
+
+    cdef void sort_samples_and_feature_values(
+        self, intp_t current_feature
+    ) noexcept nogil:
+        pass
+
+    cdef void init_node_split(
+        self,
+        intp_t start,
+        intp_t end,
+    ) noexcept nogil:
+        pass
+
+    cdef void find_min_max(
+        self,
+        intp_t current_feature,
+        float32_t* min_feature_value_out,
+        float32_t* max_feature_value_out,
+    ) noexcept nogil:
+        pass
+
+    cdef void next_p(
+        self,
+        intp_t* p_prev,
+        intp_t* p,
+    ) noexcept nogil:
+        pass
+
+    cdef intp_t partition_samples(
+        self,
+        float64_t current_threshold,
+    ) noexcept nogil:
+        return 0
+
+    cdef void partition_samples_final(
+        self,
+        intp_t best_pos,
+        float64_t best_threshold,
+        intp_t best_feature,
+        intp_t n_missing,
+    ) noexcept nogil:
+        pass
+
+
 @final
-cdef class DensePartitioner:
+cdef class DensePartitioner(BasePartitioner):
     """Partitioner specialized for dense data.
 
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
@@ -268,7 +314,7 @@ cdef class DensePartitioner:
 
 
 @final
-cdef class SparsePartitioner:
+cdef class SparsePartitioner(BasePartitioner):
     """Partitioner specialized for sparse CSC data.
 
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).

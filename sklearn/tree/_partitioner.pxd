@@ -15,61 +15,7 @@ from sklearn.tree._splitter cimport SplitRecord
 cdef const float32_t FEATURE_THRESHOLD = 1e-7
 
 
-# We provide here the abstract interface for a Partitioner that would be
-# theoretically shared between the Dense and Sparse partitioners. However,
-# we leave it commented out for now as it is not used in the current
-# implementation due to the performance hit from vtable lookups when using
-# inheritance based polymorphism. It is left here for future reference.
-#
-# Note: Instead, in `_splitter.pyx`, we define a fused type that can be used
-# to represent both the dense and sparse partitioners.
-#
-# cdef class BasePartitioner:
-#     cdef intp_t[::1] samples
-#     cdef float32_t[::1] feature_values
-#     cdef intp_t start
-#     cdef intp_t end
-#     cdef intp_t n_missing
-#     cdef const uint8_t[::1] missing_values_in_feature_mask
-
-#     cdef void sort_samples_and_feature_values(
-#         self, intp_t current_feature
-#     ) noexcept nogil
-#     cdef void init_node_split(
-#         self,
-#         intp_t start,
-#         intp_t end
-#     ) noexcept nogil
-#     cdef void find_min_max(
-#         self,
-#         intp_t current_feature,
-#         float32_t* min_feature_value_out,
-#         float32_t* max_feature_value_out,
-#     ) noexcept nogil
-#     cdef void next_p(
-#         self,
-#         intp_t* p_prev,
-#         intp_t* p
-#     ) noexcept nogil
-#     cdef intp_t partition_samples(
-#         self,
-#         float64_t current_threshold
-#     ) noexcept nogil
-#     cdef void partition_samples_final(
-#         self,
-#         intp_t best_pos,
-#         float64_t best_threshold,
-#         intp_t best_feature,
-#         intp_t n_missing,
-#     ) noexcept nogil
-
-
-cdef class DensePartitioner:
-    """Partitioner specialized for dense data.
-
-    Note that this partitioner is agnostic to the splitting strategy (best vs. random).
-    """
-    cdef const float32_t[:, :] X
+cdef class BasePartitioner:
     cdef intp_t[::1] samples
     cdef float32_t[::1] feature_values
     cdef intp_t start
@@ -109,7 +55,45 @@ cdef class DensePartitioner:
     ) noexcept nogil
 
 
-cdef class SparsePartitioner:
+cdef class DensePartitioner(BasePartitioner):
+    """Partitioner specialized for dense data.
+
+    Note that this partitioner is agnostic to the splitting strategy (best vs. random).
+    """
+    cdef const float32_t[:, :] X
+    cdef void sort_samples_and_feature_values(
+        self, intp_t current_feature
+    ) noexcept nogil
+    cdef void init_node_split(
+        self,
+        intp_t start,
+        intp_t end
+    ) noexcept nogil
+    cdef void find_min_max(
+        self,
+        intp_t current_feature,
+        float32_t* min_feature_value_out,
+        float32_t* max_feature_value_out,
+    ) noexcept nogil
+    cdef void next_p(
+        self,
+        intp_t* p_prev,
+        intp_t* p
+    ) noexcept nogil
+    cdef intp_t partition_samples(
+        self,
+        float64_t current_threshold
+    ) noexcept nogil
+    cdef void partition_samples_final(
+        self,
+        intp_t best_pos,
+        float64_t best_threshold,
+        intp_t best_feature,
+        intp_t n_missing,
+    ) noexcept nogil
+
+
+cdef class SparsePartitioner(BasePartitioner):
     """Partitioner specialized for sparse CSC data.
 
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
@@ -123,13 +107,6 @@ cdef class SparsePartitioner:
     cdef intp_t start_positive
     cdef intp_t end_negative
     cdef bint is_samples_sorted
-
-    cdef intp_t[::1] samples
-    cdef float32_t[::1] feature_values
-    cdef intp_t start
-    cdef intp_t end
-    cdef intp_t n_missing
-    cdef const uint8_t[::1] missing_values_in_feature_mask
 
     cdef void sort_samples_and_feature_values(
         self, intp_t current_feature

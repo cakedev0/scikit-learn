@@ -25,21 +25,20 @@ from libc.string cimport memcpy
 from sklearn.utils._typedefs cimport int8_t
 from sklearn.tree._criterion cimport Criterion
 from sklearn.tree._partitioner cimport (
-    FEATURE_THRESHOLD, DensePartitioner, SparsePartitioner,
-    shift_missing_values_to_left_if_required
+    FEATURE_THRESHOLD,
+    BasePartitioner,
+    DensePartitioner,
+    SparsePartitioner,
+    shift_missing_values_to_left_if_required,
 )
 from sklearn.tree._utils cimport RAND_R_MAX, rand_int, rand_uniform
 
 import numpy as np
 
-# Introduce a fused-class to make it possible to share the split implementation
-# between the dense and sparse cases in the node_split_best and node_split_random
-# functions. The alternative would have been to use inheritance-based polymorphism
-# but it would have resulted in a ~10% overall tree fitting performance
-# degradation caused by the overhead frequent virtual method lookups.
-ctypedef fused Partitioner:
-    DensePartitioner
-    SparsePartitioner
+# Use inheritance-based polymorphism to share the split implementation between
+# the dense and sparse cases in the node_split_best and node_split_random
+# functions. This is intentionally less optimized than the fused-type approach
+# so that we can measure the overhead of virtual method lookups.
 
 
 cdef float64_t INFINITY = np.inf
@@ -268,7 +267,7 @@ cdef class Splitter:
 
 cdef inline int node_split_best(
     Splitter splitter,
-    Partitioner partitioner,
+    BasePartitioner partitioner,
     Criterion criterion,
     SplitRecord* split,
     ParentInfo* parent_record,
@@ -544,7 +543,7 @@ cdef inline int node_split_best(
 
 cdef inline int node_split_random(
     Splitter splitter,
-    Partitioner partitioner,
+    BasePartitioner partitioner,
     Criterion criterion,
     SplitRecord* split,
     ParentInfo* parent_record,
