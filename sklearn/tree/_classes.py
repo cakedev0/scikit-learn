@@ -69,7 +69,7 @@ __all__ = [
 # =============================================================================
 
 DTYPE = _tree.DTYPE
-DOUBLE = _tree.DOUBLE
+DOUBLE = np.float64
 
 CRITERIA_CLF = {
     "gini": _criterion.Gini,
@@ -413,9 +413,12 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
 
-        (samples,) = np.nonzero(sample_weight != 0.0)
-        weighted_n_samples = n_samples if sample_weight is None else sample_weight.sum()
-        feature_values_buffer = np.empty(n_samples)
+        if sample_weight is None:
+            samples = np.arange(n_samples, dtype=np.intp)
+        else:
+            (samples,) = np.nonzero(sample_weight != 0.0)
+            samples = samples.astype(np.intp)
+        feature_values_buffer = np.empty(n_samples, dtype=DTYPE)
 
         # Build tree
         criterion = self.criterion

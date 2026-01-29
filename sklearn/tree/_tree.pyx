@@ -144,7 +144,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef intp_t depth
         cdef intp_t parent
         cdef bint is_left
-        cdef intp_t n_node_samples = splitter.n_samples
+        cdef intp_t n_node_samples = splitter.criterion.n_samples
         cdef float64_t weighted_n_node_samples
         cdef SplitRecord split
         cdef intp_t node_id

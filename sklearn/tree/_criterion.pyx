@@ -30,13 +30,13 @@ cdef class Criterion:
     def __setstate__(self, d):
         pass
 
-    cdef void init(
+    def init(
         self,
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         float64_t weighted_n_samples,
         const intp_t[:] sample_indices,
-    ) noexcept nogil:
+    ):
         """Placeholder for a method which will initialize the criterion.
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
