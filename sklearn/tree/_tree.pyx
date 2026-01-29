@@ -73,14 +73,7 @@ cdef inline void _init_parent_record(ParentInfo* record) noexcept nogil:
 cdef class TreeBuilder:
     """Interface for different tree building strategies."""
 
-    cpdef build(
-        self,
-        Tree tree,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight=None,
-        const uint8_t[::1] missing_values_in_feature_mask=None,
-    ):
+    cpdef build(self, Tree tree):
         """Build a decision tree from the training set (X, y)."""
         pass
 
@@ -110,14 +103,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         self.max_depth = max_depth
         self.min_impurity_decrease = min_impurity_decrease
 
-    cpdef build(
-        self,
-        Tree tree,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight=None,
-        const uint8_t[::1] missing_values_in_feature_mask=None,
-    ):
+    cpdef build(self, Tree tree):
         """Build a decision tree from the training set (X, y)."""
 
         # Initial capacity
@@ -356,14 +342,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         self.max_leaf_nodes = max_leaf_nodes
         self.min_impurity_decrease = min_impurity_decrease
 
-    cpdef build(
-        self,
-        Tree tree,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight=None,
-        const uint8_t[::1] missing_values_in_feature_mask=None,
-    ):
+    cpdef build(self, Tree tree):
         """Build a decision tree from the training set (X, y)."""
 
         # Parameters
