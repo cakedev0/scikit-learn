@@ -22,10 +22,13 @@ cdef class BasePartitioner:
     cdef intp_t end
     cdef intp_t n_missing
     cdef const uint8_t[::1] missing_values_in_feature_mask
+    cdef bint missing_on_the_left
+    cdef char[::1] swap_buffer
 
     cdef void sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
+    cdef void shift_missing_to_the_left(self) noexcept nogil
     cdef void init_node_split(
         self,
         intp_t start,
@@ -44,14 +47,14 @@ cdef class BasePartitioner:
     ) noexcept nogil
     cdef intp_t partition_samples(
         self,
-        float64_t current_threshold
+        float64_t current_threshold,
+        bint missing_go_to_left
     ) noexcept nogil
     cdef void partition_samples_final(
         self,
-        intp_t best_pos,
         float64_t best_threshold,
         intp_t best_feature,
-        intp_t n_missing,
+        bint best_missing_go_to_left,
     ) noexcept nogil
 
 
@@ -68,6 +71,7 @@ cdef class SparsePartitioner(BasePartitioner):
 
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
     """
+    cdef const float32_t[:, :] X  # TODO: remove
     cdef const float32_t[::1] X_data
     cdef const int32_t[::1] X_indices
     cdef const int32_t[::1] X_indptr
@@ -84,16 +88,13 @@ cdef class SparsePartitioner(BasePartitioner):
     ) noexcept nogil
     cdef intp_t _partition(
         self,
-        float64_t threshold,
-        intp_t zero_pos
+        float64_t threshold
     ) noexcept nogil
 
 
-cdef void shift_missing_values_to_left_if_required(
-    SplitRecord* best,
-    intp_t[::1] samples,
-    intp_t end,
-) noexcept nogil
-
-
 cdef void sort(floating* feature_values, intp_t* samples, intp_t n) noexcept nogil
+
+
+ctypedef fused array_data_type:
+    intp_t
+    float32_t
