@@ -37,10 +37,11 @@ cdef class Criterion:
         float64_t weighted_n_samples,
         const intp_t[:] sample_indices,
     ):
-        """Placeholder for a method which will initialize the criterion.
+        """Initialize criterion with shared buffers.
 
-        Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
+        This is called once per tree build to attach the target values, sample
+        weights, and the working sample_indices array. Per-node initialization
+        happens in ``init_node_split`` using start/end indices.
 
         Parameters
         ----------
@@ -48,12 +49,13 @@ cdef class Criterion:
             y is a buffer that can store values for n_outputs target variables
             stored as a Cython memoryview.
         sample_weight : ndarray, dtype=float64_t
-            The weight of each sample stored as a Cython memoryview.
+            The weight of each sample stored as a Cython memoryview, or None.
         weighted_n_samples : float64_t
-            The total weight of the samples being considered
+            The total weight of the samples being considered.
         sample_indices : ndarray, dtype=intp_t
-            A mask on the samples. Indices of the samples in X and y we want to use,
-            where sample_indices[start:end] correspond to the samples in this node.
+            Working array of sample indices for the whole build. Nodes are
+            represented by slices ``sample_indices[start:end]`` and the array is
+            partitioned in-place by the splitter/partitioner.
         """
         # Initialize fields
         self.y = y
@@ -65,8 +67,9 @@ cdef class Criterion:
     cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize the criterion.
 
-        This initializes the criterion at node sample_indices[start:end] and children
-        sample_indices[start:start] and sample_indices[start:end].
+        This initializes the criterion for node sample_indices[start:end]. After
+        initialization, the left child is empty and the right child contains all
+        node samples; calls to ``update`` move the split position.
 
         Parameters
         ----------
@@ -315,8 +318,9 @@ cdef class ClassificationCriterion(Criterion):
     cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize the criterion.
 
-        This initializes the criterion at node sample_indices[start:end] and children
-        sample_indices[start:start] and sample_indices[start:end].
+        This initializes the criterion for node sample_indices[start:end]. After
+        initialization, the left child is empty and the right child contains all
+        node samples; calls to ``update`` move the split position.
 
         Parameters
         ----------
@@ -741,8 +745,9 @@ cdef class RegressionCriterion(Criterion):
     cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize the criterion.
 
-        This initializes the criterion at node sample_indices[start:end] and children
-        sample_indices[start:start] and sample_indices[start:end].
+        This initializes the criterion for node sample_indices[start:end]. After
+        initialization, the left child is empty and the right child contains all
+        node samples; calls to ``update`` move the split position.
 
         Parameters
         ----------
@@ -1288,8 +1293,9 @@ cdef class MAE(Criterion):
     cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize the criterion.
 
-        This initializes the criterion at node sample_indices[start:end] and children
-        sample_indices[start:start] and sample_indices[start:end].
+        This initializes the criterion for node sample_indices[start:end]. After
+        initialization, the left child is empty and the right child contains all
+        node samples; calls to ``update`` move the split position.
 
         Parameters
         ----------

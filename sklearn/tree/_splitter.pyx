@@ -1,21 +1,16 @@
-"""Splitting algorithms in the construction of a tree.
+"""Splitting algorithms used to build decision trees.
 
-This module contains the main splitting algorithms for constructing a tree.
-Splitting is concerned with finding the optimal partition of the data into
-two groups. The impurity of the groups is minimized, and the impurity is measured
-by some criterion, which is typically the Gini impurity or the entropy. Criterion
-are implemented in the ``_criterion`` module.
+Splitting searches for a feature/threshold that best partitions the samples
+according to an impurity criterion (see ``_criterion``). A splitter evaluates
+only a subset of features (``max_features`` / mtry) and relies on a
+``BasePartitioner`` to handle dense vs. sparse data.
 
-Splitting evaluates a subset of features (defined by `max_features` also
-known as mtry in the literature). The module supports two primary types
-of splitting strategies:
+The module implements two strategies:
 
-- Best Split: A greedy approach to find the optimal split. This method
-  ensures that the best possible split is chosen by examining various
-  thresholds for each candidate feature.
-- Random Split: A stochastic approach that selects a split randomly
-  from a subset of the best splits. This method is faster but does
-  not guarantee the optimal split.
+- Best Split: evaluates all candidate thresholds per feature and selects the
+  split with maximal proxy improvement.
+- Random Split: draws one random threshold per feature and keeps the best among
+  those random candidates (faster, but not guaranteed optimal).
 """
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
@@ -30,10 +25,9 @@ from sklearn.tree._utils cimport RAND_R_MAX, rand_int, rand_uniform
 
 import numpy as np
 
-# Use inheritance-based polymorphism to share the split implementation between
-# the dense and sparse cases in the node_split_best and node_split_random
-# functions. This is intentionally less optimized than the fused-type approach
-# so that we can measure the overhead of virtual method lookups.
+# Use a BasePartitioner interface so a single splitter implementation can
+# handle dense and sparse data. This trades a bit of virtual-call overhead for
+# reduced code duplication and easier maintenance.
 
 
 cdef float64_t INFINITY = np.inf
@@ -65,7 +59,11 @@ cdef class Splitter:
         Parameters
         ----------
         criterion : Criterion
-            The criterion to measure the quality of a split.
+            Initialized criterion holding the target values and sample weights.
+
+        partitioner : BasePartitioner
+            Dense or sparse partitioner that owns the samples vector and
+            feature_values buffer shared with the splitter.
 
         max_features : intp_t
             The maximal number of randomly selected features which can be
@@ -84,7 +82,7 @@ cdef class Splitter:
             The user inputted random state to be used for pseudo-randomness
 
         monotonic_cst : const int8_t[:]
-            Monotonicity constraints
+            Monotonicity constraints, or None.
 
         """
         self.criterion = criterion
@@ -103,16 +101,13 @@ cdef class Splitter:
         self.monotonic_cst = monotonic_cst
         self.with_monotonic_cst = monotonic_cst is not None
 
-    cdef int node_reset(
+    cdef void node_reset(
         self,
         intp_t start,
         intp_t end,
         float64_t* weighted_n_node_samples
-    ) except -1 nogil:
+    ) noexcept nogil:
         """Reset splitter on node samples[start:end].
-
-        Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
 
         Parameters
         ----------
@@ -131,7 +126,6 @@ cdef class Splitter:
         self.partitioner.init_node_split(start, end)
 
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
-        return 0
 
     cdef void node_value(self, float64_t* dest) noexcept nogil:
         """Copy the value of node samples[start:end] into dest."""
@@ -152,11 +146,7 @@ cdef class Splitter:
         ParentInfo* parent_record,
         SplitRecord* split,
     ) except -1 nogil:
-        """Find the best split on node samples[start:end]
-
-        Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
-        """
+        """Find the best split on node samples[start:end]"""
         cdef intp_t[::1] features = self.features
         cdef intp_t[::1] constant_features = self.constant_features
         cdef intp_t n_features = self.n_features
@@ -299,8 +289,10 @@ cdef class BestSplitter(Splitter):
     ) except -1 nogil:
         """Find the best split on node samples[start:end]
 
-        Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
+        Returns
+        -------
+        int
+            -1 on failure, 1 if the feature is constant, 0 otherwise.
         """
         # Find the best split
         cdef intp_t start = self.start
@@ -413,8 +405,10 @@ cdef class RandomSplitter(Splitter):
 
         """Find the best split on node samples[start:end]
 
-        Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
+        Returns
+        -------
+        int
+            -1 on failure, 1 if the feature is constant, 0 otherwise.
         """
         # Find the best split
         cdef intp_t start = self.start

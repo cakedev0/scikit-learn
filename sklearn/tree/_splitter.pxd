@@ -68,12 +68,12 @@ cdef class Splitter:
     # undefined, but preallocated for performance reasons
     # This allows optimization with depth-based tree building.
 
-    cdef int node_reset(
+    cdef void node_reset(
         self,
         intp_t start,
         intp_t end,
         float64_t* weighted_n_node_samples
-    ) except -1 nogil
+    ) noexcept nogil
 
     cdef int node_split(
         self,

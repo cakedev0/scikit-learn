@@ -27,7 +27,6 @@ cdef class BasePartitioner:
     cdef intp_t n_features
     cdef const uint8_t[::1] missing_values_in_feature_mask
     cdef bint missing_on_the_left
-    cdef char[::1] swap_buffer
 
     cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
@@ -71,6 +70,7 @@ cdef class DensePartitioner(BasePartitioner):
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
     """
     cdef const float32_t[:, :] X
+    cdef char[::1] swap_buffer
 
 
 cdef class SparsePartitioner(BasePartitioner):
@@ -78,7 +78,6 @@ cdef class SparsePartitioner(BasePartitioner):
 
     Note that this partitioner is agnostic to the splitting strategy (best vs. random).
     """
-    cdef const float32_t[:, :] X  # TODO: remove
     cdef const float32_t[::1] X_data
     cdef const int32_t[::1] X_indices
     cdef const int32_t[::1] X_indptr

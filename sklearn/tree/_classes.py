@@ -418,7 +418,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         else:
             (samples,) = np.nonzero(sample_weight != 0.0)
             samples = samples.astype(np.intp)
-        feature_values_buffer = np.empty(n_samples, dtype=DTYPE)
 
         # Build tree
         criterion = self.criterion
@@ -441,9 +440,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             if issparse(X)
             else _partitioner.DensePartitioner
         )
-        partitioner = Partitioner(
-            X, samples, feature_values_buffer, missing_values_in_feature_mask
-        )
+        partitioner = Partitioner(X, samples, missing_values_in_feature_mask)
 
         splitter = SPLITTERS[self.splitter](
             criterion,

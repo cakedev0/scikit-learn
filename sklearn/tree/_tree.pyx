@@ -74,7 +74,7 @@ cdef class TreeBuilder:
     """Interface for different tree building strategies."""
 
     cpdef build(self, Tree tree):
-        """Build a decision tree from the training set (X, y)."""
+        """Build a decision tree into ``tree`` using the configured splitter."""
         pass
 
 # Depth first builder ---------------------------------------------------------
@@ -104,7 +104,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         self.min_impurity_decrease = min_impurity_decrease
 
     cpdef build(self, Tree tree):
-        """Build a decision tree from the training set (X, y)."""
+        """Build a decision tree into ``tree`` in depth-first order."""
 
         # Initial capacity
         cdef intp_t init_capacity
@@ -343,7 +343,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         self.min_impurity_decrease = min_impurity_decrease
 
     cpdef build(self, Tree tree):
-        """Build a decision tree from the training set (X, y)."""
+        """Build a decision tree into ``tree`` in best-first order."""
 
         # Parameters
         cdef Splitter splitter = self.splitter

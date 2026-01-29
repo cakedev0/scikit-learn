@@ -97,19 +97,19 @@ cdef class DensePartitioner(BasePartitioner):
         self,
         const float32_t[:, :] X,
         intp_t[::1] samples,
-        float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
     ):
         self.X = X
         self.n_features = X.shape[1]
         self.samples = samples
-        self.feature_values = feature_values
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
-        buffer_size = samples.size * max(samples.itemsize, feature_values.itemsize)
+        # buffers:
+        self.feature_values = np.empty(X.shape[0], dtype=np.float32)
+        buffer_size = samples.size * max(samples.itemsize, self.feature_values.itemsize)
         self.swap_buffer = np.empty(buffer_size, dtype=np.uint8)
 
     cdef inline void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
-        """Initialize splitter at the beginning of node_split."""
+        """Initialize partitioner state at the beginning of node_split."""
         self.start = start
         self.end = end
         self.n_missing = 0
@@ -357,7 +357,6 @@ cdef class SparsePartitioner(BasePartitioner):
         self,
         object X,
         intp_t[::1] samples,
-        float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
     ):
         if not (issparse(X) and X.format == "csc"):
@@ -365,7 +364,6 @@ cdef class SparsePartitioner(BasePartitioner):
 
         n_samples = samples.shape[0]
         self.samples = samples
-        self.feature_values = feature_values
 
         # Initialize X
         self.X_data = X.data
@@ -374,6 +372,7 @@ cdef class SparsePartitioner(BasePartitioner):
         self.n_features = X.shape[1]
 
         # Initialize auxiliary array used to perform split
+        self.feature_values = np.empty(X.shape[0], dtype=np.float32)
         self.index_to_samples = np.full(X.shape[0], fill_value=-1, dtype=np.intp)
         self.sorted_samples = np.empty(n_samples, dtype=np.intp)
 
@@ -384,7 +383,7 @@ cdef class SparsePartitioner(BasePartitioner):
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
 
     cdef inline void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
-        """Initialize splitter at the beginning of node_split."""
+        """Initialize partitioner state at the beginning of node_split."""
         self.start = start
         self.end = end
         self.is_samples_sorted = 0
