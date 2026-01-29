@@ -38,7 +38,6 @@ cdef extern from "numpy/arrayobject.h":
 # =============================================================================
 
 from numpy import float32 as DTYPE
-from numpy import float64 as DOUBLE
 
 cdef float64_t INFINITY = np.inf
 cdef float64_t EPSILON = np.finfo('double').eps
@@ -85,33 +84,6 @@ cdef class TreeBuilder:
         """Build a decision tree from the training set (X, y)."""
         pass
 
-    cdef inline _check_input(
-        self,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight,
-    ):
-        """Check input dtype, layout and format"""
-        if issparse(X):
-            X = X.tocsc()
-            X.sort_indices()
-
-            if X.data.dtype != DTYPE:
-                X.data = np.ascontiguousarray(X.data, dtype=DTYPE)
-
-            if X.indices.dtype != np.int32 or X.indptr.dtype != np.int32:
-                raise ValueError("No support for np.int64 index based "
-                                 "sparse matrices")
-
-        elif X.dtype != DTYPE:
-            # since we have to copy we will make it fortran for efficiency
-            X = np.asfortranarray(X, dtype=DTYPE)
-
-        if sample_weight is not None and not sample_weight.base.flags.contiguous:
-            sample_weight = np.asarray(sample_weight, dtype=DOUBLE, order="C")
-
-        return X, y, sample_weight
-
 # Depth first builder ---------------------------------------------------------
 # A record on the stack for depth-first tree growing
 cdef struct StackRecord:
@@ -148,9 +120,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
     ):
         """Build a decision tree from the training set (X, y)."""
 
-        # check input
-        X, y, sample_weight = self._check_input(X, y, sample_weight)
-
         # Initial capacity
         cdef intp_t init_capacity
 
@@ -170,8 +139,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef float64_t min_impurity_decrease = self.min_impurity_decrease
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight, missing_values_in_feature_mask)
-
         cdef intp_t start
         cdef intp_t end
         cdef intp_t depth
@@ -242,16 +209,12 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 is_leaf = is_leaf or parent_record.impurity <= EPSILON
 
                 if not is_leaf:
-                    splitter.node_split(
-                        &parent_record,
-                        &split,
-                    )
+                    splitter.node_split(&parent_record, &split)
+
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are
                     # dissimilar to v0.18
-                    is_leaf = (is_leaf or split.pos >= end or
-                               (split.improvement + EPSILON <
-                                min_impurity_decrease))
+                    is_leaf = split.improvement + EPSILON < min_impurity_decrease
 
                 node_id = tree._add_node(parent, is_left, is_leaf, split.feature,
                                          split.threshold, parent_record.impurity,
@@ -402,9 +365,6 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         const uint8_t[::1] missing_values_in_feature_mask=None,
     ):
         """Build a decision tree from the training set (X, y)."""
-
-        # check input
-        X, y, sample_weight = self._check_input(X, y, sample_weight)
 
         # Parameters
         cdef Splitter splitter = self.splitter

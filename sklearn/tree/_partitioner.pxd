@@ -8,7 +8,6 @@ from cython cimport floating
 from sklearn.utils._typedefs cimport (
     float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t
 )
-from sklearn.tree._splitter cimport SplitRecord
 
 
 # Mitigate precision differences between 32 bit and 64 bit
@@ -17,7 +16,11 @@ cdef const float32_t FEATURE_THRESHOLD = 1e-7
 
 cdef class BasePartitioner:
     cdef intp_t[::1] samples
-    cdef float32_t[::1] feature_values
+    # The samples vector `samples` is maintained such that the samples contained
+    # in a node are contiguous. With this setting, `partition_samples_final`
+    # reorganizes the node samples `samples[start:end]` in two
+    # subsets `samples[start:pos]` and `samples[pos:end]`.
+    cdef float32_t[::1] feature_values  # buffer
     cdef intp_t start
     cdef intp_t end
     cdef intp_t n_missing
@@ -25,7 +28,7 @@ cdef class BasePartitioner:
     cdef bint missing_on_the_left
     cdef char[::1] swap_buffer
 
-    cdef void sort_samples_and_feature_values(
+    cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
     cdef void shift_missing_to_the_left(self) noexcept nogil
@@ -45,12 +48,15 @@ cdef class BasePartitioner:
         intp_t* p_prev,
         intp_t* p
     ) noexcept nogil
+    cdef float64_t pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil
     cdef intp_t partition_samples(
         self,
         float64_t current_threshold,
         bint missing_go_to_left
     ) noexcept nogil
-    cdef void partition_samples_final(
+    cdef intp_t partition_samples_final(
         self,
         float64_t best_threshold,
         intp_t best_feature,

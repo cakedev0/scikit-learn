@@ -7,6 +7,7 @@ from sklearn.utils._typedefs cimport (
     float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t
 )
 from sklearn.tree._criterion cimport Criterion
+from sklearn.tree._partitioner cimport BasePartitioner
 from sklearn.tree._tree cimport ParentInfo
 
 
@@ -33,25 +34,21 @@ cdef class Splitter:
 
     # Internal structures
     cdef public Criterion criterion      # Impurity criterion
+    cdef public BasePartitioner partitioner
     cdef public intp_t max_features      # Number of features to test
     cdef public intp_t min_samples_leaf  # Min samples in a leaf
     cdef public float64_t min_weight_leaf   # Minimum weight in a leaf
 
-    cdef object random_state             # Random state
     cdef uint32_t rand_r_state           # sklearn_rand_r random number state
 
-    cdef intp_t[::1] samples             # Sample indices in X, y
-    cdef intp_t n_samples                # X.shape[0]
     cdef float64_t weighted_n_samples       # Weighted number of samples
     cdef intp_t[::1] features            # Feature indices in X
     cdef intp_t[::1] constant_features   # Constant features indices
     cdef intp_t n_features               # X.shape[1]
-    cdef float32_t[::1] feature_values   # temp. array holding feature values
 
     cdef intp_t start                    # Start position for the current node
     cdef intp_t end                      # End position for the current node
 
-    cdef const float64_t[:, ::1] y
     # Monotonicity constraints for each feature.
     # The encoding is as follows:
     #   -1: monotonic decrease
@@ -59,12 +56,6 @@ cdef class Splitter:
     #   +1: monotonic increase
     cdef const int8_t[:] monotonic_cst
     cdef bint with_monotonic_cst
-    cdef const float64_t[:] sample_weight
-
-    # The samples vector `samples` is maintained by the Splitter object such
-    # that the samples contained in a node are contiguous. With this setting,
-    # `node_split` reorganizes the node samples `samples[start:end]` in two
-    # subsets `samples[start:pos]` and `samples[pos:end]`.
 
     # The 1-d  `features` array of size n_features contains the features
     # indices and allows fast sampling without replacement of features.
@@ -76,15 +67,6 @@ cdef class Splitter:
     # child nodes.  The content of the range `[n_constant_features:]` is left
     # undefined, but preallocated for performance reasons
     # This allows optimization with depth-based tree building.
-
-    # Methods
-    cdef int init(
-        self,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight,
-        const uint8_t[::1] missing_values_in_feature_mask,
-    ) except -1
 
     cdef int node_reset(
         self,
@@ -104,3 +86,19 @@ cdef class Splitter:
     cdef void clip_node_value(self, float64_t* dest, float64_t lower_bound, float64_t upper_bound) noexcept nogil
 
     cdef float64_t node_impurity(self) noexcept nogil
+
+    cdef int node_split_for_feature(
+        self,
+        intp_t feature,
+        ParentInfo* parent_record,
+        SplitRecord* best_split,
+        float64_t* best_proxy_improvement,
+    ) except -1 nogil
+
+
+cdef class BestSplitter(Splitter):
+    pass
+
+
+cdef class RandomSplitter(Splitter):
+    pass

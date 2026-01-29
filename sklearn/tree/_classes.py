@@ -25,7 +25,12 @@ from sklearn.base import (
     clone,
     is_classifier,
 )
-from sklearn.tree import _criterion, _splitter, _tree  # type: ignore[attr-defined]
+from sklearn.tree import (  # type: ignore[attr-defined]
+    _criterion,
+    _partitioner,
+    _splitter,
+    _tree,
+)
 from sklearn.tree._criterion import Criterion
 from sklearn.tree._tree import (
     BestFirstTreeBuilder,
@@ -77,11 +82,9 @@ CRITERIA_REG = {
     "poisson": _criterion.Poisson,
 }
 
-DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
-
-SPARSE_SPLITTERS = {
-    "best": _splitter.BestSparseSplitter,
-    "random": _splitter.RandomSparseSplitter,
+SPLITTERS = {
+    "best": _splitter.BestSplitter,
+    "random": _splitter.RandomSplitter,
 }
 
 # =============================================================================
@@ -368,24 +371,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 sample_weight = expanded_class_weight
 
         # Set min_weight_leaf from min_weight_fraction_leaf
-        if sample_weight is None:
-            min_weight_leaf = self.min_weight_fraction_leaf * n_samples
-        else:
-            min_weight_leaf = self.min_weight_fraction_leaf * np.sum(sample_weight)
-
-        # Build tree
-        criterion = self.criterion
-        if not isinstance(criterion, Criterion):
-            if is_classification:
-                criterion = CRITERIA_CLF[self.criterion](
-                    self.n_outputs_, self.n_classes_
-                )
-            else:
-                criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
-        else:
-            # Make a deepcopy in case the criterion has mutable attributes that
-            # might be shared and modified concurrently during parallel fitting
-            criterion = copy.deepcopy(criterion)
+        weighted_n_samples = n_samples if sample_weight is None else sample_weight.sum()
+        min_weight_leaf = self.min_weight_fraction_leaf * weighted_n_samples
 
         if self.monotonic_cst is None:
             monotonic_cst = None
@@ -426,9 +413,38 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
 
-        SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
+        (samples,) = np.nonzero(sample_weight != 0.0)
+        weighted_n_samples = n_samples if sample_weight is None else sample_weight.sum()
+        feature_values_buffer = np.empty(n_samples)
+
+        # Build tree
+        criterion = self.criterion
+        if not isinstance(criterion, Criterion):
+            if is_classification:
+                criterion = CRITERIA_CLF[self.criterion](
+                    self.n_outputs_, self.n_classes_
+                )
+            else:
+                criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
+        else:
+            # Make a deepcopy in case the criterion has mutable attributes that
+            # might be shared and modified concurrently during parallel fitting
+            criterion = copy.deepcopy(criterion)
+
+        criterion.init(y, sample_weight, weighted_n_samples, samples)
+
+        Partitioner = (
+            _partitioner.SparsePartitioner
+            if issparse(X)
+            else _partitioner.DensePartitioner
+        )
+        partitioner = Partitioner(
+            X, samples, feature_values_buffer, missing_values_in_feature_mask
+        )
+
         splitter = SPLITTERS[self.splitter](
             criterion,
+            partitioner,
             self.max_features_,
             min_samples_leaf,
             min_weight_leaf,

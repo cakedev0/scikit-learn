@@ -31,15 +31,14 @@ cdef class Criterion:
     # statistics correspond to samples[start:pos] and samples[pos:end].
 
     # Methods
-    cdef int init(
+    cdef void init(
         self,
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight,
         float64_t weighted_n_samples,
         const intp_t[:] sample_indices,
-        intp_t start,
-        intp_t end
-    ) except -1 nogil
+    ) noexcept nogil
+    cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil
     cdef int reset(self) except -1 nogil
     cdef int reverse_reset(self) except -1 nogil
     cdef int update(self, intp_t new_pos) except -1 nogil

@@ -27,6 +27,8 @@ from scipy.sparse import issparse
 # in SparsePartitioner
 cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 
+cdef float64_t INFINITY = np.inf
+
 # Allow for 32 bit float comparisons
 cdef float32_t INFINITY_32t = np.inf
 
@@ -34,10 +36,10 @@ cdef float32_t INFINITY_32t = np.inf
 cdef class BasePartitioner:
     """Abstract interface shared by dense and sparse partitioners."""
 
-    cdef void sort_samples_and_feature_values(
+    cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil:
-        pass
+        return False
 
     cdef void init_node_split(
         self,
@@ -61,6 +63,11 @@ cdef class BasePartitioner:
     ) noexcept nogil:
         pass
 
+    cdef float64_t pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil:
+        return 0.0
+
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         pass
 
@@ -71,13 +78,13 @@ cdef class BasePartitioner:
     ) noexcept nogil:
         return 0
 
-    cdef void partition_samples_final(
+    cdef intp_t partition_samples_final(
         self,
         float64_t best_threshold,
         intp_t best_feature,
         bint best_missing_go_to_left
     ) noexcept nogil:
-        pass
+        return 0
 
 
 @final
@@ -106,7 +113,7 @@ cdef class DensePartitioner(BasePartitioner):
         self.end = end
         self.n_missing = 0
 
-    cdef inline void sort_samples_and_feature_values(
+    cdef inline bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil:
         """Simultaneously sort based on the feature_values.
@@ -150,9 +157,19 @@ cdef class DensePartitioner(BasePartitioner):
             for i in range(self.start, self.end):
                 feature_values[i] = X[samples[i], current_feature]
 
+        if n_missing == self.end - self.start:
+            return True
+
         sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
         self.missing_on_the_left = False
         self.n_missing = n_missing
+
+        if n_missing > 0:
+            return False
+        return (
+            feature_values[self.end - n_missing - 1]
+            <= feature_values[self.start] + FEATURE_THRESHOLD
+        )
 
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         """Moves missing values from the right to the left.
@@ -240,6 +257,29 @@ cdef class DensePartitioner(BasePartitioner):
                 p[0] += 1
             p_prev[0] = p[0] - 1
 
+    cdef inline float64_t pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil:
+        """Convert a split position into a split threshold."""
+        cdef float64_t threshold
+        cdef intp_t end_non_missing = (
+            self.end if self.missing_on_the_left
+            else self.end - self.n_missing)
+
+        if p == end_non_missing and not self.missing_on_the_left:
+            # split with the right node being only the missing values
+            return INFINITY
+
+        # split between two non-missing values
+        # sum of halves is used to avoid infinite value
+        threshold = (
+            self.feature_values[p_prev] / 2.0 + self.feature_values[p] / 2.0
+        )
+        if threshold == INFINITY or threshold == -INFINITY:
+            threshold = self.feature_values[p_prev]
+
+        return threshold
+
     cdef inline intp_t partition_samples(
         self,
         float64_t threshold,
@@ -271,7 +311,7 @@ cdef class DensePartitioner(BasePartitioner):
 
         return partition_end
 
-    cdef inline void partition_samples_final(
+    cdef inline intp_t partition_samples_final(
         self,
         float64_t best_threshold,
         intp_t best_feature,
@@ -303,6 +343,8 @@ cdef class DensePartitioner(BasePartitioner):
                 samples[partition_start], samples[partition_end] = (
                     samples[partition_end], samples[partition_start])
 
+        return partition_end
+
 
 @final
 cdef class SparsePartitioner(BasePartitioner):
@@ -314,13 +356,13 @@ cdef class SparsePartitioner(BasePartitioner):
         self,
         object X,
         intp_t[::1] samples,
-        intp_t n_samples,
         float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
     ):
         if not (issparse(X) and X.format == "csc"):
             raise ValueError("X should be in csc format")
 
+        n_samples = samples.shape[0]
         self.samples = samples
         self.feature_values = feature_values
 
@@ -349,7 +391,7 @@ cdef class SparsePartitioner(BasePartitioner):
         self.is_samples_sorted = 0
         self.n_missing = 0
 
-    cdef inline void sort_samples_and_feature_values(
+    cdef inline bint sort_samples_and_feature_values(
         self,
         intp_t current_feature
     ) noexcept nogil:
@@ -387,6 +429,8 @@ cdef class SparsePartitioner(BasePartitioner):
         # XXX: When sparse supports missing values, this should be set to the
         # number of missing values for current_feature
         self.n_missing = 0
+
+        return feature_values[self.end - 1] <= feature_values[self.start] + FEATURE_THRESHOLD
 
     cdef void shift_missing_to_the_left(self) noexcept nogil:
         pass  # Missing values are not supported for sparse data.
@@ -454,6 +498,21 @@ cdef class SparsePartitioner(BasePartitioner):
         p_prev[0] = p[0]
         p[0] = p_next
 
+    cdef inline float64_t pos_to_threshold(
+        self, intp_t p_prev, intp_t p
+    ) noexcept nogil:
+        """Convert a split position into a numerical threshold."""
+        cdef float64_t threshold
+        # split between two non-missing values
+        # sum of halves is used to avoid infinite value
+        threshold = (
+            self.feature_values[p_prev] / 2.0 + self.feature_values[p] / 2.0
+        )
+        if threshold == INFINITY or threshold == -INFINITY:
+            threshold = self.feature_values[p_prev]
+
+        return threshold
+
     cdef inline intp_t partition_samples(
         self,
         float64_t current_threshold,
@@ -462,7 +521,7 @@ cdef class SparsePartitioner(BasePartitioner):
         """Partition samples for feature_values at the current_threshold."""
         return self._partition(current_threshold)
 
-    cdef inline void partition_samples_final(
+    cdef inline intp_t partition_samples_final(
         self,
         float64_t best_threshold,
         intp_t best_feature,
@@ -470,7 +529,7 @@ cdef class SparsePartitioner(BasePartitioner):
     ) noexcept nogil:
         """Partition samples for X at the best_threshold and best_feature."""
         self.extract_nnz(best_feature)
-        self._partition(best_threshold)
+        return self._partition(best_threshold)
 
     cdef inline intp_t _partition(self, float64_t threshold) noexcept nogil:
         """Partition samples[start:end] based on threshold."""

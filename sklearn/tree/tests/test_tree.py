@@ -8,7 +8,7 @@ import io
 import pickle
 import re
 import struct
-from itertools import chain, pairwise, product
+from itertools import pairwise, product
 
 import joblib
 import numpy as np
@@ -35,12 +35,7 @@ from sklearn.tree import (
     ExtraTreeClassifier,
     ExtraTreeRegressor,
 )
-from sklearn.tree._classes import (
-    CRITERIA_CLF,
-    CRITERIA_REG,
-    DENSE_SPLITTERS,
-    SPARSE_SPLITTERS,
-)
+from sklearn.tree._classes import CRITERIA_CLF, CRITERIA_REG
 from sklearn.tree._criterion import _py_precompute_absolute_errors
 from sklearn.tree._partitioner import _py_sort
 from sklearn.tree._tree import (
@@ -2380,24 +2375,6 @@ def test_check_node_ndarray():
 
     with pytest.raises(ValueError, match="node array.+incompatible dtype"):
         _check_node_ndarray(problematic_node_ndarray, expected_dtype=expected_dtype)
-
-
-@pytest.mark.parametrize(
-    "Splitter", chain(DENSE_SPLITTERS.values(), SPARSE_SPLITTERS.values())
-)
-def test_splitter_serializable(Splitter):
-    """Check that splitters are serializable."""
-    rng = np.random.RandomState(42)
-    max_features = 10
-    n_outputs, n_classes = 2, np.array([3, 2], dtype=np.intp)
-
-    criterion = CRITERIA_CLF["gini"](n_outputs, n_classes)
-    splitter = Splitter(criterion, max_features, 5, 0.5, rng, monotonic_cst=None)
-    splitter_serialize = pickle.dumps(splitter)
-
-    splitter_back = pickle.loads(splitter_serialize)
-    assert splitter_back.max_features == max_features
-    assert isinstance(splitter_back, Splitter)
 
 
 def test_tree_deserialization_from_read_only_buffer(tmpdir):

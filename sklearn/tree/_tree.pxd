@@ -108,14 +108,6 @@ cdef class TreeBuilder:
         const uint8_t[::1] missing_values_in_feature_mask=*,
     )
 
-    cdef _check_input(
-        self,
-        object X,
-        const float64_t[:, ::1] y,
-        const float64_t[:] sample_weight,
-    )
-
-
 # =============================================================================
 # Tree pruning
 # =============================================================================
