@@ -90,7 +90,7 @@ cdef class Splitter:
         self.criterion = criterion
         self.partitioner = partitioner
 
-        n_features = monotonic_cst.shape[0]
+        n_features = partitioner.n_features
         self.features = np.arange(n_features, dtype=np.intp)
         self.constant_features = np.empty(n_features, dtype=np.intp)
         self.n_features = n_features
@@ -277,7 +277,7 @@ cdef class Splitter:
         split[0] = best_split
         return 0
 
-    cdef inline int node_split_for_feature(
+    cdef int node_split_for_feature(
         self,
         intp_t feature,
         ParentInfo* parent_record,
@@ -290,7 +290,7 @@ cdef class Splitter:
 @final
 cdef class BestSplitter(Splitter):
 
-    cdef inline int node_split_for_feature(
+    cdef int node_split_for_feature(
         self,
         intp_t feature,
         ParentInfo* parent_record,

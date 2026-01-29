@@ -24,6 +24,7 @@ cdef class BasePartitioner:
     cdef intp_t start
     cdef intp_t end
     cdef intp_t n_missing
+    cdef intp_t n_features
     cdef const uint8_t[::1] missing_values_in_feature_mask
     cdef bint missing_on_the_left
     cdef char[::1] swap_buffer

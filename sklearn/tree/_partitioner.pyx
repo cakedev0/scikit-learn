@@ -101,6 +101,7 @@ cdef class DensePartitioner(BasePartitioner):
         const uint8_t[::1] missing_values_in_feature_mask,
     ):
         self.X = X
+        self.n_features = X.shape[1]
         self.samples = samples
         self.feature_values = feature_values
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
@@ -367,15 +368,13 @@ cdef class SparsePartitioner(BasePartitioner):
         self.feature_values = feature_values
 
         # Initialize X
-        cdef intp_t n_total_samples = X.shape[0]
-
         self.X_data = X.data
         self.X_indices = X.indices
         self.X_indptr = X.indptr
-        self.n_total_samples = n_total_samples
+        self.n_features = X.shape[1]
 
         # Initialize auxiliary array used to perform split
-        self.index_to_samples = np.full(n_total_samples, fill_value=-1, dtype=np.intp)
+        self.index_to_samples = np.full(X.shape[0], fill_value=-1, dtype=np.intp)
         self.sorted_samples = np.empty(n_samples, dtype=np.intp)
 
         cdef intp_t p

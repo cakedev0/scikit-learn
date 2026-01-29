@@ -60,6 +60,7 @@ cdef class Criterion:
         self.sample_weight = sample_weight
         self.sample_indices = sample_indices
         self.weighted_n_samples = weighted_n_samples
+        self.n_samples = sample_indices.shape[0]
 
     cdef void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize the criterion.
@@ -324,7 +325,7 @@ cdef class ClassificationCriterion(Criterion):
         end : intp_t
             The last sample to use in the mask
         """
-        cdef intp_t[:] sample_indices = sample_indices
+        cdef const intp_t[:] sample_indices = self.sample_indices
 
         self.start = start
         self.end = end
