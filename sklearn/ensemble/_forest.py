@@ -64,7 +64,7 @@ from sklearn.tree import (
     ExtraTreeClassifier,
     ExtraTreeRegressor,
 )
-from sklearn.tree._tree import DOUBLE, DTYPE
+from sklearn.tree._classes import DOUBLE, DTYPE
 from sklearn.utils import (
     check_random_state,
     compute_class_weight,

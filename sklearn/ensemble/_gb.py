@@ -50,7 +50,8 @@ from sklearn.exceptions import NotFittedError
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.tree._tree import DOUBLE, DTYPE, TREE_LEAF
+from sklearn.tree._classes import DOUBLE, DTYPE
+from sklearn.tree._tree import TREE_LEAF
 from sklearn.utils import check_array, check_random_state, column_or_1d
 from sklearn.utils._param_validation import HasMethods, Hidden, Interval, StrOptions
 from sklearn.utils.multiclass import check_classification_targets

@@ -43,7 +43,6 @@ from sklearn.metrics import (
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.svm import LinearSVC
-from sklearn.tree._classes import SPARSE_SPLITTERS
 from sklearn.utils._testing import (
     _convert_container,
     assert_allclose,
@@ -1133,11 +1132,10 @@ def test_memory_layout(name, dtype):
         assert_array_almost_equal(est.fit(X, y).predict(X), y)
 
     # Sparse (if applicable)
-    if est.estimator.splitter in SPARSE_SPLITTERS:
-        for sparse_container in COO_CONTAINERS + CSC_CONTAINERS + CSR_CONTAINERS:
-            X = sparse_container(iris.data, dtype=dtype)
-            y = iris.target
-            assert_array_almost_equal(est.fit(X, y).predict(X), y)
+    for sparse_container in COO_CONTAINERS + CSC_CONTAINERS + CSR_CONTAINERS:
+        X = sparse_container(iris.data, dtype=dtype)
+        y = iris.target
+        assert_array_almost_equal(est.fit(X, y).predict(X), y)
 
     # Strided
     X = np.asarray(iris.data[::3], dtype=dtype)
