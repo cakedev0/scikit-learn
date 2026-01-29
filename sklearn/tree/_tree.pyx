@@ -371,7 +371,6 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef intp_t max_leaf_nodes = self.max_leaf_nodes
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight, missing_values_in_feature_mask)
 
         cdef vector[FrontierRecord] frontier
         cdef FrontierRecord record
@@ -382,7 +381,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef float64_t right_child_min
         cdef float64_t right_child_max
 
-        cdef intp_t n_node_samples = splitter.n_samples
+        cdef intp_t n_node_samples = splitter.criterion.n_samples
         cdef intp_t max_split_nodes = max_leaf_nodes - 1
         cdef bint is_leaf
         cdef intp_t max_depth_seen = -1
