@@ -33,10 +33,12 @@ Some advantages of decision trees are:
 - The cost of using the tree (i.e., predicting data) is logarithmic in the
   number of data points used to train the tree.
 
-- Able to handle both numerical and categorical data. However, the scikit-learn
-  implementation does not support categorical variables for now. Other
-  techniques are usually specialized in analyzing datasets that have only one type
-  of variable. See :ref:`algorithms <tree_algorithms>` for more
+- Able to handle both numerical and categorical data. DecisionTreeClassifier
+  and DecisionTreeRegressor can handle categorical features via the
+  ``categorical_features`` parameter, with some limitations (see
+  :ref:`Categorical features <tree_categorical_features>`).
+  Other techniques are usually specialized in analyzing datasets that have only
+  one type of variable. See :ref:`algorithms <tree_algorithms>` for more
   information.
 
 - Able to handle multi-output problems.
@@ -85,6 +87,22 @@ The disadvantages of decision trees include:
 - Decision tree learners create biased trees if some classes dominate.
   It is therefore recommended to balance the dataset prior to fitting
   with the decision tree.
+
+.. _tree_categorical_features:
+
+Categorical features
+====================
+
+DecisionTreeClassifier and DecisionTreeRegressor can natively handle categorical
+features via the ``categorical_features`` parameter. Current support is limited
+to dense inputs and the ``"best"`` splitter; see the estimator documentation
+for details and additional constraints.
+
+.. warning::
+   Categorical splits can overfit when a feature has many categories or when
+   categories have few samples. Consider regularization (for example
+   ``min_samples_leaf`` or ``min_weight_fraction_leaf``), limiting depth, or
+   reducing cardinality by grouping infrequent categories.
 
 
 .. _tree_classification:
@@ -466,8 +484,10 @@ from each other? Which one is implemented in scikit-learn?
   does not compute rule sets. CART constructs binary trees using the feature
   and threshold that yield the largest information gain at each node.
 
-scikit-learn uses an optimized version of the CART algorithm; however, the
-scikit-learn implementation does not support categorical variables for now.
+scikit-learn uses an optimized version of the CART algorithm and supports
+categorical variables in DecisionTreeClassifier and DecisionTreeRegressor via
+the ``categorical_features`` parameter (see
+:ref:`Categorical features <tree_categorical_features>`).
 
 .. _ID3: https://en.wikipedia.org/wiki/ID3_algorithm
 
