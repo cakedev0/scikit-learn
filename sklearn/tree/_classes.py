@@ -256,17 +256,12 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             X, y = validate_data(
                 self, X, y, validate_separately=(check_X_params, check_y_params)
             )
+            if issparse(X):
+                X.sort_indices()
 
             missing_values_in_feature_mask = (
                 self._compute_missing_values_in_feature_mask(X)
             )
-            if issparse(X):
-                X.sort_indices()
-
-                if X.indices.dtype != np.intc or X.indptr.dtype != np.intc:
-                    raise ValueError(
-                        "No support for np.int64 index based sparse matrices"
-                    )
 
             if self.criterion == "poisson":
                 if np.any(y < 0):
@@ -279,6 +274,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                         "Sum of y is not positive which is "
                         "necessary for Poisson regression."
                     )
+        else:
+            # Still do some light-weight no-copy checks when check_input is False:
+            assert X.dtype == DTYPE
+            assert y.dtype == DOUBLE
+            assert y.flags.contiguous
+            if issparse(X):
+                assert X.has_sorted_indices
+
+        if issparse(X) and (X.indices.dtype != np.intc or X.indptr.dtype != np.intc):
+            raise ValueError("No support for np.int64 index based sparse matrices")
 
         # Determine output settings
         n_samples, self.n_features_in_ = X.shape

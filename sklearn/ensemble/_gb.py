@@ -52,7 +52,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.tree._classes import DOUBLE, DTYPE
 from sklearn.tree._tree import TREE_LEAF
-from sklearn.utils import check_array, check_random_state, column_or_1d
+from sklearn.utils import check_array, check_random_state
 from sklearn.utils._param_validation import HasMethods, Hidden, Interval, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.stats import _weighted_percentile
@@ -472,7 +472,7 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
         if neg_gradient.ndim == 1:
             neg_g_view = neg_gradient.reshape((-1, 1))
         else:
-            neg_g_view = neg_gradient
+            neg_g_view = np.asfortranarray(neg_gradient)
 
         for k in range(self.n_trees_per_iteration_):
             if self._loss.is_multiclass:
@@ -689,7 +689,6 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
             y = self._encode_y(y=y, sample_weight=None)
         else:
             y = self._encode_y(y=y, sample_weight=sample_weight)
-        y = column_or_1d(y, warn=True)  # TODO: Is this still required?
 
         self._set_max_features()
 
@@ -2139,7 +2138,7 @@ class GradientBoostingRegressor(RegressorMixin, BaseGradientBoosting):
     def _encode_y(self, y=None, sample_weight=None):
         # Just convert y to the expected dtype
         self.n_trees_per_iteration_ = 1
-        y = y.astype(DOUBLE, copy=False)
+        y = np.ascontiguousarray(y, dtype=DOUBLE)
         return y
 
     def _get_loss(self, sample_weight):
