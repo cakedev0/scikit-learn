@@ -205,20 +205,28 @@ cdef class DensePartitioner:
             intp_t partition_end = self.end
             intp_t* samples = &self.samples[0]
             float32_t* feature_values = &self.feature_values[0]
-            bint go_to_left
 
-        while partition_start < partition_end:
-            go_to_left = (
-                missing_go_to_left if isnan(feature_values[partition_start])
-                else feature_values[partition_start] <= threshold
-            )
-            if go_to_left:
+        while True:
+            while (
+                partition_start < partition_end and
+                go_left(feature_values, partition_start, threshold, missing_go_to_left)
+            ):
                 partition_start += 1
-            else:
-                partition_end -= 1
-                swap(feature_values, samples, partition_start, partition_end)
 
-        return partition_end
+            while (
+                partition_start < partition_end and
+                not go_left(feature_values, partition_end - 1, threshold, missing_go_to_left)
+            ):
+                partition_end -= 1
+
+            if partition_start >= partition_end:
+                break
+
+            partition_end -= 1
+            swap(feature_values, samples, partition_start, partition_end)
+            partition_start += 1
+
+        return partition_start
 
     cdef inline void partition_samples_final(
         self,
@@ -252,6 +260,12 @@ cdef class DensePartitioner:
                 samples[partition_start], samples[partition_end] = (
                     samples[partition_end], samples[partition_start])
 
+
+cdef inline bint go_left(float32_t* feature_values, intp_t i, float64_t threshold, bint missing_go_to_left) noexcept nogil:
+    return (
+        missing_go_to_left if isnan(feature_values[i])
+        else feature_values[i] <= threshold
+    )
 
 @final
 cdef class SparsePartitioner:
