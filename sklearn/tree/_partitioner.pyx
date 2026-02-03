@@ -263,9 +263,10 @@ cdef class DensePartitioner:
 
 cdef inline bint go_left(float32_t* feature_values, intp_t i, float64_t threshold, bint missing_go_to_left) noexcept nogil:
     return (
-        missing_go_to_left if isnan(feature_values[i])
-        else feature_values[i] <= threshold
+        (feature_values[i] <= threshold) |
+        (missing_go_to_left & isnan(feature_values[i]))
     )
+
 
 @final
 cdef class SparsePartitioner:
