@@ -12,7 +12,7 @@ from sklearn.utils._array_api import (
 from sklearn.utils._array_api import device as array_device
 from sklearn.utils.estimator_checks import _array_api_for_tests
 from sklearn.utils.fixes import np_version, parse_version
-from sklearn.utils.stats import _weighted_percentile
+from sklearn.utils.stats import _weighted_percentile, weighted_quantile_by_idx
 
 
 @pytest.mark.parametrize("average", [True, False])
@@ -490,3 +490,170 @@ def test_weighted_percentile_like_numpy_nanquantile(
     )
 
     assert_array_equal(percentile_weighted_percentile, percentile_numpy_nanquantile)
+
+
+def test_weighted_quantile_by_idx_basic():
+    """Test basic functionality of weighted_quantile_by_idx with median."""
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    idx = np.array([0, 0, 0, 1, 1, 1])
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Using "inverted_cdf" method
+    # Group 0: [1, 2, 3] -> cumsum [1, 2, 3], threshold=1.5,
+    #          first >= 1.5 is at cumsum=2 -> y=2
+    # Group 1: [4, 5, 6] -> cumsum [1, 2, 3], threshold=1.5,
+    #          first >= 1.5 is at cumsum=2 -> y=5
+    assert result[0] == approx(2.0)
+    assert result[1] == approx(5.0)
+
+
+def test_weighted_quantile_by_idx_different_quantiles():
+    """Test weighted_quantile_by_idx with different quantile levels."""
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+    idx = np.array([0, 0, 0, 0, 0])
+
+    # Test different quantiles
+    result_q25 = weighted_quantile_by_idx(y, w, idx, quantile=0.25)
+    result_q50 = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+    result_q75 = weighted_quantile_by_idx(y, w, idx, quantile=0.75)
+
+    # For uniform weights [1,2,3,4,5]: cumulative weights are [1,2,3,4,5]
+    # q=0.25: 0.25*5=1.25, first >= 1.25 is at cumsum=2 -> y=2
+    # q=0.50: 0.50*5=2.5, first >= 2.5 is at cumsum=3 -> y=3
+    # q=0.75: 0.75*5=3.75, first >= 3.75 is at cumsum=4 -> y=4
+    assert result_q25[0] == approx(2.0)
+    assert result_q50[0] == approx(3.0)
+    assert result_q75[0] == approx(4.0)
+
+
+def test_weighted_quantile_by_idx_weighted():
+    """Test weighted_quantile_by_idx with non-uniform weights."""
+    y = np.array([1.0, 2.0, 3.0])
+    w = np.array([1.0, 2.0, 1.0])  # Total weight = 4
+    idx = np.array([0, 0, 0])
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Cumulative weights: [1, 3, 4]
+    # Median at 0.5*4=2.0, first cumsum >= 2.0 is 3 -> y=2
+    assert result[0] == approx(2.0)
+
+
+def test_weighted_quantile_by_idx_multiple_groups():
+    """Test weighted_quantile_by_idx with multiple groups."""
+    y = np.array([5.0, 1.0, 3.0, 2.0, 4.0, 6.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    idx = np.array([1, 0, 0, 1, 2, 2])
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Using "inverted_cdf" method (like _weighted_percentile with average=False)
+    # Group 0: [1, 3] -> cumsum [1, 2], threshold=1.0,
+    #          first >= 1.0 is at cumsum=1 -> y=1
+    # Group 1: [2, 5] -> cumsum [1, 2], threshold=1.0,
+    #          first >= 1.0 is at cumsum=1 -> y=2
+    # Group 2: [4, 6] -> cumsum [1, 2], threshold=1.0,
+    #          first >= 1.0 is at cumsum=1 -> y=4
+    assert result[0] == approx(1.0)
+    assert result[1] == approx(2.0)
+    assert result[2] == approx(4.0)
+
+
+def test_weighted_quantile_by_idx_missing_groups():
+    """Test that missing group indices return NaN."""
+    y = np.array([1.0, 2.0, 3.0])
+    w = np.array([1.0, 1.0, 1.0])
+    idx = np.array([0, 0, 2])  # Group 1 is missing
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Group 0: [1, 2] -> cumsum [1, 2], threshold=1.0,
+    #          first >= 1.0 is at cumsum=1 -> y=1
+    assert result[0] == approx(1.0)
+    assert np.isnan(result[1])  # Group 1: missing
+    assert result[2] == approx(3.0)  # Group 2: only [3]
+
+
+def test_weighted_quantile_by_idx_single_value_per_group():
+    """Test with single value per group."""
+    y = np.array([10.0, 20.0, 30.0])
+    w = np.array([1.0, 2.0, 3.0])
+    idx = np.array([0, 1, 2])
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Each group has only one value, so that value is the quantile
+    assert result[0] == approx(10.0)
+    assert result[1] == approx(20.0)
+    assert result[2] == approx(30.0)
+
+
+def test_weighted_quantile_by_idx_extreme_quantiles():
+    """Test with extreme quantile values (0 and 1)."""
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+    idx = np.array([0, 0, 0, 0, 0])
+
+    # Quantile 0 should give first value when cumsum > 0
+    result_q0 = weighted_quantile_by_idx(y, w, idx, quantile=0.0)
+    # For q=0, threshold is 0, first cumsum >= 0 is cumsum=1 -> y=1
+    assert result_q0[0] == approx(1.0)
+
+    # Quantile 1 should give last value
+    result_q1 = weighted_quantile_by_idx(y, w, idx, quantile=1.0)
+    # For q=1, threshold is 5, first cumsum >= 5 is cumsum=5 -> y=5
+    assert result_q1[0] == approx(5.0)
+
+
+def test_weighted_quantile_by_idx_unsorted_input():
+    """Test that the function handles unsorted input correctly."""
+    # Input is intentionally unsorted
+    y = np.array([3.0, 1.0, 4.0, 2.0, 5.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+    idx = np.array([1, 0, 1, 0, 1])
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+
+    # Group 0: [1, 2] -> cumsum [1, 2], threshold=1.0,
+    #          first >= 1.0 is at cumsum=1 -> y=1
+    # Group 1: [3, 4, 5] -> cumsum [1, 2, 3], threshold=1.5,
+    #          first >= 1.5 is at cumsum=2 -> y=4
+    assert result[0] == approx(1.0)
+    assert result[1] == approx(4.0)
+
+
+def test_weighted_quantile_by_idx_consistency_with_weighted_percentile():
+    """Test consistency with _weighted_percentile for single group."""
+    rng = np.random.RandomState(42)
+    y = rng.rand(20)
+    w = rng.rand(20)
+    idx = np.zeros(20, dtype=int)  # All in group 0
+
+    for quantile in [0.25, 0.5, 0.75]:
+        result_by_idx = weighted_quantile_by_idx(y, w, idx, quantile=quantile)
+        # _weighted_percentile expects percentile_rank in [0, 100]
+        result_percentile = _weighted_percentile(
+            y, w, percentile_rank=quantile * 100, average=False
+        )
+
+        assert result_by_idx[0] == approx(result_percentile)
+
+
+@pytest.mark.parametrize("quantile", [0.1, 0.25, 0.5, 0.75, 0.9])
+def test_weighted_quantile_by_idx_parametrized_quantiles(quantile):
+    """Test various quantile levels."""
+    y = np.arange(1, 11, dtype=float)  # [1, 2, ..., 10]
+    w = np.ones(10)
+    idx = np.zeros(10, dtype=int)
+
+    result = weighted_quantile_by_idx(y, w, idx, quantile=quantile)
+
+    # Verify result is within the data range
+    assert 1.0 <= result[0] <= 10.0
+    # Verify it's monotonic with quantile level
+    if quantile > 0.5:
+        result_lower = weighted_quantile_by_idx(y, w, idx, quantile=0.5)
+        assert result[0] >= result_lower[0]

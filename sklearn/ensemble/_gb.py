@@ -49,7 +49,7 @@ from sklearn.exceptions import NotFittedError
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.tree._tree import DOUBLE, DTYPE, TREE_LEAF
+from sklearn.tree._tree import DOUBLE, DTYPE
 from sklearn.utils import check_array, check_random_state, column_or_1d
 from sklearn.utils._param_validation import HasMethods, Hidden, Interval, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
@@ -230,20 +230,18 @@ def _update_terminal_regions(
     else:
         # regression losses other than the squared error.
         # As of now: absolute error, pinball loss, huber loss.
-
-        # mask all which are not in sample mask.
-        masked_terminal_regions = terminal_regions.copy()
-        masked_terminal_regions[~sample_mask] = -1
-        # update each leaf (= perform line search)
-        for leaf in np.nonzero(tree.children_left == TREE_LEAF)[0]:
-            (indices,) = np.nonzero(masked_terminal_regions == leaf)
-            sw = None if sample_weight is None else sample_weight[indices]
-            update = loss.fit_intercept_only(
-                y_true=y[indices] - raw_prediction[indices, k],
-                sample_weight=sw,
+        if sample_mask.all():
+            idx = terminal_regions
+            residual = y - raw_prediction[:, k]
+        else:
+            sample_weight = (
+                None if sample_weight is None else sample_weight[sample_mask]
             )
+            residual = y[sample_mask] - raw_prediction[sample_mask, k]
+            idx = terminal_regions[sample_mask]
 
-            tree.value[leaf, 0, 0] = update
+        update = loss.fit_intercept_only_by_idx(idx, residual, sample_weight)
+        tree.value[:, 0, 0] = update
 
     # update predictions (both in-bag and out-of-bag)
     raw_prediction[:, k] += learning_rate * tree.value[:, 0, 0].take(
