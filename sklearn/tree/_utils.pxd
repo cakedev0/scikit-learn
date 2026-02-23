@@ -4,9 +4,34 @@
 # See _utils.pyx for details.
 
 cimport numpy as cnp
-from sklearn.tree._tree cimport Node
 from sklearn.neighbors._quad_tree cimport Cell
-from sklearn.utils._typedefs cimport float32_t, float64_t, intp_t, uint8_t, int32_t, uint32_t
+from sklearn.utils._typedefs cimport (
+    float32_t, float64_t, intp_t, uint8_t, int32_t, uint32_t, uint64_t
+)
+
+
+ctypedef union SplitValue:
+    # Union type to generalize the concept of a threshold to categorical
+    # features. The floating point view, i.e. ``split_value.threshold`` is used
+    # for numerical features, where feature values less than or equal to the
+    # threshold go left, and values greater than the threshold go right.
+
+    float64_t threshold
+    uint64_t cat_split  # bitset
+
+
+cdef struct Node:
+    # Base storage structure for the nodes in a Tree object
+
+    intp_t left_child                    # id of the left child of the node
+    intp_t right_child                   # id of the right child of the node
+    intp_t feature                       # Feature used for splitting the node
+    float64_t threshold                  # Threshold value at the node, for continuous split (-INF otherwise)
+    uint64_t categorical_bitset          # Bitset for categorical split (0 otherwise)
+    float64_t impurity                   # Impurity of the node (i.e., the value of the criterion)
+    intp_t n_node_samples                # Number of samples at the node
+    float64_t weighted_n_node_samples    # Weighted number of samples at the node
+    uint8_t missing_go_to_left     # Whether features have missing values
 
 
 cdef enum:
