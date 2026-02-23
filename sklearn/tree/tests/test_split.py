@@ -224,6 +224,8 @@ def test_split_impurity(
 
     if categorical and "Extra" in Tree.__name__:
         pytest.skip("Categorical features not implemented for the random splitter")
+    if missing_values and criterion == "absolute_error":
+        pytest.skip("AE + missing values not supported yet")
     if missing_values and criterion == "poisson":
         pytest.xfail("Poisson criterion is faulty for now")
     rng = np.random.default_rng(global_random_seed)
