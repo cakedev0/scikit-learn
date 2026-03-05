@@ -233,9 +233,7 @@ cdef class Splitter:
         if proxy_improvement > -INFINITY:
             # Reorganize into samples[start:pos] + samples[pos:end]
             best_split.pos = self.partitioner.partition_samples_final(
-                best_split.threshold,
-                best_split.feature,
-                best_split.missing_go_to_left
+                &best_split
             )
 
             self.criterion.reset()

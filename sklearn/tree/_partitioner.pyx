@@ -59,11 +59,12 @@ cdef class BasePartitioner:
         self,
         intp_t* p_prev,
         intp_t* p,
+        bint missing_go_to_left,
     ) noexcept nogil:
         pass
 
     cdef float64_t pos_to_threshold(
-        self, intp_t p_prev, intp_t p
+        self, intp_t p_prev, intp_t p, bint missing_go_to_left
     ) noexcept nogil:
         return 0.0
 
@@ -79,9 +80,7 @@ cdef class BasePartitioner:
 
     cdef intp_t partition_samples_final(
         self,
-        float64_t best_threshold,
-        intp_t best_feature,
-        bint best_missing_go_to_left
+        const SplitRecord* best_split,
     ) noexcept nogil:
         return 0
 
@@ -528,7 +527,7 @@ cdef class SparsePartitioner(BasePartitioner):
         p[0] = p_next
 
     cdef inline float64_t pos_to_threshold(
-        self, intp_t p_prev, intp_t p
+        self, intp_t p_prev, intp_t p, bint missing_go_to_left
     ) noexcept nogil:
         """Convert a split position into a numerical threshold."""
         cdef float64_t threshold
@@ -556,7 +555,7 @@ cdef class SparsePartitioner(BasePartitioner):
     ) noexcept nogil:
         """Partition samples for X according to the split described by best_split."""
         self.extract_nnz(best_split[0].feature)
-        self._partition(best_split[0].threshold)
+        return self._partition(best_split[0].threshold)
 
     cdef inline intp_t _partition(self, float64_t threshold) noexcept nogil:
         """
