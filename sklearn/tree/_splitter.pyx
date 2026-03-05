@@ -343,7 +343,7 @@ cdef class BestSplitter(Splitter):
             p = start
 
             while p < end:
-                self.partitioner.next_p(&p_prev, &p)
+                self.partitioner.next_p(&p_prev, &p, missing_go_to_left)
                 if p == end:
                     continue
 
@@ -379,7 +379,7 @@ cdef class BestSplitter(Splitter):
                 if current_proxy_improvement > best_proxy_improvement[0]:
                     # write into best split:
                     best_proxy_improvement[0] = current_proxy_improvement
-                    best_split.threshold = self.partitioner.pos_to_threshold(p_prev, p)
+                    best_split.threshold = self.partitioner.pos_to_threshold(p_prev, p, missing_go_to_left)
                     best_split.feature = feature
                     # if there are no missing values in the training data, during
                     # test time, we send missing values to the branch that contains

@@ -26,7 +26,7 @@ cdef class BasePartitioner:
     cdef intp_t n_missing
     cdef intp_t n_features
     cdef const uint8_t[::1] missing_values_in_feature_mask
-    cdef bint missing_on_the_left
+    cdef char[::1] swap_buffer
 
     cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
@@ -46,10 +46,11 @@ cdef class BasePartitioner:
     cdef void next_p(
         self,
         intp_t* p_prev,
-        intp_t* p
+        intp_t* p,
+        bint missing_go_to_left
     ) noexcept nogil
     cdef float64_t pos_to_threshold(
-        self, intp_t p_prev, intp_t p
+        self, intp_t p_prev, intp_t p, bint missing_go_to_left
     ) noexcept nogil
     cdef intp_t partition_samples(
         self,
@@ -58,9 +59,7 @@ cdef class BasePartitioner:
     ) noexcept nogil
     cdef intp_t partition_samples_final(
         self,
-        float64_t best_threshold,
-        intp_t best_feature,
-        bint best_missing_go_to_left,
+        const SplitRecord* best_split,
     ) noexcept nogil
 
 

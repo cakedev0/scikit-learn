@@ -20,6 +20,7 @@ cimport numpy as cnp
 cnp.import_array()
 from scipy.sparse import issparse
 
+from sklearn.tree._splitter cimport SplitRecord
 
 # Constant to switch between algorithm non zero value extract algorithm
 # in SparsePartitioner
@@ -105,6 +106,8 @@ cdef class DensePartitioner(BasePartitioner):
         self.feature_values = np.empty(X.shape[0], dtype=np.float32)
         buffer_size = samples.size * max(samples.itemsize, self.feature_values.itemsize)
         self.swap_buffer = np.empty(buffer_size, dtype=np.uint8)
+        # TODO: As optimization we could make `swap_array_slices` always pick the smallest side
+        # to get copied in the buffer, which would allow to use a buffer twice smaller.
 
     cdef inline void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize partitioner state at the beginning of node_split."""
@@ -160,7 +163,6 @@ cdef class DensePartitioner(BasePartitioner):
             return True
 
         sort(&feature_values[self.start], &samples[self.start], self.end - self.start - n_missing)
-        self.missing_on_the_left = False
         self.n_missing = n_missing
 
         if n_missing > 0:
@@ -175,16 +177,18 @@ cdef class DensePartitioner(BasePartitioner):
 
         All missing values are expected to be grouped at the right hand side of the
         [self.start:self.end] slices of the self.samples and self.feature_values arrays
-        before calling this method.
+        before calling this method. This will be the case for nominal use as
+        the splitter calls sort_samples_and_feature_values() first:
+        that method groups missing values on the right and sets self.n_missing.
+        shift_missing_to_the_left() is then called only for the second split search
+        pass when evaluating missing_go_to_left=True.
 
         Non-missing values are correspondingly moved from the left to the right while
         preserving their inner ordering.
         """
-        assert not self.missing_on_the_left
         cdef intp_t n_non_missing = self.end - self.start - self.n_missing
         swap_array_slices(self.samples, self.start, self.end, n_non_missing, self.swap_buffer)
         swap_array_slices(self.feature_values, self.start, self.end, n_non_missing, self.swap_buffer)
-        self.missing_on_the_left = True
 
     cdef inline void find_min_max(
         self,
@@ -205,7 +209,7 @@ cdef class DensePartitioner(BasePartitioner):
             float32_t max_feature_value = -INFINITY_32t
             float32_t[::1] feature_values = self.feature_values
             intp_t n_missing = 0
-            bint found_non_missing = False
+            bint seen_non_missing = False
 
         for p in range(self.start, self.end):
             current_feature_value = self.X[samples[p], current_feature]
@@ -213,10 +217,10 @@ cdef class DensePartitioner(BasePartitioner):
 
             if isnan(current_feature_value):
                 n_missing += 1
-            elif not found_non_missing:
+            elif not seen_non_missing:
                 min_feature_value = current_feature_value
                 max_feature_value = current_feature_value
-                found_non_missing = True
+                seen_non_missing = True
             elif current_feature_value < min_feature_value:
                 min_feature_value = current_feature_value
             elif current_feature_value > max_feature_value:
@@ -226,26 +230,44 @@ cdef class DensePartitioner(BasePartitioner):
         max_feature_value_out[0] = max_feature_value
         self.n_missing = n_missing
 
-    cdef inline void next_p(self, intp_t* p_prev, intp_t* p) noexcept nogil:
+    cdef inline void next_p(
+        self,
+        intp_t* p_prev,
+        intp_t* p,
+        bint missing_go_to_left,
+    ) noexcept nogil:
         """
         Compute the next p_prev and p for iterating over feature values.
 
-        - if self.missing_on_the_left: go over the p in [start + n_missing + 1, end)
-        - else: go over the p in [start, end_non_missing]
-            when p=end_non_missing, this means all non-missing values go to the left
-            and all missing to the right
+        This method is used inside the best-split search function pass which starts
+        by setting p = start at the beginning of each search pass and calls
+        this method repeatedly with the same missing_go_to_left as for that pass.
+        The expected layout of self.feature_values[start:end] is:
+        - first pass (missing_go_to_left=False): after
+          sort_samples_and_feature_values(), non-missing values are sorted and
+          missing values are grouped at the right;
+        - second pass (missing_go_to_left=True): after
+          shift_missing_to_the_left(), missing values are grouped at the left.
+
+        Given that layout, this method advances p to the next valid split
+        position while skipping ties up to FEATURE_THRESHOLD:
+        - if missing_go_to_left: iterate p in [start + n_missing + 1, end)
+        - otherwise: iterate p in [start, end - n_missing].
+          The special case p == end - n_missing corresponds to "all non-missing
+          values on the left and all missing values on the right". The next
+          call then sets p to end to terminate the search loop.
         """
         cdef intp_t end_non_missing = (
-            self.end if self.missing_on_the_left
+            self.end if missing_go_to_left
             else self.end - self.n_missing)
 
-        if p[0] == end_non_missing and not self.missing_on_the_left:
+        if p[0] == end_non_missing and not missing_go_to_left:
             # skip the missing values up to the end
             # (which will end the for loop in the best split function)
             p[0] = self.end
             p_prev[0] = self.end
         else:
-            if self.missing_on_the_left and p[0] == self.start:
+            if missing_go_to_left and p[0] == self.start:
                 # skip the missing values up to the first non-missing value:
                 p[0] = self.start + self.n_missing
             p[0] += 1
@@ -257,15 +279,16 @@ cdef class DensePartitioner(BasePartitioner):
             p_prev[0] = p[0] - 1
 
     cdef inline float64_t pos_to_threshold(
-        self, intp_t p_prev, intp_t p
+        self, intp_t p_prev, intp_t p,
+        bint missing_go_to_left,
     ) noexcept nogil:
         """Convert a split position into a split threshold."""
         cdef float64_t threshold
         cdef intp_t end_non_missing = (
-            self.end if self.missing_on_the_left
+            self.end if missing_go_to_left
             else self.end - self.n_missing)
 
-        if p == end_non_missing and not self.missing_on_the_left:
+        if p == end_non_missing and not missing_go_to_left:
             # split with the right node being only the missing values
             return INFINITY
 
@@ -312,20 +335,21 @@ cdef class DensePartitioner(BasePartitioner):
 
     cdef inline intp_t partition_samples_final(
         self,
-        float64_t best_threshold,
-        intp_t best_feature,
-        bint best_missing_go_to_left
+        const SplitRecord* best_split,
     ) noexcept nogil:
-        """Partition self.samples for X[:, best_feature] at the best_threshold.
+        """Partition self.samples according to the split described by best_split.
 
         If missing values are present, this method partitions them accordingly
-        to best_missing_go_to_left.
+        to the split strategy.
         """
         cdef:
             # Local invariance: start <= partition_start <= partition_end <= end
             intp_t partition_start = self.start
             intp_t partition_end = self.end
             intp_t* samples = &self.samples[0]
+            float64_t best_threshold = best_split[0].threshold
+            intp_t best_feature = best_split[0].feature
+            bint best_missing_go_to_left = best_split[0].missing_go_to_left
             float32_t current_value
             bint go_to_left
 
@@ -474,8 +498,17 @@ cdef class SparsePartitioner(BasePartitioner):
         min_feature_value_out[0] = min_feature_value
         max_feature_value_out[0] = max_feature_value
 
-    cdef inline void next_p(self, intp_t* p_prev, intp_t* p) noexcept nogil:
-        """Compute the next p_prev and p for iterating over feature values."""
+    cdef inline void next_p(
+        self,
+        intp_t* p_prev,
+        intp_t* p,
+        bint missing_go_to_left,
+    ) noexcept nogil:
+        """Compute the next p_prev and p for iterating over feature values.
+
+        The missing_go_to_left argument is ignored for sparse data because
+        sparse partitioning does not currently support missing values.
+        """
         cdef intp_t p_next
 
         if p[0] + 1 != self.end_negative:
@@ -519,16 +552,20 @@ cdef class SparsePartitioner(BasePartitioner):
 
     cdef inline intp_t partition_samples_final(
         self,
-        float64_t best_threshold,
-        intp_t best_feature,
-        bint missing_go_to_left
+        const SplitRecord* best_split,
     ) noexcept nogil:
-        """Partition samples for X at the best_threshold and best_feature."""
-        self.extract_nnz(best_feature)
-        return self._partition(best_threshold)
+        """Partition samples for X according to the split described by best_split."""
+        self.extract_nnz(best_split[0].feature)
+        self._partition(best_split[0].threshold)
 
     cdef inline intp_t _partition(self, float64_t threshold) noexcept nogil:
-        """Partition samples[start:end] based on threshold."""
+        """
+        Partition samples[start:end] based on threshold.
+        Assume extract_nnz was called beforehand, and partitioned samples in:
+        - samples[start:end_negative] -> < 0
+        - samples[end_negative:start_positive] -> zeros
+        - samples[end_negative:start_positive] -> > 0
+        """
         cdef:
             intp_t p, partition_end
             intp_t[::1] index_to_samples = self.index_to_samples
@@ -542,7 +579,7 @@ cdef class SparsePartitioner(BasePartitioner):
             p = self.start_positive
             partition_end = self.end
         else:
-            # Data are already split
+            # If threshold is 0, extract_nnz already did the necessary partitioning
             return self.start_positive
 
         while p < partition_end:
