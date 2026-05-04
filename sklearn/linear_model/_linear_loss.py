@@ -9,6 +9,7 @@ import numpy as np
 from scipy import sparse
 
 from sklearn.utils._array_api import (
+    _matmul_2d_1d,
     get_namespace,
     get_namespace_and_device,
     move_to,
@@ -216,7 +217,7 @@ class LinearModelLoss:
         weights_xp = xp.asarray(weights, dtype=X.dtype, device=device_)
         intercept_xp = xp.asarray(intercept, dtype=X.dtype, device=device_)
         if not self.base_loss.is_multiclass:
-            raw_prediction = X @ weights_xp + intercept_xp
+            raw_prediction = _matmul_2d_1d(X, weights_xp) + intercept_xp
         else:
             # weights has shape (n_classes, n_dof)
             raw_prediction = X @ weights_xp.T + intercept_xp
@@ -353,7 +354,7 @@ class LinearModelLoss:
 
         if not self.base_loss.is_multiclass:
             grad = np.empty_like(coef, dtype=weights.dtype)
-            X_grad = X.T @ grad_pointwise
+            X_grad = _matmul_2d_1d(X.T, grad_pointwise)
             grad[:n_features] = (
                 move_to(X_grad, xp=np, device="cpu") + l2_reg_strength * weights
             )

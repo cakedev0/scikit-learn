@@ -15,6 +15,7 @@ from scipy import linalg, sparse
 from sklearn.utils._array_api import (
     _average,
     _is_numpy_namespace,
+    _matmul_2d_1d,
     _max_precision_float_dtype,
     _nanmean,
     _nansum,
@@ -226,7 +227,7 @@ def safe_sparse_dot(a, b, *, dense_output=False):
         # Use dedicated fast method for dense_C = sparse_A @ sparse_B
         return sparse_matmul_to_dense(a, b)
     else:
-        ret = a @ b
+        ret = _matmul_2d_1d(a, b)
 
     if (
         sparse.issparse(a)

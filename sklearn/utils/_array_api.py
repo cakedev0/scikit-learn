@@ -752,6 +752,26 @@ def _is_xp_namespace(xp, name):
     )
 
 
+def _matmul_2d_1d(a, b):
+    """Compute ``a @ b`` with a torch-XPU float64 matvec workaround."""
+    if (
+        not sp.issparse(a)
+        and getattr(a, "ndim", None) == 2
+        and getattr(b, "ndim", None) == 1
+    ):
+        xp, is_array_api = get_namespace(a, b)
+        if (
+            is_array_api
+            and _is_xp_namespace(xp, "torch")
+            and getattr(a, "dtype", None) == xp.float64
+            and getattr(b, "dtype", None) == xp.float64
+            and str(device(a)).startswith("xpu")
+        ):
+            return (a @ b[:, None])[:, 0]
+
+    return a @ b
+
+
 def _max_precision_float_dtype(xp, device):
     """Return the float dtype with the highest precision supported by the device.
 

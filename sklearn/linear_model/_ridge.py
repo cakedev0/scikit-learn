@@ -43,6 +43,7 @@ from sklearn.utils import (
 )
 from sklearn.utils._array_api import (
     _is_numpy_namespace,
+    _matmul_2d_1d,
     _max_precision_float_dtype,
     _ravel,
     device,
@@ -301,7 +302,7 @@ def _solve_svd(X, y, alpha, xp=None):
     U, s, Vt = xp.linalg.svd(X, full_matrices=False)
     idx = s > 1e-15  # same default value as scipy.linalg.pinv
     s_nnz = s[idx][:, None]
-    UTy = U.T @ y
+    UTy = _matmul_2d_1d(U.T, y)
     d = xp.zeros((s.shape[0], alpha.shape[0]), dtype=X.dtype, device=device(X))
     d[idx] = s_nnz / (s_nnz**2 + alpha)
     d_UT_y = d * UTy
@@ -2047,8 +2048,8 @@ class _RidgeGCV(LinearModel):
             return XAX
         # X is sparse and fit_intercept is True
         # centered matrix = X - sqrt_sw X_mean'
-        XA_Xm = XA @ X_mean
-        A_Xm = A @ X_mean
+        XA_Xm = _matmul_2d_1d(XA, X_mean)
+        A_Xm = _matmul_2d_1d(A, X_mean)
         sw = sqrt_sw * sqrt_sw
         return XAX - 2 * sqrt_sw * XA_Xm + sw * (X_mean @ A_Xm)
 
@@ -2057,8 +2058,8 @@ class _RidgeGCV(LinearModel):
         xp, is_array_api = get_namespace(X)
         K = self._compute_gram(X, X_mean, sqrt_sw)
         eigvals, Q = xp.linalg.eigh(K)
-        QT_y = Q.T @ y
-        QT_sqrt_sw = Q.T @ sqrt_sw
+        QT_y = _matmul_2d_1d(Q.T, y)
+        QT_sqrt_sw = _matmul_2d_1d(Q.T, sqrt_sw)
         XT = X.T
         return eigvals, Q, QT_y, QT_sqrt_sw, XT, X_mean
 
@@ -2067,15 +2068,15 @@ class _RidgeGCV(LinearModel):
     ):
         """Compute looe and coef when we have a decomposition of X X'"""
         D = 1.0 / (eigvals + alpha)
-        c = Q @ self._diag_dot(D, QT_y)
+        c = _matmul_2d_1d(Q, self._diag_dot(D, QT_y))
         d = self._decomp_diag(D, Q)
         if self.fit_intercept:
             sw_sum = sqrt_sw @ sqrt_sw
-            Ginv_sqrt_sw = Q @ self._diag_dot(D, QT_sqrt_sw)
+            Ginv_sqrt_sw = _matmul_2d_1d(Q, self._diag_dot(D, QT_sqrt_sw))
             d -= Ginv_sqrt_sw * sqrt_sw / sw_sum
         if y.ndim == 2:
             d = d[:, None]
-        XT_c = XT @ c
+        XT_c = _matmul_2d_1d(XT, c)
         if self.fit_intercept and sparse.issparse(XT):
             # centered matrix = X - sqrt_sw X_mean'
             if y.ndim == 2:
@@ -2108,8 +2109,8 @@ class _RidgeGCV(LinearModel):
         """Compute looe and coef when we have a decomposition of X' X"""
         D = 1 / (eigvals + alpha)
         Hinv = (V * D) @ V.T
-        Hinv_XT_y = Hinv @ XT_y
-        Hinv_XT_sqrt_sw = Hinv @ XT_sqrt_sw
+        Hinv_XT_y = _matmul_2d_1d(Hinv, XT_y)
+        Hinv_XT_sqrt_sw = _matmul_2d_1d(Hinv, XT_sqrt_sw)
         X_Hinv_XT_y = safe_sparse_dot(X, Hinv_XT_y, dense_output=True)
         X_Hinv_XT_sqrt_sw = safe_sparse_dot(X, Hinv_XT_sqrt_sw, dense_output=True)
         if self.fit_intercept and sparse.issparse(X):
@@ -2136,8 +2137,8 @@ class _RidgeGCV(LinearModel):
         xp, _ = get_namespace(X)
         # reduced svd
         U, singvals, VT = xp.linalg.svd(X, full_matrices=False)
-        UT_y = U.T @ y
-        UT_sqrt_sw = U.T @ sqrt_sw
+        UT_y = _matmul_2d_1d(U.T, y)
+        UT_sqrt_sw = _matmul_2d_1d(U.T, sqrt_sw)
         V = VT.T
         return singvals, U, V, UT_y, UT_sqrt_sw
 
@@ -2149,17 +2150,19 @@ class _RidgeGCV(LinearModel):
         Long X case (n_features < n_samples).
         """
         M = alpha / (singvals**2 + alpha) - 1
-        alpha_c = U @ self._diag_dot(M, UT_y) + y
+        alpha_c = _matmul_2d_1d(U, self._diag_dot(M, UT_y)) + y
         alpha_d = self._decomp_diag(M, U) + 1
         if self.fit_intercept:
             sw_sum = sqrt_sw @ sqrt_sw
-            alpha_Ginv_sqrt_sw = U @ self._diag_dot(M, UT_sqrt_sw) + sqrt_sw
+            alpha_Ginv_sqrt_sw = (
+                _matmul_2d_1d(U, self._diag_dot(M, UT_sqrt_sw)) + sqrt_sw
+            )
             alpha_d -= alpha_Ginv_sqrt_sw * sqrt_sw / sw_sum
         if y.ndim == 2:
             # handle case where y is 2-d
             alpha_d = alpha_d[:, None]
         looe = alpha_c / alpha_d
-        coef = V @ self._diag_dot(singvals / (singvals**2 + alpha), UT_y)
+        coef = _matmul_2d_1d(V, self._diag_dot(singvals / (singvals**2 + alpha), UT_y))
         return looe, coef
 
     def _solve_svd_design_matrix_wide(
@@ -2170,17 +2173,17 @@ class _RidgeGCV(LinearModel):
         Wide X case (n_samples < n_features).
         """
         alpha_D = alpha / (singvals**2 + alpha)
-        alpha_c = U @ self._diag_dot(alpha_D, UT_y)
+        alpha_c = _matmul_2d_1d(U, self._diag_dot(alpha_D, UT_y))
         alpha_d = self._decomp_diag(alpha_D, U)
         if self.fit_intercept:
             sw_sum = sqrt_sw @ sqrt_sw
-            alpha_Ginv_sqrt_sw = U @ self._diag_dot(alpha_D, UT_sqrt_sw)
+            alpha_Ginv_sqrt_sw = _matmul_2d_1d(U, self._diag_dot(alpha_D, UT_sqrt_sw))
             alpha_d -= alpha_Ginv_sqrt_sw * sqrt_sw / sw_sum
         if y.ndim == 2:
             # handle case where y is 2-d
             alpha_d = alpha_d[:, None]
         looe = alpha_c / alpha_d
-        coef = V @ self._diag_dot(singvals / (singvals**2 + alpha), UT_y)
+        coef = _matmul_2d_1d(V, self._diag_dot(singvals / (singvals**2 + alpha), UT_y))
         return looe, coef
 
     def _solve_svd_design_matrix(

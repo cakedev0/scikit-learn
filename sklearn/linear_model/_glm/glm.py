@@ -26,6 +26,7 @@ from sklearn.utils._array_api import (
     _average,
     _is_numpy_namespace,
     _matching_numpy_dtype,
+    _matmul_2d_1d,
     get_namespace,
     get_namespace_and_device,
     move_to,
@@ -364,7 +365,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             allow_nd=False,
             reset=False,
         )
-        return X @ self.coef_ + self.intercept_
+        return _matmul_2d_1d(X, self.coef_) + self.intercept_
 
     def predict(self, X):
         """Predict using GLM with feature matrix X.
