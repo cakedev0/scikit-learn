@@ -40,6 +40,8 @@ cdef class DensePartitioner:
         intp_t[::1] samples,
         float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const intp_t[:, ::1] global_sorted_samples=None,
+        intp_t[::1] feature_n_unique=None,
     ):
         self.X = X
         self.samples = samples
@@ -47,6 +49,10 @@ cdef class DensePartitioner:
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
         buffer_size = samples.size * max(samples.itemsize, feature_values.itemsize)
         self.swap_buffer = np.empty(buffer_size, dtype=np.uint8)
+        self.global_sorted_samples = global_sorted_samples
+        self.feature_n_unique = feature_n_unique
+        self.sample_marker = np.zeros(X.shape[0], dtype=np.intp)
+        self.marker = 0
         # TODO: As optimization we could make `swap_array_slices` always pick the smallest side
         # to get copied in the buffer, which would allow to use a buffer twice smaller.
 
@@ -66,12 +72,15 @@ cdef class DensePartitioner:
         in self.n_missing.
         """
         cdef:
-            intp_t i, current_end
+            intp_t i, current_end, node_size, sample_idx, out, n_total_samples
             float32_t[::1] feature_values = self.feature_values
             const float32_t[:, :] X = self.X
             intp_t[::1] samples = self.samples
             intp_t n_missing = 0
             const uint8_t[::1] missing_values_in_feature_mask = self.missing_values_in_feature_mask
+            const intp_t[:, ::1] global_sorted_samples = self.global_sorted_samples
+            intp_t[::1] feature_n_unique = self.feature_n_unique
+            intp_t[::1] sample_marker = self.sample_marker
 
         # Sort samples along that feature; by copying the values into an array and
         # sorting the array in a manner which utilizes the cache more effectively.
@@ -95,6 +104,28 @@ cdef class DensePartitioner:
                 feature_values[i] = X[samples[i], current_feature]
                 i += 1
         else:
+            node_size = self.end - self.start
+            n_total_samples = X.shape[0]
+            if (
+                global_sorted_samples is not None
+                and node_size > 512
+                and feature_n_unique[current_feature] > 1024
+                and node_size * 50 > feature_n_unique[current_feature]
+            ):
+                self.marker += 1
+                for i in range(self.start, self.end):
+                    sample_marker[samples[i]] = self.marker
+
+                out = self.start
+                for i in range(n_total_samples):
+                    sample_idx = global_sorted_samples[current_feature, i]
+                    if sample_marker[sample_idx] == self.marker:
+                        samples[out] = sample_idx
+                        feature_values[out] = X[sample_idx, current_feature]
+                        out += 1
+                self.n_missing = 0
+                return
+
             # When there are no missing values, we only need to copy the data into
             # feature_values
             for i in range(self.start, self.end):

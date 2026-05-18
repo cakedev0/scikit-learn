@@ -41,6 +41,44 @@ ctypedef fused Partitioner:
     SparsePartitioner
 
 
+def _global_sorted_index(X, intp_t max_features):
+    """Precompute feature-wise global sorted sample indices.
+
+    Experimental RandomForest optimization: large dense nodes can filter this
+    order instead of comparison-sorting node-local feature values.
+    """
+    X_array = np.asarray(X)
+    n_samples, n_features = X_array.shape
+    if max_features != n_features:
+        return None, None
+
+    sample_size = min(n_samples, 2048)
+    sorted_samples = np.empty((n_features, n_samples), dtype=np.intp)
+    feature_n_unique = np.zeros(n_features, dtype=np.intp)
+    any_feature = False
+    for feature_idx in range(X_array.shape[1]):
+        # Cheap guard: the global sorted-index path is intended for continuous
+        # or near-continuous features. Low-cardinality features are better left
+        # to the current three-way sorter until they get a dedicated coded path.
+        sample_values = X_array[:sample_size, feature_idx]
+        if np.unique(sample_values).size < sample_size // 2:
+            continue
+
+        order = np.argsort(X_array[:, feature_idx], kind="mergesort")
+        sorted_samples[feature_idx] = order
+        ordered_values = X_array[order, feature_idx]
+        if ordered_values.size == 0:
+            feature_n_unique[feature_idx] = 0
+        else:
+            feature_n_unique[feature_idx] = 1 + np.count_nonzero(
+                np.diff(ordered_values) > FEATURE_THRESHOLD
+            )
+        any_feature = True
+    if not any_feature:
+        return None, None
+    return sorted_samples, feature_n_unique
+
+
 cdef inline void _init_split(SplitRecord* self, intp_t start_pos) noexcept nogil:
     self.impurity_left = INFINITY
     self.impurity_right = INFINITY
@@ -739,6 +777,8 @@ cdef inline int node_split_random(
 cdef class BestSplitter(Splitter):
     """Splitter for finding the best split on dense data."""
     cdef DensePartitioner partitioner
+    cdef object global_sorted_samples
+    cdef object feature_n_unique
     cdef int init(
         self,
         object X,
@@ -747,8 +787,16 @@ cdef class BestSplitter(Splitter):
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
         Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples, self.feature_n_unique = _global_sorted_index(
+            X, self.max_features
+        )
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
         )
 
     cdef int node_split(
@@ -795,6 +843,8 @@ cdef class BestSparseSplitter(Splitter):
 cdef class RandomSplitter(Splitter):
     """Splitter for finding the best random split on dense data."""
     cdef DensePartitioner partitioner
+    cdef object global_sorted_samples
+    cdef object feature_n_unique
     cdef int init(
         self,
         object X,
@@ -803,8 +853,16 @@ cdef class RandomSplitter(Splitter):
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
         Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples, self.feature_n_unique = _global_sorted_index(
+            X, self.max_features
+        )
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
         )
 
     cdef int node_split(
