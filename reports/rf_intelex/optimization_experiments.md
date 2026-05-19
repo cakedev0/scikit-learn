@@ -302,3 +302,37 @@ The 10-repeat run keeps every retained case below the 2x target. The highest
 observed ratio is `reg_80f_sqrt_leaf8` at 1.88x. Some low-cardinality rows have
 noticeable repeat-to-repeat variability, especially `reg_24f_low_card`, so small
 changes in those rows should be interpreted with that noise level in mind.
+
+### Float64-input warm-up + 10-repeat retained-suite run
+
+The same final protocol was rerun after forcing every generated `X` to
+`float64` before fitting both implementations. This checks whether sklearnex's
+dtype handling gives it an unfair advantage when the benchmark datasets are
+mixed `float32` / `float64`.
+
+Raw outputs:
+
+- `reports/rf_intelex/results_max_bins_255_warmup30_repeats10_xfloat64/retained_raw.jsonl`
+- `reports/rf_intelex/results_max_bins_255_warmup30_repeats10_xfloat64/retained_summary.csv`
+- `reports/rf_intelex/results_max_bins_255_warmup30_repeats10_xfloat64/warmup_raw.jsonl`
+- `reports/rf_intelex/results_max_bins_255_warmup30_repeats10_xfloat64/environment.json`
+
+Warm-up elapsed time: 30.1s, with 39 untimed fits. Timed elapsed time: 139.3s.
+The variability column is `(max - min) / median` across the 10 timed repeats.
+
+| Case | branch median s | sklearnex median s | branch / sklearnex | branch variability | sklearnex variability |
+|---|---:|---:|---:|---:|---:|
+| `clf_12f_full_deep` | 0.771 | 0.572 | 1.35x | 0.028 | 0.048 |
+| `clf_12f_shallow_bootstrap` | 0.389 | 0.306 | 1.27x | 0.125 | 0.025 |
+| `clf_24f_low_card` | 0.742 | 0.510 | 1.46x | 0.148 | 0.172 |
+| `clf_96f_sqrt_leaf8` | 0.418 | 0.289 | 1.45x | 0.047 | 0.071 |
+| `reg_12f_full_deep` | 1.792 | 1.241 | 1.44x | 0.046 | 0.218 |
+| `reg_12f_full_f64` | 1.170 | 0.795 | 1.47x | 0.027 | 0.054 |
+| `reg_12f_shallow_bootstrap` | 0.448 | 0.308 | 1.45x | 0.225 | 0.475 |
+| `reg_1f_deep_full` | 0.146 | 0.096 | 1.52x | 0.170 | 0.319 |
+| `reg_24f_low_card` | 1.768 | 1.272 | 1.39x | 0.097 | 0.173 |
+| `reg_80f_sqrt_leaf8` | 0.311 | 0.170 | 1.84x | 0.155 | 0.140 |
+
+Forcing `X` to `float64` does not materially change the conclusion: every
+retained case remains below the 2x target. The largest ratio is still the
+wide/sqrt regression case, now at 1.84x.
