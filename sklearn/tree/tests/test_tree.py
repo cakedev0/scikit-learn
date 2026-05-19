@@ -2570,6 +2570,80 @@ def test_missing_values_best_splitter_missing_both_classes_has_nan(criterion):
     assert_array_equal(y_pred, [1, 0, 1])
 
 
+@pytest.mark.parametrize("criterion", ["gini", "entropy", "log_loss"])
+def test_hist_best_splitter_classifier_low_cardinality(criterion):
+    """Check the histogram splitter path on low-cardinality classification data."""
+    rng = np.random.RandomState(0)
+    X = rng.randint(0, 5, size=(1200, 4)).astype(np.float32)
+    X[::17, 0] = np.nan
+    y = ((X[:, 1] > 2) | np.isnan(X[:, 0])).astype(np.intp)
+    sample_weight = rng.uniform(0.1, 2.0, size=X.shape[0])
+
+    tree = DecisionTreeClassifier(
+        criterion=criterion, max_bins=8, max_depth=4, random_state=0
+    )
+    tree.fit(X, y, sample_weight=sample_weight)
+
+    assert tree.tree_.node_count > 1
+    assert_array_equal(tree.predict(X[:10]), y[:10])
+
+
+def test_hist_best_splitter_regressor_low_cardinality():
+    """Check the histogram splitter path on low-cardinality regression data."""
+    rng = np.random.RandomState(0)
+    X = rng.randint(0, 5, size=(1200, 4)).astype(np.float32)
+    X[::17, 0] = np.nan
+    y = np.nan_to_num(X[:, 0], nan=4.0) + 0.5 * X[:, 2]
+    sample_weight = rng.uniform(0.1, 2.0, size=X.shape[0])
+
+    tree = DecisionTreeRegressor(
+        criterion="squared_error", max_bins=8, max_depth=4, random_state=0
+    )
+    tree.fit(X, y, sample_weight=sample_weight)
+
+    assert tree.tree_.node_count > 1
+    assert_allclose(tree.predict(X[:5]), y[:5], atol=0.6)
+
+
+@pytest.mark.parametrize(
+    "estimator, params, err_msg",
+    [
+        (
+            DecisionTreeRegressor(),
+            {"criterion": "absolute_error"},
+            "squared_error regression criterion",
+        ),
+        (
+            DecisionTreeRegressor(),
+            {"criterion": "poisson"},
+            "squared_error regression criterion",
+        ),
+        (
+            DecisionTreeRegressor(),
+            {"criterion": "friedman_mse"},
+            "friedman_mse",
+        ),
+        (
+            DecisionTreeRegressor(),
+            {"monotonic_cst": [1]},
+            "monotonic constraints",
+        ),
+        (
+            DecisionTreeClassifier(),
+            {"splitter": "random"},
+            "splitter='best'",
+        ),
+    ],
+)
+def test_hist_best_splitter_unsupported_cases(estimator, params, err_msg):
+    X = np.arange(20, dtype=np.float32).reshape(-1, 1)
+    y = np.arange(20) % 2
+
+    estimator.set_params(max_bins=4, **params)
+    with pytest.raises(ValueError, match=err_msg):
+        estimator.fit(X, y)
+
+
 @pytest.mark.parametrize("sparse_container", CSR_CONTAINERS)
 @pytest.mark.parametrize(
     "tree",

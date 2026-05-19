@@ -1534,6 +1534,7 @@ class RandomForestClassifier(ForestClassifier):
         ccp_alpha=0.0,
         max_samples=None,
         monotonic_cst=None,
+        max_bins=None,
     ):
         super().__init__(
             estimator=DecisionTreeClassifier(),
@@ -1550,6 +1551,7 @@ class RandomForestClassifier(ForestClassifier):
                 "random_state",
                 "ccp_alpha",
                 "monotonic_cst",
+                "max_bins",
             ),
             bootstrap=bootstrap,
             oob_score=oob_score,
@@ -1571,6 +1573,7 @@ class RandomForestClassifier(ForestClassifier):
         self.min_impurity_decrease = min_impurity_decrease
         self.monotonic_cst = monotonic_cst
         self.ccp_alpha = ccp_alpha
+        self.max_bins = max_bins
 
 
 class RandomForestRegressor(ForestRegressor):
@@ -1910,6 +1913,7 @@ class RandomForestRegressor(ForestRegressor):
         ccp_alpha=0.0,
         max_samples=None,
         monotonic_cst=None,
+        max_bins=None,
     ):
         super().__init__(
             estimator=DecisionTreeRegressor(),
@@ -1926,6 +1930,7 @@ class RandomForestRegressor(ForestRegressor):
                 "random_state",
                 "ccp_alpha",
                 "monotonic_cst",
+                "max_bins",
             ),
             bootstrap=bootstrap,
             oob_score=oob_score,
@@ -1937,6 +1942,10 @@ class RandomForestRegressor(ForestRegressor):
         )
 
         if isinstance(criterion, str) and criterion == "friedman_mse":
+            if max_bins is not None:
+                raise ValueError(
+                    "max_bins does not support the friedman_mse regression criterion."
+                )
             # TODO(1.11): remove support of "friedman_mse" criterion.
             criterion = "squared_error"
             warn(
@@ -1956,6 +1965,7 @@ class RandomForestRegressor(ForestRegressor):
         self.min_impurity_decrease = min_impurity_decrease
         self.ccp_alpha = ccp_alpha
         self.monotonic_cst = monotonic_cst
+        self.max_bins = max_bins
 
 
 class ExtraTreesClassifier(ForestClassifier):

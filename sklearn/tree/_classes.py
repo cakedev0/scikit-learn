@@ -140,6 +140,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         class_weight=None,
         ccp_alpha=0.0,
         monotonic_cst=None,
+        max_bins=None,
     ):
         self.criterion = criterion
         self.splitter = splitter
@@ -154,6 +155,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         self.class_weight = class_weight
         self.ccp_alpha = ccp_alpha
         self.monotonic_cst = monotonic_cst
+        self.max_bins = max_bins
 
     def get_depth(self):
         """Return the depth of the decision tree.
@@ -384,6 +386,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         SPLITTERS = SPARSE_SPLITTERS if issparse(X) else DENSE_SPLITTERS
 
         splitter = self.splitter
+        max_bins = getattr(self, "max_bins", None)
         if self.monotonic_cst is None:
             monotonic_cst = None
         else:
@@ -423,8 +426,34 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 # *positive class*, all signs must be flipped.
                 monotonic_cst *= -1
 
+        if max_bins is not None:
+            if issparse(X):
+                raise ValueError("max_bins is only supported for dense input.")
+            if splitter != "best":
+                raise ValueError("max_bins is only supported with splitter='best'.")
+            if not isinstance(self.criterion, str):
+                raise ValueError("max_bins does not support custom Criterion objects.")
+            if self.n_outputs_ != 1:
+                raise ValueError("max_bins does not support multi-output trees.")
+            if monotonic_cst is not None:
+                raise ValueError("max_bins does not support monotonic constraints.")
+            if is_classification:
+                if self.criterion not in ("gini", "entropy", "log_loss"):
+                    raise ValueError(
+                        "max_bins only supports gini, entropy and log_loss "
+                        "classification criteria."
+                    )
+            elif self.criterion != "squared_error":
+                raise ValueError(
+                    "max_bins only supports the squared_error regression criterion."
+                )
+
         if not isinstance(self.splitter, Splitter):
-            splitter = SPLITTERS[self.splitter](
+            splitter = (
+                _splitter.HistBestSplitter
+                if max_bins is not None
+                else SPLITTERS[self.splitter]
+            )(
                 criterion,
                 self.max_features_,
                 min_samples_leaf,
@@ -432,6 +461,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 random_state,
                 monotonic_cst,
             )
+            if max_bins is not None:
+                splitter.max_bins = max_bins
 
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)
@@ -949,6 +980,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         **BaseDecisionTree._parameter_constraints,
         "criterion": [StrOptions({"gini", "entropy", "log_loss"}), Hidden(Criterion)],
         "class_weight": [dict, list, StrOptions({"balanced"}), None],
+        "max_bins": [Interval(Integral, 2, None, closed="left"), None],
     }
 
     def __init__(
@@ -967,6 +999,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         class_weight=None,
         ccp_alpha=0.0,
         monotonic_cst=None,
+        max_bins=None,
     ):
         super().__init__(
             criterion=criterion,
@@ -982,6 +1015,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
             min_impurity_decrease=min_impurity_decrease,
             monotonic_cst=monotonic_cst,
             ccp_alpha=ccp_alpha,
+            max_bins=max_bins,
         )
 
     @_fit_context(prefer_skip_nested_validation=True)
@@ -1327,6 +1361,7 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
             StrOptions({"squared_error", "absolute_error", "poisson"}),
             Hidden(Criterion),
         ],
+        "max_bins": [Interval(Integral, 2, None, closed="left"), None],
     }
 
     def __init__(
@@ -1344,8 +1379,13 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         min_impurity_decrease=0.0,
         ccp_alpha=0.0,
         monotonic_cst=None,
+        max_bins=None,
     ):
         if isinstance(criterion, str) and criterion == "friedman_mse":
+            if max_bins is not None:
+                raise ValueError(
+                    "max_bins does not support the friedman_mse regression criterion."
+                )
             # TODO(1.11): remove support of "friedman_mse" criterion.
             criterion = "squared_error"
             warnings.warn(
@@ -1368,6 +1408,7 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
             min_impurity_decrease=min_impurity_decrease,
             ccp_alpha=ccp_alpha,
             monotonic_cst=monotonic_cst,
+            max_bins=max_bins,
         )
 
     @_fit_context(prefer_skip_nested_validation=True)
