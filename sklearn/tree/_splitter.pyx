@@ -21,7 +21,7 @@ of splitting strategies:
 # SPDX-License-Identifier: BSD-3-Clause
 
 from libc.math cimport INFINITY, log
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 
 from sklearn.tree._criterion cimport (
     ClassificationCriterion,
@@ -84,11 +84,11 @@ def _global_sorted_index(X, intp_t max_features):
 
 
 def _hist_binned_features(X, intp_t max_bins, missing_values_in_feature_mask):
-    """Precompute exact ordered value codes for histogram splitting."""
+    """Precompute ordered feature bin codes for histogram splitting."""
     X_array = np.asarray(X)
     n_samples, n_features = X_array.shape
     codes = np.full((n_features, n_samples), -1, dtype=np.int32)
-    bin_values = np.empty((n_features, max_bins), dtype=np.float32)
+    bin_thresholds = np.empty((n_features, max_bins), dtype=np.float32)
     n_bins = np.zeros(n_features, dtype=np.intp)
     all_features_binned = True
 
@@ -108,22 +108,32 @@ def _hist_binned_features(X, intp_t max_bins, missing_values_in_feature_mask):
         if uniques.size == 0:
             n_bins[feature_idx] = 0
             continue
-        if uniques.size > max_bins:
-            all_features_binned = False
-            continue
 
-        n_bins[feature_idx] = uniques.size
-        bin_values[feature_idx, : uniques.size] = uniques
+        if uniques.size <= max_bins:
+            n_feature_bins = uniques.size
+            thresholds = uniques[:-1] / 2.0 + uniques[1:] / 2.0
+        else:
+            percentile_ranks = np.linspace(0.0, 100.0, max_bins + 1)[1:-1]
+            thresholds = np.percentile(
+                feature_values, percentile_ranks, method="midpoint"
+            )
+            thresholds = np.unique(thresholds.astype(np.float32, copy=False))
+            n_feature_bins = thresholds.size + 1
+
+        thresholds = thresholds.astype(np.float32, copy=False)
+        n_bins[feature_idx] = n_feature_bins
+        if thresholds.size:
+            bin_thresholds[feature_idx, : thresholds.size] = thresholds
         if non_missing is None:
-            codes[feature_idx] = np.searchsorted(uniques, values).astype(
+            codes[feature_idx] = np.searchsorted(thresholds, values).astype(
                 np.int32, copy=False
             )
         else:
             codes[feature_idx, non_missing] = np.searchsorted(
-                uniques, values[non_missing]
+                thresholds, values[non_missing]
             ).astype(np.int32, copy=False)
 
-    return codes, bin_values, n_bins, all_features_binned
+    return codes, bin_thresholds, n_bins, all_features_binned
 
 
 cdef inline void _init_split(SplitRecord* self, intp_t start_pos) noexcept nogil:
@@ -861,10 +871,11 @@ cdef class BestSplitter(Splitter):
 
 
 cdef class HistBestSplitter(BestSplitter):
-    """Hybrid exact histogram / sorting splitter for dense low-cardinality data."""
+    """Histogram splitter for dense data binned into at most ``max_bins`` bins."""
     cdef public intp_t max_bins
+    cdef public object precomputed_bins
     cdef const int32_t[:, ::1] bin_codes
-    cdef float32_t[:, ::1] bin_values
+    cdef float32_t[:, ::1] bin_thresholds
     cdef intp_t[::1] n_bins
     cdef intp_t[::1] hist_counts
     cdef intp_t[::1] active_bins
@@ -886,22 +897,35 @@ cdef class HistBestSplitter(BestSplitter):
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
         cdef object codes
-        cdef object bin_values
+        cdef object bin_thresholds
         cdef object n_bins
         cdef object all_features_binned
         cdef intp_t workspace_bins
         cdef str criterion_name
 
-        BestSplitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples = None
+        self.feature_n_unique = None
+        self.partitioner = DensePartitioner(
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
+        )
         if self.max_bins <= 0:
             self.all_features_binned = False
             return 0
 
-        codes, bin_values, n_bins, all_features_binned = _hist_binned_features(
-            X, self.max_bins, missing_values_in_feature_mask
-        )
+        if self.precomputed_bins is None:
+            codes, bin_thresholds, n_bins, all_features_binned = _hist_binned_features(
+                X, self.max_bins, missing_values_in_feature_mask
+            )
+        else:
+            codes, bin_thresholds, n_bins, all_features_binned = self.precomputed_bins
         self.bin_codes = codes
-        self.bin_values = bin_values
+        self.bin_thresholds = bin_thresholds
         self.n_bins = n_bins
         self.all_features_binned = all_features_binned
 
@@ -948,7 +972,6 @@ cdef class HistBestSplitter(BestSplitter):
             not self.all_features_binned
             or self.criterion_kind == 0
             or self.with_monotonic_cst
-            or self.end - self.start < 512
         ):
             return node_split_best(
                 self,
@@ -1004,7 +1027,6 @@ cdef class HistBestSplitter(BestSplitter):
             intp_t active_count
             intp_t missing_count
             intp_t left_count, right_count
-            intp_t next_bin
             float64_t missing_weight
             float64_t missing_sum
             float64_t missing_sq_sum
@@ -1017,9 +1039,16 @@ cdef class HistBestSplitter(BestSplitter):
             )
             float64_t weighted_n_samples = self.weighted_n_samples
             bint missing_go_to_left
-
-        if max_features < n_features:
-            return 1
+            intp_t* n_bins_ptr = &self.n_bins[0]
+            intp_t* hist_counts_ptr = &self.hist_counts[0]
+            intp_t* active_bins_ptr = &self.active_bins[0]
+            float64_t* hist_weights_ptr = &self.hist_weights[0]
+            float64_t* hist_sums_ptr = &self.hist_sums[0]
+            float64_t* hist_sq_sums_ptr = &self.hist_sq_sums[0]
+            float64_t* hist_class_counts_ptr = &self.hist_class_counts[0, 0]
+            float64_t* missing_class_counts_ptr = &self.missing_class_counts[0]
+            float64_t* left_class_counts_ptr = &self.left_class_counts[0]
+            const float32_t* bin_thresholds_ptr
 
         _init_split(&best_split, end)
         _init_split(&current_split, start)
@@ -1042,7 +1071,7 @@ cdef class HistBestSplitter(BestSplitter):
 
             f_j += n_found_constants
             current_feature = features[f_j]
-            n_feature_bins = self.n_bins[current_feature]
+            n_feature_bins = n_bins_ptr[current_feature]
             if n_feature_bins <= 0:
                 return 1
             if node_size <= <intp_t>(0.02 * n_feature_bins):
@@ -1076,6 +1105,7 @@ cdef class HistBestSplitter(BestSplitter):
             f_i -= 1
             features[f_i], features[f_j] = features[f_j], features[f_i]
             current_split.feature = current_feature
+            bin_thresholds_ptr = &self.bin_thresholds[current_feature, 0]
 
             for i in range(2 if missing_count > 0 else 1):
                 missing_go_to_left = i == 1
@@ -1087,21 +1117,23 @@ cdef class HistBestSplitter(BestSplitter):
                 if self.criterion_kind in (1, 2):
                     for c in range(self.n_classes):
                         if missing_go_to_left:
-                            self.left_class_counts[c] = self.missing_class_counts[c]
+                            left_class_counts_ptr[c] = missing_class_counts_ptr[c]
                         else:
-                            self.left_class_counts[c] = 0.0
+                            left_class_counts_ptr[c] = 0.0
 
                 for j in range(active_count):
-                    p = self.active_bins[j]
-                    left_count += self.hist_counts[p]
-                    left_weight += self.hist_weights[p]
+                    p = active_bins_ptr[j]
+                    left_count += hist_counts_ptr[p]
+                    left_weight += hist_weights_ptr[p]
 
                     if self.criterion_kind == 3:
-                        left_sum += self.hist_sums[p]
-                        left_sq_sum += self.hist_sq_sums[p]
+                        left_sum += hist_sums_ptr[p]
+                        left_sq_sum += hist_sq_sums_ptr[p]
                     else:
                         for c in range(self.n_classes):
-                            self.left_class_counts[c] += self.hist_class_counts[p, c]
+                            left_class_counts_ptr[c] += (
+                                hist_class_counts_ptr[p * self.n_classes + c]
+                            )
 
                     if j == active_count - 1 and not (
                         missing_count > 0 and not missing_go_to_left
@@ -1150,11 +1182,7 @@ cdef class HistBestSplitter(BestSplitter):
                         if j == active_count - 1:
                             current_split.threshold = INFINITY
                         else:
-                            next_bin = self.active_bins[j + 1]
-                            current_split.threshold = (
-                                self.bin_values[current_feature, p] / 2.0
-                                + self.bin_values[current_feature, next_bin] / 2.0
-                            )
+                            current_split.threshold = bin_thresholds_ptr[p]
                         if missing_count == 0:
                             current_split.missing_go_to_left = left_count > right_count
                         else:
@@ -1196,58 +1224,72 @@ cdef class HistBestSplitter(BestSplitter):
             float64_t w
             float64_t y_value
             intp_t active_count = 0
-            intp_t[::1] samples = self.samples
+            intp_t* samples_ptr = &self.samples[0]
+            const int32_t* codes_ptr = &self.bin_codes[current_feature, 0]
+            intp_t* hist_counts_ptr = &self.hist_counts[0]
+            intp_t* active_bins_ptr = &self.active_bins[0]
+            float64_t* hist_weights_ptr = &self.hist_weights[0]
+            float64_t* hist_sums_ptr = &self.hist_sums[0]
+            float64_t* hist_sq_sums_ptr = &self.hist_sq_sums[0]
+            float64_t* hist_class_counts_ptr = &self.hist_class_counts[0, 0]
+            float64_t* missing_class_counts_ptr = &self.missing_class_counts[0]
+            const float64_t* y_ptr = &self.y[0, 0]
+            const float64_t* sample_weight_ptr = NULL
+
+        if self.sample_weight is not None:
+            sample_weight_ptr = &self.sample_weight[0]
 
         missing_count[0] = 0
         missing_weight[0] = 0.0
         missing_sum[0] = 0.0
         missing_sq_sum[0] = 0.0
 
-        for i in range(n_feature_bins):
-            self.hist_counts[i] = 0
-            self.hist_weights[i] = 0.0
-            self.hist_sums[i] = 0.0
-            self.hist_sq_sums[i] = 0.0
-            if self.criterion_kind in (1, 2):
-                for c in range(self.n_classes):
-                    self.hist_class_counts[i, c] = 0.0
+        memset(hist_counts_ptr, 0, n_feature_bins * sizeof(intp_t))
+        memset(hist_weights_ptr, 0, n_feature_bins * sizeof(float64_t))
 
-        if self.criterion_kind in (1, 2):
-            for c in range(self.n_classes):
-                self.missing_class_counts[c] = 0.0
+        if self.criterion_kind == 3:
+            memset(hist_sums_ptr, 0, n_feature_bins * sizeof(float64_t))
+            memset(hist_sq_sums_ptr, 0, n_feature_bins * sizeof(float64_t))
+        elif self.criterion_kind in (1, 2):
+            memset(
+                hist_class_counts_ptr,
+                0,
+                n_feature_bins * self.n_classes * sizeof(float64_t),
+            )
+            memset(missing_class_counts_ptr, 0, self.n_classes * sizeof(float64_t))
 
         for p in range(self.start, self.end):
-            sample_idx = samples[p]
-            code = self.bin_codes[current_feature, sample_idx]
+            sample_idx = samples_ptr[p]
+            code = codes_ptr[sample_idx]
             w = 1.0
-            if self.sample_weight is not None:
-                w = self.sample_weight[sample_idx]
+            if sample_weight_ptr != NULL:
+                w = sample_weight_ptr[sample_idx]
 
             if code < 0:
                 missing_count[0] += 1
                 missing_weight[0] += w
                 if self.criterion_kind == 3:
-                    y_value = self.y[sample_idx, 0]
+                    y_value = y_ptr[sample_idx]
                     missing_sum[0] += w * y_value
                     missing_sq_sum[0] += w * y_value * y_value
                 else:
-                    c = <intp_t> self.y[sample_idx, 0]
-                    self.missing_class_counts[c] += w
+                    c = <intp_t> y_ptr[sample_idx]
+                    missing_class_counts_ptr[c] += w
                 continue
 
-            self.hist_counts[code] += 1
-            self.hist_weights[code] += w
+            hist_counts_ptr[code] += 1
+            hist_weights_ptr[code] += w
             if self.criterion_kind == 3:
-                y_value = self.y[sample_idx, 0]
-                self.hist_sums[code] += w * y_value
-                self.hist_sq_sums[code] += w * y_value * y_value
+                y_value = y_ptr[sample_idx]
+                hist_sums_ptr[code] += w * y_value
+                hist_sq_sums_ptr[code] += w * y_value * y_value
             else:
-                c = <intp_t> self.y[sample_idx, 0]
-                self.hist_class_counts[code, c] += w
+                c = <intp_t> y_ptr[sample_idx]
+                hist_class_counts_ptr[code * self.n_classes + c] += w
 
         for i in range(n_feature_bins):
-            if self.hist_counts[i] > 0:
-                self.active_bins[active_count] = i
+            if hist_counts_ptr[i] > 0:
+                active_bins_ptr[active_count] = i
                 active_count += 1
 
         return active_count
@@ -1266,14 +1308,15 @@ cdef class HistBestSplitter(BestSplitter):
             float64_t sq_left = 0.0
             float64_t sq_right = 0.0
             float64_t value
+            float64_t* left_class_counts_ptr = &self.left_class_counts[0]
+            const float64_t* total_class_counts_ptr = (
+                &(<ClassificationCriterion> self.criterion).sum_total[0, 0]
+            )
 
         if self.criterion_kind == 1:
             for c in range(self.n_classes):
-                count_left = self.left_class_counts[c]
-                count_right = (
-                    (<ClassificationCriterion> self.criterion).sum_total[0, c]
-                    - count_left
-                )
+                count_left = left_class_counts_ptr[c]
+                count_right = total_class_counts_ptr[c] - count_left
                 sq_left += count_left * count_left
                 sq_right += count_right * count_right
             impurity_left[0] = 1.0 - sq_left / (left_weight * left_weight)
@@ -1282,15 +1325,12 @@ cdef class HistBestSplitter(BestSplitter):
             impurity_left[0] = 0.0
             impurity_right[0] = 0.0
             for c in range(self.n_classes):
-                count_left = self.left_class_counts[c]
+                count_left = left_class_counts_ptr[c]
                 if count_left > 0.0:
                     value = count_left / left_weight
                     impurity_left[0] -= value * log(value)
 
-                count_right = (
-                    (<ClassificationCriterion> self.criterion).sum_total[0, c]
-                    - count_left
-                )
+                count_right = total_class_counts_ptr[c] - count_left
                 if count_right > 0.0:
                     value = count_right / right_weight
                     impurity_right[0] -= value * log(value)

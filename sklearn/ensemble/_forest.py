@@ -63,6 +63,7 @@ from sklearn.tree import (
     DecisionTreeRegressor,
     ExtraTreeClassifier,
     ExtraTreeRegressor,
+    _splitter,
 )
 from sklearn.utils import (
     check_random_state,
@@ -458,6 +459,14 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 self._make_estimator(append=False, random_state=random_state)
                 for i in range(n_more_estimators)
             ]
+            precomputed_hist_bins = None
+            max_bins = getattr(self, "max_bins", None)
+            if max_bins is not None and not issparse(X):
+                precomputed_hist_bins = _splitter._hist_binned_features(
+                    X, max_bins, missing_values_in_feature_mask
+                )
+                for tree in trees:
+                    tree._max_bins_precomputed = precomputed_hist_bins
 
             # Parallel loop: we prefer the threading backend as the Cython code
             # for fitting the trees is internally releasing the Python GIL
@@ -465,26 +474,32 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
             # that case. However, for joblib 0.12+ we respect any
             # parallel_backend contexts set at a higher level,
             # since correctness does not rely on using threads.
-            trees = Parallel(
-                n_jobs=self.n_jobs,
-                verbose=self.verbose,
-                prefer="threads",
-            )(
-                delayed(_parallel_build_trees)(
-                    t,
-                    self.bootstrap,
-                    X,
-                    y,
-                    _sample_weight,
-                    i,
-                    len(trees),
+            try:
+                trees = Parallel(
+                    n_jobs=self.n_jobs,
                     verbose=self.verbose,
-                    class_weight=self.class_weight,
-                    n_samples_bootstrap=n_samples_bootstrap,
-                    missing_values_in_feature_mask=missing_values_in_feature_mask,
+                    prefer="threads",
+                )(
+                    delayed(_parallel_build_trees)(
+                        t,
+                        self.bootstrap,
+                        X,
+                        y,
+                        _sample_weight,
+                        i,
+                        len(trees),
+                        verbose=self.verbose,
+                        class_weight=self.class_weight,
+                        n_samples_bootstrap=n_samples_bootstrap,
+                        missing_values_in_feature_mask=missing_values_in_feature_mask,
+                    )
+                    for i, t in enumerate(trees)
                 )
-                for i, t in enumerate(trees)
-            )
+            finally:
+                if precomputed_hist_bins is not None:
+                    for tree in trees:
+                        if hasattr(tree, "_max_bins_precomputed"):
+                            del tree._max_bins_precomputed
 
             # Collect newly grown trees
             self.estimators_.extend(trees)
