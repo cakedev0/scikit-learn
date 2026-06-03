@@ -119,6 +119,25 @@ CLF_CRITERIONS = ("gini", "log_loss")
 REG_CRITERIONS = ("squared_error", "absolute_error", "friedman_mse", "poisson")
 
 
+def test_random_forest_max_bins_propagates_to_trees():
+    rng = np.random.RandomState(0)
+    X = rng.randint(0, 5, size=(1200, 4)).astype(np.float32)
+    y_clf = (X[:, 0] > 2).astype(np.intp)
+    y_reg = X[:, 0] + 0.5 * X[:, 1]
+
+    clf = RandomForestClassifier(
+        n_estimators=3, max_bins=8, max_depth=4, random_state=0, n_jobs=1
+    ).fit(X, y_clf)
+    reg = RandomForestRegressor(
+        n_estimators=3, max_bins=8, max_depth=4, random_state=0, n_jobs=1
+    ).fit(X, y_reg)
+
+    assert [tree.max_bins for tree in clf.estimators_] == [8, 8, 8]
+    assert [tree.max_bins for tree in reg.estimators_] == [8, 8, 8]
+    assert clf.predict(X[:5]).shape == (5,)
+    assert reg.predict(X[:5]).shape == (5,)
+
+
 @pytest.mark.parametrize("name", FOREST_CLASSIFIERS)
 def test_classification_toy(name):
     """Check classification on a toy dataset."""

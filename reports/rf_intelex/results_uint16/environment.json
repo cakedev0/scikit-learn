@@ -1,0 +1,42 @@
+{
+  "cpu_count": 16,
+  "executable": "/home/arthur/open-source/skl/rf-intelex/sklearn-env/bin/python",
+  "max_case_seconds": 10.0,
+  "n_estimators": 20,
+  "onedal": "2021.6",
+  "platform": "Linux-6.17.0-23-generic-x86_64-with-glibc2.39",
+  "python": "3.14.3 (main, Feb 12 2026, 00:42:54) [Clang 21.1.4 ]",
+  "sklearn": "1.9.dev0",
+  "sklearnex": "2199.9.9",
+  "suite_elapsed": 116.81878673803294,
+  "threadpool_info": [
+    {
+      "architecture": "Haswell",
+      "filepath": "/home/arthur/open-source/skl/rf-intelex/sklearn-env/lib/python3.14/site-packages/numpy.libs/libscipy_openblas64_-32a4b2a6.so",
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.31.188.0"
+    },
+    {
+      "architecture": "Haswell",
+      "filepath": "/home/arthur/open-source/skl/rf-intelex/sklearn-env/lib/python3.14/site-packages/scipy.libs/libscipy_openblas-6cdc3b4a.so",
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+    },
+    {
+      "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+      "internal_api": "openmp",
+      "num_threads": 16,
+      "prefix": "libgomp",
+      "user_api": "openmp",
+      "version": null
+    }
+  ]
+}

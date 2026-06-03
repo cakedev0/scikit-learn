@@ -20,10 +20,14 @@ of splitting strategies:
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-from libc.math cimport INFINITY
-from libc.string cimport memcpy
+from libc.math cimport INFINITY, log
+from libc.string cimport memcpy, memset
 
-from sklearn.tree._criterion cimport Criterion
+from sklearn.tree._criterion cimport (
+    ClassificationCriterion,
+    Criterion,
+    RegressionCriterion,
+)
 from sklearn.tree._partitioner cimport (
     FEATURE_THRESHOLD, DensePartitioner, SparsePartitioner,
 )
@@ -39,6 +43,97 @@ import numpy as np
 ctypedef fused Partitioner:
     DensePartitioner
     SparsePartitioner
+
+
+def _global_sorted_index(X, intp_t max_features):
+    """Precompute feature-wise global sorted sample indices.
+
+    Experimental RandomForest optimization: large dense nodes can filter this
+    order instead of comparison-sorting node-local feature values.
+    """
+    X_array = np.asarray(X)
+    n_samples, n_features = X_array.shape
+    if max_features != n_features:
+        return None, None
+
+    sample_size = min(n_samples, 2048)
+    sorted_samples = np.empty((n_features, n_samples), dtype=np.intp)
+    feature_n_unique = np.zeros(n_features, dtype=np.intp)
+    any_feature = False
+    for feature_idx in range(X_array.shape[1]):
+        # Cheap guard: the global sorted-index path is intended for continuous
+        # or near-continuous features. Low-cardinality features are better left
+        # to the current three-way sorter until they get a dedicated coded path.
+        sample_values = X_array[:sample_size, feature_idx]
+        if np.unique(sample_values).size < sample_size // 2:
+            continue
+
+        order = np.argsort(X_array[:, feature_idx], kind="mergesort")
+        sorted_samples[feature_idx] = order
+        ordered_values = X_array[order, feature_idx]
+        if ordered_values.size == 0:
+            feature_n_unique[feature_idx] = 0
+        else:
+            feature_n_unique[feature_idx] = 1 + np.count_nonzero(
+                np.diff(ordered_values) > FEATURE_THRESHOLD
+            )
+        any_feature = True
+    if not any_feature:
+        return None, None
+    return sorted_samples, feature_n_unique
+
+
+def _hist_binned_features(X, intp_t max_bins, missing_values_in_feature_mask):
+    """Precompute ordered feature bin codes for histogram splitting."""
+    X_array = np.asarray(X)
+    n_samples, n_features = X_array.shape
+    codes = np.full((n_features, n_samples), -1, dtype=np.int32)
+    bin_thresholds = np.empty((n_features, max_bins), dtype=np.float32)
+    n_bins = np.zeros(n_features, dtype=np.intp)
+    all_features_binned = True
+
+    for feature_idx in range(n_features):
+        values = X_array[:, feature_idx]
+        if (
+            missing_values_in_feature_mask is not None
+            and missing_values_in_feature_mask[feature_idx]
+        ):
+            non_missing = ~np.isnan(values)
+            feature_values = values[non_missing]
+        else:
+            non_missing = None
+            feature_values = values
+
+        uniques = np.unique(feature_values)
+        if uniques.size == 0:
+            n_bins[feature_idx] = 0
+            continue
+
+        if uniques.size <= max_bins:
+            n_feature_bins = uniques.size
+            thresholds = uniques[:-1] / 2.0 + uniques[1:] / 2.0
+        else:
+            percentile_ranks = np.linspace(0.0, 100.0, max_bins + 1)[1:-1]
+            thresholds = np.percentile(
+                feature_values, percentile_ranks, method="midpoint"
+            )
+            thresholds = np.unique(thresholds.astype(np.float32, copy=False))
+            n_feature_bins = thresholds.size + 1
+
+        thresholds = thresholds.astype(np.float32, copy=False)
+        n_bins[feature_idx] = n_feature_bins
+        if thresholds.size:
+            bin_thresholds[feature_idx, : thresholds.size] = thresholds
+        if non_missing is None:
+            codes[feature_idx] = np.searchsorted(thresholds, values).astype(
+                np.int32, copy=False
+            )
+        else:
+            codes[feature_idx, non_missing] = np.searchsorted(
+                thresholds, values[non_missing]
+            ).astype(np.int32, copy=False)
+
+    return codes, bin_thresholds, n_bins, all_features_binned
 
 
 cdef inline void _init_split(SplitRecord* self, intp_t start_pos) noexcept nogil:
@@ -739,6 +834,8 @@ cdef inline int node_split_random(
 cdef class BestSplitter(Splitter):
     """Splitter for finding the best split on dense data."""
     cdef DensePartitioner partitioner
+    cdef object global_sorted_samples
+    cdef object feature_n_unique
     cdef int init(
         self,
         object X,
@@ -747,8 +844,16 @@ cdef class BestSplitter(Splitter):
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
         Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples, self.feature_n_unique = _global_sorted_index(
+            X, self.max_features
+        )
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
         )
 
     cdef int node_split(
@@ -763,6 +868,473 @@ cdef class BestSplitter(Splitter):
             split,
             parent_record,
         )
+
+
+cdef class HistBestSplitter(BestSplitter):
+    """Histogram splitter for dense data binned into at most ``max_bins`` bins."""
+    cdef public intp_t max_bins
+    cdef public object precomputed_bins
+    cdef const int32_t[:, ::1] bin_codes
+    cdef float32_t[:, ::1] bin_thresholds
+    cdef intp_t[::1] n_bins
+    cdef intp_t[::1] hist_counts
+    cdef intp_t[::1] active_bins
+    cdef float64_t[::1] hist_weights
+    cdef float64_t[::1] hist_sums
+    cdef float64_t[::1] hist_sq_sums
+    cdef float64_t[:, ::1] hist_class_counts
+    cdef float64_t[::1] missing_class_counts
+    cdef float64_t[::1] left_class_counts
+    cdef intp_t criterion_kind
+    cdef intp_t n_classes
+    cdef bint all_features_binned
+
+    cdef int init(
+        self,
+        object X,
+        const float64_t[:, ::1] y,
+        const float64_t[:] sample_weight,
+        const uint8_t[::1] missing_values_in_feature_mask,
+    ) except -1:
+        cdef object codes
+        cdef object bin_thresholds
+        cdef object n_bins
+        cdef object all_features_binned
+        cdef intp_t workspace_bins
+        cdef str criterion_name
+
+        Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples = None
+        self.feature_n_unique = None
+        self.partitioner = DensePartitioner(
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
+        )
+        if self.max_bins <= 0:
+            self.all_features_binned = False
+            return 0
+
+        if self.precomputed_bins is None:
+            codes, bin_thresholds, n_bins, all_features_binned = _hist_binned_features(
+                X, self.max_bins, missing_values_in_feature_mask
+            )
+        else:
+            codes, bin_thresholds, n_bins, all_features_binned = self.precomputed_bins
+        self.bin_codes = codes
+        self.bin_thresholds = bin_thresholds
+        self.n_bins = n_bins
+        self.all_features_binned = all_features_binned
+
+        workspace_bins = self.max_bins
+        self.hist_counts = np.empty(workspace_bins, dtype=np.intp)
+        self.active_bins = np.empty(workspace_bins, dtype=np.intp)
+        self.hist_weights = np.empty(workspace_bins, dtype=np.float64)
+        self.hist_sums = np.empty(workspace_bins, dtype=np.float64)
+        self.hist_sq_sums = np.empty(workspace_bins, dtype=np.float64)
+
+        criterion_name = type(self.criterion).__name__
+        if criterion_name == "Gini":
+            self.criterion_kind = 1
+        elif criterion_name == "Entropy":
+            self.criterion_kind = 2
+        elif criterion_name == "MSE":
+            self.criterion_kind = 3
+        else:
+            self.criterion_kind = 0
+
+        if self.criterion_kind in (1, 2):
+            self.n_classes = (<ClassificationCriterion> self.criterion).n_classes[0]
+            self.hist_class_counts = np.empty(
+                (workspace_bins, self.n_classes), dtype=np.float64
+            )
+            self.missing_class_counts = np.empty(self.n_classes, dtype=np.float64)
+            self.left_class_counts = np.empty(self.n_classes, dtype=np.float64)
+        else:
+            self.n_classes = 0
+            self.hist_class_counts = np.empty((1, 1), dtype=np.float64)
+            self.missing_class_counts = np.empty(1, dtype=np.float64)
+            self.left_class_counts = np.empty(1, dtype=np.float64)
+        return 0
+
+    cdef int node_split(
+            self,
+            ParentInfo* parent_record,
+            SplitRecord* split,
+    ) except -1 nogil:
+        cdef uint32_t saved_rand_r_state = self.rand_r_state
+        cdef int hist_status
+
+        if (
+            not self.all_features_binned
+            or self.criterion_kind == 0
+            or self.with_monotonic_cst
+        ):
+            return node_split_best(
+                self,
+                self.partitioner,
+                self.criterion,
+                split,
+                parent_record,
+            )
+
+        hist_status = self._node_split_hist(parent_record, split)
+        if hist_status == 1:
+            self.rand_r_state = saved_rand_r_state
+            return node_split_best(
+                self,
+                self.partitioner,
+                self.criterion,
+                split,
+                parent_record,
+            )
+        return hist_status
+
+    cdef int _node_split_hist(
+        self,
+        ParentInfo* parent_record,
+        SplitRecord* split,
+    ) except -1 nogil:
+        cdef:
+            SplitRecord best_split, current_split
+            float64_t best_improvement = -INFINITY
+            float64_t current_improvement
+            float64_t impurity = parent_record.impurity
+            intp_t start = self.start
+            intp_t end = self.end
+            intp_t node_size = end - start
+            intp_t max_features = self.max_features
+            intp_t min_samples_leaf = self.min_samples_leaf
+            float64_t min_weight_leaf = self.min_weight_leaf
+            uint32_t* random_state = &self.rand_r_state
+            intp_t[::1] features = self.features
+            intp_t[::1] constant_features = self.constant_features
+            intp_t n_features = self.n_features
+            intp_t n_known_constants = parent_record.n_constant_features
+            intp_t n_total_constants = n_known_constants
+            intp_t n_found_constants = 0
+            intp_t n_drawn_constants = 0
+            intp_t n_visited_features = 0
+            intp_t f_i = n_features
+            intp_t f_j
+            intp_t current_feature
+            intp_t n_feature_bins
+            intp_t p
+            intp_t i, j, c
+            intp_t active_count
+            intp_t missing_count
+            intp_t left_count, right_count
+            float64_t missing_weight
+            float64_t missing_sum
+            float64_t missing_sq_sum
+            float64_t left_weight, right_weight
+            float64_t left_sum, right_sum
+            float64_t left_sq_sum, right_sq_sum
+            float64_t impurity_left, impurity_right
+            float64_t weighted_n_node_samples = (
+                self.criterion.weighted_n_node_samples
+            )
+            float64_t weighted_n_samples = self.weighted_n_samples
+            bint missing_go_to_left
+            intp_t* n_bins_ptr = &self.n_bins[0]
+            intp_t* hist_counts_ptr = &self.hist_counts[0]
+            intp_t* active_bins_ptr = &self.active_bins[0]
+            float64_t* hist_weights_ptr = &self.hist_weights[0]
+            float64_t* hist_sums_ptr = &self.hist_sums[0]
+            float64_t* hist_sq_sums_ptr = &self.hist_sq_sums[0]
+            float64_t* hist_class_counts_ptr = &self.hist_class_counts[0, 0]
+            float64_t* missing_class_counts_ptr = &self.missing_class_counts[0]
+            float64_t* left_class_counts_ptr = &self.left_class_counts[0]
+            const float32_t* bin_thresholds_ptr
+
+        _init_split(&best_split, end)
+        _init_split(&current_split, start)
+        self.partitioner.init_node_split(start, end)
+
+        while (
+            f_i > n_total_constants
+            and (n_visited_features < max_features or
+                 n_visited_features <= n_found_constants + n_drawn_constants)
+        ):
+            n_visited_features += 1
+            f_j = rand_int(n_drawn_constants, f_i - n_found_constants, random_state)
+
+            if f_j < n_known_constants:
+                features[n_drawn_constants], features[f_j] = (
+                    features[f_j], features[n_drawn_constants]
+                )
+                n_drawn_constants += 1
+                continue
+
+            f_j += n_found_constants
+            current_feature = features[f_j]
+            n_feature_bins = n_bins_ptr[current_feature]
+            if n_feature_bins <= 0:
+                return 1
+            if node_size <= <intp_t>(0.02 * n_feature_bins):
+                return 1
+
+            active_count = self._build_feature_histogram(
+                current_feature,
+                n_feature_bins,
+                &missing_count,
+                &missing_weight,
+                &missing_sum,
+                &missing_sq_sum,
+            )
+
+            if active_count == 0:
+                features[f_j], features[n_total_constants] = (
+                    features[n_total_constants], features[f_j]
+                )
+                n_found_constants += 1
+                n_total_constants += 1
+                continue
+
+            if active_count == 1 and missing_count == 0:
+                features[f_j], features[n_total_constants] = (
+                    features[n_total_constants], features[f_j]
+                )
+                n_found_constants += 1
+                n_total_constants += 1
+                continue
+
+            f_i -= 1
+            features[f_i], features[f_j] = features[f_j], features[f_i]
+            current_split.feature = current_feature
+            bin_thresholds_ptr = &self.bin_thresholds[current_feature, 0]
+
+            for i in range(2 if missing_count > 0 else 1):
+                missing_go_to_left = i == 1
+                left_count = missing_count if missing_go_to_left else 0
+                left_weight = missing_weight if missing_go_to_left else 0.0
+                left_sum = missing_sum if missing_go_to_left else 0.0
+                left_sq_sum = missing_sq_sum if missing_go_to_left else 0.0
+
+                if self.criterion_kind in (1, 2):
+                    for c in range(self.n_classes):
+                        if missing_go_to_left:
+                            left_class_counts_ptr[c] = missing_class_counts_ptr[c]
+                        else:
+                            left_class_counts_ptr[c] = 0.0
+
+                for j in range(active_count):
+                    p = active_bins_ptr[j]
+                    left_count += hist_counts_ptr[p]
+                    left_weight += hist_weights_ptr[p]
+
+                    if self.criterion_kind == 3:
+                        left_sum += hist_sums_ptr[p]
+                        left_sq_sum += hist_sq_sums_ptr[p]
+                    else:
+                        for c in range(self.n_classes):
+                            left_class_counts_ptr[c] += (
+                                hist_class_counts_ptr[p * self.n_classes + c]
+                            )
+
+                    if j == active_count - 1 and not (
+                        missing_count > 0 and not missing_go_to_left
+                    ):
+                        continue
+
+                    right_count = node_size - left_count
+                    if left_count < min_samples_leaf or right_count < min_samples_leaf:
+                        continue
+
+                    right_weight = weighted_n_node_samples - left_weight
+                    if left_weight < min_weight_leaf or right_weight < min_weight_leaf:
+                        continue
+
+                    if self.criterion_kind == 3:
+                        right_sum = (<RegressionCriterion> self.criterion).sum_total[0] - left_sum
+                        right_sq_sum = (<RegressionCriterion> self.criterion).sq_sum_total - left_sq_sum
+                        impurity_left = left_sq_sum / left_weight - (
+                            left_sum / left_weight
+                        ) * (left_sum / left_weight)
+                        impurity_right = right_sq_sum / right_weight - (
+                            right_sum / right_weight
+                        ) * (right_sum / right_weight)
+                    else:
+                        self._hist_children_class_impurity(
+                            left_weight,
+                            right_weight,
+                            &impurity_left,
+                            &impurity_right,
+                        )
+
+                    current_improvement = (
+                        weighted_n_node_samples / weighted_n_samples
+                    ) * (
+                        impurity
+                        - left_weight / weighted_n_node_samples * impurity_left
+                        - right_weight / weighted_n_node_samples * impurity_right
+                    )
+
+                    if current_improvement > best_improvement:
+                        best_improvement = current_improvement
+                        current_split.pos = start + left_count
+                        current_split.improvement = current_improvement
+                        current_split.impurity_left = impurity_left
+                        current_split.impurity_right = impurity_right
+                        if j == active_count - 1:
+                            current_split.threshold = INFINITY
+                        else:
+                            current_split.threshold = bin_thresholds_ptr[p]
+                        if missing_count == 0:
+                            current_split.missing_go_to_left = left_count > right_count
+                        else:
+                            current_split.missing_go_to_left = missing_go_to_left
+                        best_split = current_split
+
+        if best_split.pos < end:
+            self.partitioner.partition_samples_final(&best_split)
+            self.criterion.reset()
+            self.criterion.update(best_split.pos)
+            self.criterion.children_impurity(
+                &best_split.impurity_left, &best_split.impurity_right
+            )
+            best_split.improvement = self.criterion.impurity_improvement(
+                impurity, best_split.impurity_left, best_split.impurity_right
+            )
+
+        memcpy(&features[0], &constant_features[0], sizeof(intp_t) * n_known_constants)
+        memcpy(&constant_features[n_known_constants],
+               &features[n_known_constants],
+               sizeof(intp_t) * n_found_constants)
+
+        parent_record.n_constant_features = n_total_constants
+        split[0] = best_split
+        return 0
+
+    cdef intp_t _build_feature_histogram(
+        self,
+        intp_t current_feature,
+        intp_t n_feature_bins,
+        intp_t* missing_count,
+        float64_t* missing_weight,
+        float64_t* missing_sum,
+        float64_t* missing_sq_sum,
+    ) noexcept nogil:
+        cdef:
+            intp_t i, p, sample_idx, c
+            int32_t code
+            float64_t w
+            float64_t y_value
+            intp_t active_count = 0
+            intp_t* samples_ptr = &self.samples[0]
+            const int32_t* codes_ptr = &self.bin_codes[current_feature, 0]
+            intp_t* hist_counts_ptr = &self.hist_counts[0]
+            intp_t* active_bins_ptr = &self.active_bins[0]
+            float64_t* hist_weights_ptr = &self.hist_weights[0]
+            float64_t* hist_sums_ptr = &self.hist_sums[0]
+            float64_t* hist_sq_sums_ptr = &self.hist_sq_sums[0]
+            float64_t* hist_class_counts_ptr = &self.hist_class_counts[0, 0]
+            float64_t* missing_class_counts_ptr = &self.missing_class_counts[0]
+            const float64_t* y_ptr = &self.y[0, 0]
+            const float64_t* sample_weight_ptr = NULL
+
+        if self.sample_weight is not None:
+            sample_weight_ptr = &self.sample_weight[0]
+
+        missing_count[0] = 0
+        missing_weight[0] = 0.0
+        missing_sum[0] = 0.0
+        missing_sq_sum[0] = 0.0
+
+        memset(hist_counts_ptr, 0, n_feature_bins * sizeof(intp_t))
+        memset(hist_weights_ptr, 0, n_feature_bins * sizeof(float64_t))
+
+        if self.criterion_kind == 3:
+            memset(hist_sums_ptr, 0, n_feature_bins * sizeof(float64_t))
+            memset(hist_sq_sums_ptr, 0, n_feature_bins * sizeof(float64_t))
+        elif self.criterion_kind in (1, 2):
+            memset(
+                hist_class_counts_ptr,
+                0,
+                n_feature_bins * self.n_classes * sizeof(float64_t),
+            )
+            memset(missing_class_counts_ptr, 0, self.n_classes * sizeof(float64_t))
+
+        for p in range(self.start, self.end):
+            sample_idx = samples_ptr[p]
+            code = codes_ptr[sample_idx]
+            w = 1.0
+            if sample_weight_ptr != NULL:
+                w = sample_weight_ptr[sample_idx]
+
+            if code < 0:
+                missing_count[0] += 1
+                missing_weight[0] += w
+                if self.criterion_kind == 3:
+                    y_value = y_ptr[sample_idx]
+                    missing_sum[0] += w * y_value
+                    missing_sq_sum[0] += w * y_value * y_value
+                else:
+                    c = <intp_t> y_ptr[sample_idx]
+                    missing_class_counts_ptr[c] += w
+                continue
+
+            hist_counts_ptr[code] += 1
+            hist_weights_ptr[code] += w
+            if self.criterion_kind == 3:
+                y_value = y_ptr[sample_idx]
+                hist_sums_ptr[code] += w * y_value
+                hist_sq_sums_ptr[code] += w * y_value * y_value
+            else:
+                c = <intp_t> y_ptr[sample_idx]
+                hist_class_counts_ptr[code * self.n_classes + c] += w
+
+        for i in range(n_feature_bins):
+            if hist_counts_ptr[i] > 0:
+                active_bins_ptr[active_count] = i
+                active_count += 1
+
+        return active_count
+
+    cdef void _hist_children_class_impurity(
+        self,
+        float64_t left_weight,
+        float64_t right_weight,
+        float64_t* impurity_left,
+        float64_t* impurity_right,
+    ) noexcept nogil:
+        cdef:
+            intp_t c
+            float64_t count_left
+            float64_t count_right
+            float64_t sq_left = 0.0
+            float64_t sq_right = 0.0
+            float64_t value
+            float64_t* left_class_counts_ptr = &self.left_class_counts[0]
+            const float64_t* total_class_counts_ptr = (
+                &(<ClassificationCriterion> self.criterion).sum_total[0, 0]
+            )
+
+        if self.criterion_kind == 1:
+            for c in range(self.n_classes):
+                count_left = left_class_counts_ptr[c]
+                count_right = total_class_counts_ptr[c] - count_left
+                sq_left += count_left * count_left
+                sq_right += count_right * count_right
+            impurity_left[0] = 1.0 - sq_left / (left_weight * left_weight)
+            impurity_right[0] = 1.0 - sq_right / (right_weight * right_weight)
+        else:
+            impurity_left[0] = 0.0
+            impurity_right[0] = 0.0
+            for c in range(self.n_classes):
+                count_left = left_class_counts_ptr[c]
+                if count_left > 0.0:
+                    value = count_left / left_weight
+                    impurity_left[0] -= value * log(value)
+
+                count_right = total_class_counts_ptr[c] - count_left
+                if count_right > 0.0:
+                    value = count_right / right_weight
+                    impurity_right[0] -= value * log(value)
+
 
 cdef class BestSparseSplitter(Splitter):
     """Splitter for finding the best split, using the sparse data."""
@@ -795,6 +1367,8 @@ cdef class BestSparseSplitter(Splitter):
 cdef class RandomSplitter(Splitter):
     """Splitter for finding the best random split on dense data."""
     cdef DensePartitioner partitioner
+    cdef object global_sorted_samples
+    cdef object feature_n_unique
     cdef int init(
         self,
         object X,
@@ -803,8 +1377,16 @@ cdef class RandomSplitter(Splitter):
         const uint8_t[::1] missing_values_in_feature_mask,
     ) except -1:
         Splitter.init(self, X, y, sample_weight, missing_values_in_feature_mask)
+        self.global_sorted_samples, self.feature_n_unique = _global_sorted_index(
+            X, self.max_features
+        )
         self.partitioner = DensePartitioner(
-            X, self.samples, self.feature_values, missing_values_in_feature_mask
+            X,
+            self.samples,
+            self.feature_values,
+            missing_values_in_feature_mask,
+            self.global_sorted_samples,
+            self.feature_n_unique,
         )
 
     cdef int node_split(

@@ -73,6 +73,10 @@ cdef class DensePartitioner:
     cdef intp_t n_missing
     cdef const uint8_t[::1] missing_values_in_feature_mask
     cdef char[::1] swap_buffer
+    cdef const intp_t[:, ::1] global_sorted_samples
+    cdef intp_t[::1] feature_n_unique
+    cdef intp_t[::1] sample_marker
+    cdef intp_t marker
 
     cdef void sort_samples_and_feature_values(
         self, intp_t current_feature
