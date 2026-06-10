@@ -2,8 +2,10 @@
 
 import argparse
 import itertools
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -135,15 +137,20 @@ def parse_args():
 def main():
     args = parse_args()
     repo_root = Path(git_output(["rev-parse", "--show-toplevel"], cwd=Path.cwd()))
+    workload_source = repo_root / "benchmarks" / "profile_bin_mapper_fit.py"
+    if not workload_source.exists():
+        raise RuntimeError(f"Missing workload script: {workload_source}")
+
+    tmp_dir = tempfile.TemporaryDirectory(prefix="bin_mapper_fit_")
+    workload_script = Path(tmp_dir.name) / "profile_bin_mapper_fit.py"
+    shutil.copy2(workload_source, workload_script)
+
     if args.commit is None:
         commit_hash = resolve_current_commit(cwd=repo_root)
     else:
         commit_hash = checkout_commit(args.commit, cwd=repo_root)
     commit_short = commit_hash[:4]
     print(f"commit: {commit_hash}", flush=True)
-    workload_script = repo_root / "benchmarks" / "profile_bin_mapper_fit.py"
-    if not workload_script.exists():
-        raise RuntimeError(f"Missing workload script: {workload_script}")
 
     timings = []
     for dataset, has_nan, has_sample_weight in itertools.product(
