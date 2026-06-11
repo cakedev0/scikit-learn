@@ -32,6 +32,7 @@ import numpy as np
 from sklearn.ensemble._hist_gradient_boosting.binning import _BinMapper
 
 DATASETS = ("uniform", "long-tail", "binary")
+MAX_TOTAL_REPEAT_DURATION = 10
 CSV_FIELDNAMES = (
     "commit",
     "case_name",
@@ -130,6 +131,7 @@ def run_one_dataset(kind, args):
     durations = []
     timing_rows = []
     n_thresholds = None
+    total_duration = 0
     for repeat_idx in range(args.repeat):
         tic = time.perf_counter()
         bin_mapper = fit_bin_mapper(
@@ -141,6 +143,7 @@ def run_one_dataset(kind, args):
         )
         duration = time.perf_counter() - tic
         durations.append(duration)
+        total_duration += duration
         n_thresholds = sum(
             thresholds.shape[0] for thresholds in bin_mapper.bin_thresholds_
         )
@@ -154,6 +157,12 @@ def run_one_dataset(kind, args):
             }
         )
         print(f"  repeat {repeat_idx + 1:02d}: {duration:.3f}s", flush=True)
+        if total_duration > MAX_TOTAL_REPEAT_DURATION:
+            print(
+                f"  stopping repeats after {total_duration:.3f}s total",
+                flush=True,
+            )
+            break
 
     print(
         f"  mean={np.mean(durations):.3f}s, min={np.min(durations):.3f}s, "
