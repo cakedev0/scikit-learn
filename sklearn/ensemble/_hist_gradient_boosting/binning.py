@@ -67,9 +67,11 @@ def _find_binning_thresholds(col_data, max_bins, sample_weight=None):
 
     # The data will be sorted anyway in np.unique and again in percentile, so we do it
     # here. Sorting also returns a contiguous array.
-    sort_idx = np.argsort(col_data)
-    col_data = col_data[sort_idx]
-    if sample_weight is not None:
+    if sample_weight is None:
+        col_data = np.sort(col_data)
+    else:
+        sort_idx = np.argsort(col_data)
+        col_data = col_data[sort_idx]
         sample_weight = sample_weight[sort_idx]
 
     distinct_values = np.unique(col_data).astype(X_DTYPE)
@@ -93,11 +95,8 @@ def _find_binning_thresholds(col_data, max_bins, sample_weight=None):
     else:
         percentiles = np.linspace(0, 100, num=max_bins + 1)
         percentiles = percentiles[1:-1]
-        bin_thresholds = np.array(
-            [
-                _weighted_percentile(col_data, sample_weight, percentile, average=True)
-                for percentile in percentiles
-            ]
+        bin_thresholds = _weighted_percentile(
+            col_data, sample_weight, percentiles, average=True
         )
         assert bin_thresholds.shape[0] == max_bins - 1
     # Remove duplicated thresholds if they exist.
