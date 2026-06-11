@@ -5,6 +5,7 @@ Examples
 Run timings directly:
 
     python benchmarks/profile_bin_mapper_fit.py
+    python benchmarks/profile_bin_mapper_fit.py --output-csv bin_mapper_fit.csv
 
 Record a Python-only py-spy flamegraph:
 
@@ -21,14 +22,23 @@ Record each distribution separately:
 """
 
 import argparse
+import csv
 import gc
 import time
+from pathlib import Path
 
 import numpy as np
 
 from sklearn.ensemble._hist_gradient_boosting.binning import _BinMapper
 
 DATASETS = ("uniform", "long-tail", "binary")
+CSV_FIELDNAMES = (
+    "commit",
+    "case_name",
+    "n_threads",
+    "repeat",
+    "duration",
+)
 
 
 def make_data(kind, *, n_samples, n_features, rng, order):
@@ -37,7 +47,7 @@ def make_data(kind, *, n_samples, n_features, rng, order):
     if kind == "uniform":
         X = rng.random(shape, dtype=np.float64)
     elif kind == "long-tail":
-        X = rng.lognormal(mean=0.0, sigma=3.0, size=shape)
+        X = rng.geometric(0.2, size=shape)
     elif kind == "binary":
         X = rng.integers(0, 2, size=shape, dtype=np.int8).astype(np.float64)
     else:
@@ -65,6 +75,19 @@ def fit_bin_mapper(X, *, sample_weight, n_bins, n_threads, random_state):
         n_threads=n_threads,
     )
     return bin_mapper.fit(X, sample_weight=sample_weight)
+
+
+def write_timing_rows(path, rows, *, append):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not append or not path.exists() or path.stat().st_size == 0
+    mode = "a" if append else "w"
+
+    with path.open(mode, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
 
 
 def run_one_dataset(kind, args):
@@ -105,6 +128,7 @@ def run_one_dataset(kind, args):
         )
 
     durations = []
+    timing_rows = []
     n_thresholds = None
     for repeat_idx in range(args.repeat):
         tic = time.perf_counter()
@@ -120,6 +144,15 @@ def run_one_dataset(kind, args):
         n_thresholds = sum(
             thresholds.shape[0] for thresholds in bin_mapper.bin_thresholds_
         )
+        timing_rows.append(
+            {
+                "commit": args.commit,
+                "case_name": args.case_name,
+                "n_threads": args.n_threads,
+                "repeat": repeat_idx + 1,
+                "duration": duration,
+            }
+        )
         print(f"  repeat {repeat_idx + 1:02d}: {duration:.3f}s", flush=True)
 
     print(
@@ -130,6 +163,7 @@ def run_one_dataset(kind, args):
 
     del X
     gc.collect()
+    return timing_rows
 
 
 def parse_args():
@@ -151,6 +185,27 @@ def parse_args():
     )
     parser.add_argument("--order", choices=("C", "F"), default="C")
     parser.add_argument("--dataset", choices=DATASETS, default="uniform")
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV file where per-repeat timings are written.",
+    )
+    parser.add_argument(
+        "--append-csv",
+        action="store_true",
+        help="Append to --output-csv instead of overwriting it.",
+    )
+    parser.add_argument(
+        "--commit",
+        default="",
+        help="Optional commit identifier stored in --output-csv.",
+    )
+    parser.add_argument(
+        "--case-name",
+        default="",
+        help="Optional benchmark case name stored in --output-csv.",
+    )
     return parser.parse_args()
 
 
@@ -166,7 +221,10 @@ def main():
         flush=True,
     )
 
-    run_one_dataset(args.dataset, args)
+    timing_rows = run_one_dataset(args.dataset, args)
+    if args.output_csv is not None:
+        write_timing_rows(args.output_csv, timing_rows, append=args.append_csv)
+        print(f"  wrote timings to {args.output_csv}", flush=True)
 
 
 if __name__ == "__main__":

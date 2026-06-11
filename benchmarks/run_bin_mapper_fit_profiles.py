@@ -1,4 +1,17 @@
-"""Run _BinMapper.fit timings and py-spy profiles for one commit."""
+"""Run _BinMapper.fit timings and py-spy profiles for one commit.
+
+Examples
+--------
+Run this branch and write a CSV:
+
+    python benchmarks/run_bin_mapper_fit_profiles.py --timing-only \
+        --output-csv bin_mapper_fit_timings.csv
+
+Append timings from main to the same CSV:
+
+    python benchmarks/run_bin_mapper_fit_profiles.py main --timing-only \
+        --output-csv bin_mapper_fit_timings.csv --append-csv
+"""
 
 import argparse
 import itertools
@@ -9,8 +22,9 @@ import tempfile
 import time
 from pathlib import Path
 
+import joblib
+
 DATASETS = ("uniform", "long-tail", "binary")
-DATASETS = ("uniform",)
 NAN_CASES = (False, True)
 SAMPLE_WEIGHT_CASES = (False, True)
 # SAMPLE_WEIGHT_CASES = (True,)
@@ -18,7 +32,6 @@ SAMPLE_WEIGHT_CASES = (False, True)
 N_SAMPLES = 100_000
 N_FEATURES = 32
 N_BINS = 256
-N_THREADS = 1
 REPEAT = 7
 WARMUP = 1
 RANDOM_SEED = 0
@@ -42,7 +55,7 @@ def make_case_name(commit_short, dataset, has_nan, has_sample_weight):
     dataset_label = dataset.replace("-", "_")
     nan_label = "nan" if has_nan else "no_nan"
     weight_label = "weighted" if has_sample_weight else "unweighted"
-    return f"bin_mapper_fit_{dataset_label}_{nan_label}_{weight_label}_{commit_short}"
+    return f"{dataset_label}_{nan_label}_{weight_label}_{commit_short}"
 
 
 def make_workload_command(
@@ -80,12 +93,15 @@ def run_case(
     *,
     repo_root,
     workload_script,
+    commit_hash,
     commit_short,
     dataset,
     has_nan,
     has_sample_weight,
     timing_only,
     n_threads,
+    output_csv,
+    append_csv,
 ):
     case_name = make_case_name(commit_short, dataset, has_nan, has_sample_weight)
     workload_command = make_workload_command(
@@ -97,8 +113,20 @@ def run_case(
     )
 
     print(f"[timing] {case_name}", flush=True)
+    timing_command = [
+        *workload_command,
+        "--output-csv",
+        str(output_csv),
+        "--commit",
+        commit_hash,
+        "--case-name",
+        "_".join(case_name.split("_")[:-1]),
+    ]
+    if append_csv:
+        timing_command.append("--append-csv")
+
     tic = time.perf_counter()
-    subprocess.run(workload_command, cwd=repo_root, check=True)
+    subprocess.run(timing_command, cwd=repo_root, check=True)
     elapsed = time.perf_counter() - tic
 
     if not timing_only:
@@ -107,11 +135,12 @@ def run_case(
         completed = subprocess.run(
             ["py-spy", "record", "-o", str(svg_path), "--", *workload_command],
             cwd=repo_root,
+            check=False,
         )
         if completed.returncode != 0 and not svg_path.exists():
             completed.check_returncode()
 
-    return elapsed
+    return case_name, elapsed
 
 
 def parse_args():
@@ -130,7 +159,25 @@ def parse_args():
         action="store_true",
         help="Run timings only and skip py-spy SVG profiles.",
     )
-    parser.add_argument("--n-threads", type=int, default=N_THREADS)
+    parser.add_argument(
+        "--n-threads",
+        type=int,
+        default=joblib.cpu_count(only_physical_cores=True),
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+        help=(
+            "CSV file where per-repeat fit timings are written. Defaults to "
+            "bin_mapper_fit_timings_<commit>.csv in the repository root."
+        ),
+    )
+    parser.add_argument(
+        "--append-csv",
+        action="store_true",
+        help="Append timing rows to --output-csv instead of overwriting it.",
+    )
     return parser.parse_args()
 
 
@@ -151,25 +198,35 @@ def main():
         commit_hash = checkout_commit(args.commit, cwd=repo_root)
     commit_short = commit_hash[:4]
     print(f"commit: {commit_hash}", flush=True)
+    output_csv = args.output_csv
+    if output_csv is None:
+        output_csv = repo_root / f"bin_mapper_fit_timings_{commit_short}.csv"
+    elif not output_csv.is_absolute():
+        output_csv = repo_root / output_csv
+    print(f"timings csv: {output_csv}", flush=True)
 
     timings = []
+    append_csv = args.append_csv
     for dataset, has_nan, has_sample_weight in itertools.product(
         DATASETS,
         NAN_CASES,
         SAMPLE_WEIGHT_CASES,
     ):
-        elapsed = run_case(
+        case_name, elapsed = run_case(
             repo_root=repo_root,
             workload_script=workload_script,
+            commit_hash=commit_hash,
             commit_short=commit_short,
             dataset=dataset,
             has_nan=has_nan,
             has_sample_weight=has_sample_weight,
             timing_only=args.timing_only,
             n_threads=args.n_threads,
+            output_csv=output_csv,
+            append_csv=append_csv,
         )
-        case_name = make_case_name(commit_short, dataset, has_nan, has_sample_weight)
         timings.append((case_name, elapsed))
+        append_csv = True
 
 
 if __name__ == "__main__":
