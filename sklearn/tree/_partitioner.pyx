@@ -62,7 +62,6 @@ cdef class DensePartitioner:
 
         self.n_categories_in_feature = n_categories_in_feature
         self.n_categories = 0
-        self.n_words = -1
 
         # for breiman shortcut:
         self.counts = np.empty(MAX_NUM_CATEGORIES, dtype=np.intp)
@@ -136,10 +135,6 @@ cdef class DensePartitioner:
 
         self.n_missing = n_missing
         self.n_categories = self.n_categories_in_feature[current_feature]
-        if self.n_categories > 0:
-            self.n_words = (self.n_categories + 31) >> 5   # divide by 32 with ceil
-        else:
-            self.n_words = 0
 
         if n_missing == self.end - self.start:
             # if all the values at this point are missing, the values are sorted by default
@@ -472,7 +467,6 @@ cdef class DensePartitioner:
                 self.n_categories,
                 &self.counts[0],
                 split.left_cat_bitset,
-                self.n_words
             )
             return split
 
@@ -1016,7 +1010,6 @@ cdef inline void split_pos_to_bitset_words(
     intp_t n_sorted,
     const intp_t* counts,
     BITSET_DTYPE_C out_words,
-    intp_t n_words
 ) noexcept nogil:
     """Build a categorical-split bitset from a prefix of sorted categories.
 
@@ -1040,15 +1033,6 @@ cdef inline void split_pos_to_bitset_words(
     out_words : BITSET_DTYPE_C
         Output buffer of 32-bit words; zeroed and filled by
         this function.
-    n_words : intp_t
-        Length of `out_words`.  Must satisfy
-        ``n_words >= ceil((max_category_id + 1) / 32)``.
-
-    Notes
-    -----
-    Caller must guarantee that every id in `sorted_cat` satisfies
-    ``0 <= id < 32 * n_words``.  No bounds checking is performed.
-    This function is ``nogil`` and performs no allocation.
     """
     cdef intp_t r, c
     cdef intp_t offset = 0
