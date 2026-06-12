@@ -3189,7 +3189,8 @@ def test_no_sparse_with_categorical(name):
         Tree(categorical_features=[3, 4]).fit(X, y).predict(X_sparse)
 
     with pytest.raises(
-        NotImplementedError, match="Categorical features not supported with sparse"
+        NotImplementedError,
+        match="Skipping input checking is not implemented",
     ):
         Tree(categorical_features=[3, 4]).fit(X, y).predict(X_sparse, check_input=False)
 
@@ -3307,7 +3308,6 @@ def test_predict_categorical_list_input(Tree):
     est = Tree(categorical_features=[0], random_state=0).fit(X, y)
 
     assert_array_equal(est.predict([["a"], ["b"]]), y[:2])
-    assert_array_equal(est.predict([["a"], ["b"]], check_input=False), y[:2])
 
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])

@@ -52,7 +52,6 @@ from sklearn.utils.validation import (
     _check_n_features,
     _check_sample_weight,
     assert_all_finite,
-    check_array,
     check_is_fitted,
     validate_data,
 )
@@ -248,6 +247,12 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         self.is_categorical_ = is_categorical_
         has_categorical = is_categorical_ is not None
 
+        if has_categorical and not check_input:
+            raise NotImplementedError(
+                "Skipping input checking is not implemented "
+                "when categorical values are present."
+            )
+
         if check_input:
             if issparse(X) and has_categorical:
                 raise NotImplementedError(
@@ -264,29 +269,23 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 dtype=np.float32, accept_sparse="csc", ensure_all_finite=False
             )
             check_y_params = dict(ensure_2d=False, dtype=None)
+            reset = True
             if has_categorical:
-                validate_data(self, X, reset=True, skip_check_array=True)
+                validate_data(self, X, skip_check_array=True)
+                self._fit_categorical_features(X)
+                X = self._transform_categorical_features(X)
+                reset = False
             else:
-                X, y = validate_data(
-                    self, X, y, validate_separately=(check_X_params, check_y_params)
-                )
+                self._categorical_encoder = None
 
-        if has_categorical:
-            # Categorical feature selection must see the original container for
-            # names/dtypes, but tree fitting needs numeric values. Encode selected
-            # columns before the final numeric validation, preserving column order.
-            self._fit_categorical_features(X)
-            X = self._transform_categorical_features(X)
-            if check_input:
-                X = check_array(X, input_name="X", estimator=self, **check_X_params)
-                _check_n_features(self, X, reset=False)
-                y = check_array(y, input_name="y", estimator=self, **check_y_params)
-            else:
-                X = np.asarray(X, dtype=np.float32)
-        else:
-            self._categorical_encoder = None
+            X, y = validate_data(
+                self,
+                X,
+                y,
+                validate_separately=(check_X_params, check_y_params),
+                reset=reset,
+            )
 
-        if check_input:
             # Note: we must check missing after the categorical features
             # because it is assumed X is fully numeric by then. Thus, missing value mask
             # need to be checked separately.
@@ -635,38 +634,27 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                     )
                 validate_data(self, X, reset=False, skip_check_array=True)
                 X = self._transform_categorical_features(X)
-                X = check_array(
-                    X,
-                    input_name="X",
-                    estimator=self,
-                    dtype=np.float32,
-                    accept_sparse="csr",
-                    ensure_all_finite=ensure_all_finite,
-                )
-                _check_n_features(self, X, reset=False)
-            else:
-                X = validate_data(
-                    self,
-                    X,
-                    dtype=np.float32,
-                    accept_sparse="csr",
-                    reset=False,
-                    ensure_all_finite=ensure_all_finite,
-                )
+
+            X = validate_data(
+                self,
+                X,
+                dtype=np.float32,
+                accept_sparse="csr",
+                reset=False,
+                ensure_all_finite=ensure_all_finite,
+            )
             if issparse(X) and (
                 X.indices.dtype != np.intc or X.indptr.dtype != np.intc
             ):
                 raise ValueError("No support for np.int64 index based sparse matrices")
         else:
+            if has_categorical:
+                raise NotImplementedError(
+                    "Skipping input checking is not implemented "
+                    "when categorical values are present."
+                )
             # The number of features is checked regardless of `check_input`
             _check_n_features(self, X, reset=False)
-            if has_categorical:
-                if issparse(X):
-                    raise NotImplementedError(
-                        "Categorical features not supported with sparse inputs"
-                    )
-                X = self._transform_categorical_features(X)
-                X = np.asarray(X, dtype=np.float32)
         return X
 
     def predict(self, X, check_input=True):
