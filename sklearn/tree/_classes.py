@@ -291,12 +291,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             # because it is assumed X is fully numeric by then. Thus, missing value mask
             # need to be checked separately.
             #
-            # TODO: we can support missing values with categories by either:
-            # 1. sending them down randomly through the tree (no assumptions)
-            # 2. sending them down to missing_goes_to_left according to child with
-            # most samples (assumes missing at random, where missingness correlates
-            # with most prevalent observed samples).
-            # To align this with HGBT, we would do #2.
             missing_values_in_feature_mask = (
                 self._compute_missing_values_in_feature_mask(X)
             )
@@ -490,10 +484,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             for idx, categories in zip(
                 np.flatnonzero(is_categorical_), self._categorical_encoder.categories_
             ):
-                # OrdinalEncoder places np.nan last if missing values reach fit.
-                if len(categories) and is_scalar_nan(categories[-1]):
-                    categories = categories[:-1]
-
                 n_categories = categories.size
                 self.n_categories_in_feature_[idx] = n_categories
 
@@ -580,29 +570,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         return self
 
-    def _check_categorical_missing(self, X):
-        """Reject scalar NaN values in categorical features.
-
-        ``X`` is converted to an object array so mixed string/object
-        categorical data can be scanned before ordinal encoding. This check
-        uses :func:`~sklearn.utils._missing.is_scalar_nan`, and therefore only
-        detects scalar NaN values such as ``np.nan`` and ``float("nan")``.
-
-        It does not call pandas or Polars missing-value APIs, so plain
-        ``pd.NA``, ``None``, or Polars nulls are not detected here if they
-        materialize as non-NaN Python objects. Missing values from pandas
-        categorical columns are still rejected when they materialize as
-        ``np.nan``.
-        """
-        X = np.asarray(X, dtype=object)
-        missing_mask = np.fromiter(
-            (is_scalar_nan(x) for x in X.ravel()),
-            dtype=bool,
-            count=X.size,
-        )
-        if np.any(missing_mask):
-            raise ValueError("Missing values are not supported in categorical features")
-
     def _fit_categorical_features(self, X):
         """Fit the categorical feature encoder on selected columns.
 
@@ -610,9 +577,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         dtypes and string/object values are preserved until encoding.
         """
         X_categorical = _safe_indexing(X, self.is_categorical_, axis=1)
-        self._check_categorical_missing(X_categorical)
-        # TODO: HGBT encodes missing values as np.nan, which we can support
-        #   but would need to add missing categorical values support
         self._categorical_encoder = OrdinalEncoder(
             dtype=np.float32,  # trees require X to be float32
             categories="auto",
@@ -621,23 +585,28 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             encoded_missing_value=np.nan,
         )
         self._categorical_encoder.fit(X_categorical)
+        self._categorical_missing_codes = np.array(
+            [
+                len(categories) - 1
+                if len(categories) and is_scalar_nan(categories[-1])
+                else np.nan
+                for categories in self._categorical_encoder.categories_
+            ],
+            dtype=np.float32,
+        )
 
     def _transform_categorical_features(self, X):
         if not hasattr(X, "shape"):
             X = np.asarray(X, dtype=object)
         X_categorical = _safe_indexing(X, self.is_categorical_, axis=1)
-        self._check_categorical_missing(X_categorical)
         X_categorical = self._categorical_encoder.transform(X_categorical)
-        unknown_mask = X_categorical == -1
-        if np.any(unknown_mask):
-            categorical_indices = np.flatnonzero(self.is_categorical_)
-            feature_idx = categorical_indices[
-                np.flatnonzero(unknown_mask.any(axis=0))[0]
-            ]
-            raise ValueError(
-                "Found unknown categories in categorical feature "
-                f"{feature_idx} during transform."
+
+        for feature_idx, missing_code in enumerate(self._categorical_missing_codes):
+            missing_or_unknown = (X_categorical[:, feature_idx] == -1) | np.isnan(
+                X_categorical[:, feature_idx]
             )
+            if np.any(missing_or_unknown):
+                X_categorical[missing_or_unknown, feature_idx] = missing_code
 
         # replace features with the encoded categorical values
         X_out = np.empty(X.shape, dtype=np.float32)
@@ -1071,8 +1040,8 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         Categorical features are only supported for dense inputs
         and single-output targets.
         Values of categorical features are encoded internally. Each categorical
-        feature can have at most 256 categories and missing values are not
-        supported.
+        feature can have at most 256 categories, including missing values when
+        present. Unknown categories at predict time are treated as missing values.
         Categorical features cannot have non-zero monotonic constraint.
 
         When these constraints are not met, ``fit`` will raise an error.
@@ -1493,8 +1462,8 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         Categorical features are only supported for dense inputs
         and single-output targets.
         Values of categorical features are encoded internally. Each categorical
-        feature can have at most 256 categories and missing values are not
-        supported.
+        feature can have at most 256 categories, including missing values when
+        present. Unknown categories at predict time are treated as missing values.
         Categorical features cannot have non-zero monotonic constraints.
 
         When these constraints are not met, ``fit`` will raise an error.
@@ -1883,8 +1852,8 @@ class ExtraTreeClassifier(DecisionTreeClassifier):
         Categorical features are only supported for dense inputs
         and single-output targets.
         Values of categorical features are encoded internally. Each categorical
-        feature can have at most 256 categories and missing values are not
-        supported.
+        feature can have at most 256 categories, including missing values when
+        present. Unknown categories at predict time are treated as missing values.
         Categorical features cannot have non-zero monotonic constraints.
 
         When these constraints are not met, ``fit`` will raise an error.
@@ -2178,8 +2147,8 @@ class ExtraTreeRegressor(DecisionTreeRegressor):
         Categorical features are only supported for dense inputs
         and single-output targets.
         Values of categorical features are encoded internally. Each categorical
-        feature can have at most 256 categories and missing values are not
-        supported.
+        feature can have at most 256 categories, including missing values when
+        present. Unknown categories at predict time are treated as missing values.
         Categorical features cannot have non-zero monotonic constraints.
 
         When these constraints are not met, ``fit`` will raise an error.

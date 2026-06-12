@@ -3204,18 +3204,15 @@ def test_no_sparse_with_categorical(name):
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
 @pytest.mark.parametrize(
-    "X_test, match",
+    "X_test",
     [
-        (np.array([[2.0]], dtype=np.float64), "Found unknown categories"),
-        (np.array([[0.5]], dtype=np.float64), "Found unknown categories"),
-        (np.array([[-1.0]], dtype=np.float64), "Found unknown categories"),
-        (
-            np.array([[np.nan]], dtype=np.float64),
-            "Missing values are not supported in categorical features",
-        ),
+        np.array([[2.0]], dtype=np.float64),
+        np.array([[0.5]], dtype=np.float64),
+        np.array([[-1.0]], dtype=np.float64),
+        np.array([[np.nan]], dtype=np.float64),
     ],
 )
-def test_predict_invalid_categorical_values(Tree, X_test, match):
+def test_predict_unknown_categorical_values_as_missing(Tree, X_test):
     X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float64)
     if Tree is DecisionTreeClassifier:
         y = np.array([0, 1, 0, 1])
@@ -3223,8 +3220,7 @@ def test_predict_invalid_categorical_values(Tree, X_test, match):
         y = np.array([0.0, 1.0, 0.0, 1.0])
 
     est = Tree(categorical_features=[0], random_state=0).fit(X, y)
-    with pytest.raises(ValueError, match=match):
-        est.predict(X_test)
+    assert_array_equal(est.predict(X_test), [1])
 
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
@@ -3282,13 +3278,17 @@ def test_fit_categorical_too_many_categories(Tree):
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
 def test_fit_categorical_missing_values(Tree):
-    X = np.array([["a"], [np.nan], ["b"], ["b"]], dtype=object)
-    y = np.array([0, 1, 0, 1])
+    X = np.array([[np.nan]] * 4 + [["a"]] * 4 + [["b"]] * 4, dtype=object)
+    if Tree is DecisionTreeClassifier:
+        y = np.array([0] * 4 + [1] * 8)
+    else:
+        y = np.array([0.0] * 4 + [1.0] * 8)
 
-    with pytest.raises(
-        ValueError, match="Missing values are not supported in categorical features"
-    ):
-        Tree(categorical_features=[0], random_state=0).fit(X, y)
+    est = Tree(categorical_features=[0], random_state=0).fit(X, y)
+
+    assert_array_equal(est.n_categories_in_feature_, [3])
+    X_test = np.array([[np.nan], ["a"], ["b"], ["c"]], dtype=object)
+    assert_array_equal(est.predict(X_test), [0, 1, 1, 0])
 
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
@@ -3297,8 +3297,7 @@ def test_predict_unknown_string_category(Tree):
     y = np.array([0, 1, 0, 1])
     est = Tree(categorical_features=[0], random_state=0).fit(X, y)
 
-    with pytest.raises(ValueError, match="Found unknown categories"):
-        est.predict(np.array([["c"]], dtype=object))
+    assert_array_equal(est.predict(np.array([["c"]], dtype=object)), [1])
 
 
 @pytest.mark.parametrize("Tree", [DecisionTreeClassifier, DecisionTreeRegressor])
