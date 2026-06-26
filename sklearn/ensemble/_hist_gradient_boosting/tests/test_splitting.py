@@ -325,6 +325,78 @@ def test_split_indices():
     assert samples_right.shape[0] == si_root.n_samples_right
 
 
+@pytest.mark.skipif(n_threads < 2, reason="requires at least two OpenMP threads")
+def test_adaptive_sequential_split_matches_legacy_parallel(monkeypatch):
+    rng = np.random.RandomState(42)
+
+    n_bins = 8
+    n_samples = 100
+    n_features = 4
+    l2_regularization = 0.0
+    min_hessian_to_split = 1e-3
+    min_samples_leaf = 1
+    min_gain_to_split = 0.0
+    hessians_are_constant = True
+
+    X_binned = np.asfortranarray(
+        rng.randint(0, n_bins - 1, size=(n_samples, n_features)),
+        dtype=X_BINNED_DTYPE,
+    )
+    sample_indices = np.arange(n_samples, dtype=np.uint32)
+    all_gradients = rng.randn(n_samples).astype(G_H_DTYPE)
+    all_hessians = np.ones(1, dtype=G_H_DTYPE)
+    sum_gradients = all_gradients.sum()
+    sum_hessians = n_samples
+
+    builder = HistogramBuilder(
+        X_binned, n_bins, all_gradients, all_hessians, hessians_are_constant, 1
+    )
+    histograms = builder.compute_histograms_brute(sample_indices)
+    value = compute_node_value(
+        sum_gradients, sum_hessians, -np.inf, np.inf, l2_regularization
+    )
+
+    splitter_params = dict(
+        X_binned=X_binned,
+        n_bins_non_missing=np.full(n_features, n_bins - 1, dtype=np.uint32),
+        missing_values_bin_idx=n_bins - 1,
+        has_missing_values=np.zeros(n_features, dtype=np.uint8),
+        is_categorical=np.zeros(n_features, dtype=np.uint8),
+        monotonic_cst=np.full(n_features, MonotonicConstraint.NO_CST, dtype=np.int8),
+        l2_regularization=l2_regularization,
+        min_hessian_to_split=min_hessian_to_split,
+        min_samples_leaf=min_samples_leaf,
+        min_gain_to_split=min_gain_to_split,
+        hessians_are_constant=hessians_are_constant,
+    )
+    splitter_sequential = Splitter(**splitter_params, n_threads=1)
+    split_info_sequential = splitter_sequential.find_node_split(
+        n_samples, histograms, sum_gradients, sum_hessians, value
+    )
+    samples_left_sequential, samples_right_sequential, _ = (
+        splitter_sequential.split_indices(
+            split_info_sequential, splitter_sequential.partition
+        )
+    )
+
+    monkeypatch.setenv("SKLEARN_HGB_OPENMP_ADAPTIVE_THREADS", "0")
+    splitter_parallel = Splitter(**splitter_params, n_threads=2)
+    split_info_parallel = splitter_parallel.find_node_split(
+        n_samples, histograms, sum_gradients, sum_hessians, value
+    )
+    samples_left_parallel, samples_right_parallel, _ = splitter_parallel.split_indices(
+        split_info_parallel, splitter_parallel.partition
+    )
+
+    assert split_info_sequential.feature_idx == split_info_parallel.feature_idx
+    assert split_info_sequential.bin_idx == split_info_parallel.bin_idx
+    assert split_info_sequential.n_samples_left == split_info_parallel.n_samples_left
+    assert split_info_sequential.n_samples_right == split_info_parallel.n_samples_right
+    assert split_info_sequential.gain == pytest.approx(split_info_parallel.gain)
+    assert_array_equal(samples_left_sequential, samples_left_parallel)
+    assert_array_equal(samples_right_sequential, samples_right_parallel)
+
+
 def test_min_gain_to_split():
     # Try to split a pure node (all gradients are equal, same for hessians)
     # with min_gain_to_split = 0 and make sure that the node is not split (best

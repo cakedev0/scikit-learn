@@ -31,3 +31,8 @@ cdef extern from *:
     void omp_unset_lock(omp_lock_t*) noexcept nogil
     int omp_get_thread_num() noexcept nogil
     int omp_get_max_threads() noexcept nogil
+    double omp_get_wtime() noexcept nogil
+
+
+cdef void _openmp_ensure_hgb_thread_calibration(int max_n_threads)
+cdef int _openmp_calibrated_n_threads(double work_units, int max_threads)

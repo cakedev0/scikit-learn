@@ -18,6 +18,8 @@ from libc.string cimport memcpy
 
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C
 from sklearn.utils._bitset cimport in_bitset, init_bitset, set_bitset
+from sklearn.utils._openmp_helpers cimport _openmp_calibrated_n_threads
+from sklearn.utils._openmp_helpers cimport _openmp_ensure_hgb_thread_calibration
 from sklearn.utils._typedefs cimport uint8_t
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport Y_DTYPE_C
@@ -49,6 +51,17 @@ cdef struct split_info_struct:
 cdef struct categorical_info:
     X_BINNED_DTYPE_C bin_idx
     Y_DTYPE_C value
+
+
+cdef inline int _ceil_log2_int(int value) noexcept nogil:
+    cdef:
+        int result = 0
+        int threshold = 1
+
+    while threshold < value:
+        threshold = threshold << 1
+        result += 1
+    return result
 
 
 class SplitInfo:
@@ -215,6 +228,8 @@ cdef class Splitter:
         self.feature_fraction_per_split = feature_fraction_per_split
         self.rng = rng
         self.n_threads = n_threads
+        if n_threads > 1:
+            _openmp_ensure_hgb_thread_calibration(n_threads)
 
         # The partition array maps each sample index into the leaves of the
         # tree (a leaf in this context is a node that isn't split yet, not
@@ -318,13 +333,14 @@ cdef class Splitter:
             # split_info.left_cat_bitset directly, so we need a tmp var
             BITSET_INNER_DTYPE_C [:] cat_bitset_tmp = split_info.left_cat_bitset
             BITSET_DTYPE_C left_cat_bitset
-            int n_threads = self.n_threads
+            int n_threads = _openmp_calibrated_n_threads(
+                n_samples, min(self.n_threads, n_samples)
+            )
 
-            int [:] sizes = np.full(n_threads, n_samples // n_threads,
-                                    dtype=np.int32)
-            int [:] offset_in_buffers = np.zeros(n_threads, dtype=np.int32)
-            int [:] left_counts = np.empty(n_threads, dtype=np.int32)
-            int [:] right_counts = np.empty(n_threads, dtype=np.int32)
+            int [:] sizes
+            int [:] offset_in_buffers
+            int [:] left_counts
+            int [:] right_counts
             int left_count
             int right_count
             int start
@@ -334,12 +350,54 @@ cdef class Splitter:
             int sample_idx
             int right_child_position
             uint8_t turn_left
-            int [:] left_offset = np.zeros(n_threads, dtype=np.int32)
-            int [:] right_offset = np.zeros(n_threads, dtype=np.int32)
+            int [:] left_offset
+            int [:] right_offset
 
         # only set left_cat_bitset when is_categorical is True
         if is_categorical:
             left_cat_bitset = &cat_bitset_tmp[0]
+
+        if n_threads < 2:
+            left_count = 0
+            right_count = 0
+            with nogil:
+                for i in range(n_samples):
+                    sample_idx = sample_indices[i]
+                    turn_left = sample_goes_left(
+                        missing_go_to_left,
+                        missing_values_bin_idx, bin_idx,
+                        X_binned[sample_idx], is_categorical,
+                        left_cat_bitset)
+
+                    if turn_left:
+                        left_indices_buffer[left_count] = sample_idx
+                        left_count += 1
+                    else:
+                        right_indices_buffer[right_count] = sample_idx
+                        right_count += 1
+
+                memcpy(
+                    &sample_indices[0],
+                    &left_indices_buffer[0],
+                    sizeof(unsigned int) * left_count
+                )
+                if right_count > 0:
+                    memcpy(
+                        &sample_indices[left_count],
+                        &right_indices_buffer[0],
+                        sizeof(unsigned int) * right_count
+                    )
+
+            return (sample_indices[:left_count],
+                    sample_indices[left_count:],
+                    left_count)
+
+        sizes = np.full(n_threads, n_samples // n_threads, dtype=np.int32)
+        offset_in_buffers = np.zeros(n_threads, dtype=np.int32)
+        left_counts = np.empty(n_threads, dtype=np.int32)
+        right_counts = np.empty(n_threads, dtype=np.int32)
+        left_offset = np.zeros(n_threads, dtype=np.int32)
+        right_offset = np.zeros(n_threads, dtype=np.int32)
 
         with nogil:
             for thread_idx in range(n_samples % n_threads):
@@ -423,6 +481,76 @@ cdef class Splitter:
                 sample_indices[right_child_position:],
                 right_child_position)
 
+    cdef void _find_node_split_for_feature(
+        Splitter self,
+        int split_info_idx,
+        split_info_struct * split_infos,
+        const unsigned int [:] allowed_features,
+        bint has_interaction_cst,
+        bint has_feature_subsampling,
+        const uint8_t [:] subsample_mask,
+        const uint8_t [::1] has_missing_values,
+        const uint8_t [::1] is_categorical,
+        const signed char [::1] monotonic_cst,
+        const hist_struct [:, ::1] histograms,
+        unsigned int n_samples,
+        Y_DTYPE_C sum_gradients,
+        Y_DTYPE_C sum_hessians,
+        Y_DTYPE_C value,
+        Y_DTYPE_C lower_bound,
+        Y_DTYPE_C upper_bound,
+    ) noexcept nogil:
+        cdef:
+            int feature_idx
+            uint8_t missing_go_to_left
+
+        if has_interaction_cst:
+            feature_idx = allowed_features[split_info_idx]
+        else:
+            feature_idx = split_info_idx
+
+        split_infos[split_info_idx].feature_idx = feature_idx
+
+        # For each feature, find best bin to split on
+        # Start with a gain of -1 if no better split is found, that
+        # means one of the constraints isn't respected
+        # (min_samples_leaf, etc.) and the grower will later turn the
+        # node into a leaf.
+        split_infos[split_info_idx].gain = -1
+        split_infos[split_info_idx].is_categorical = is_categorical[feature_idx]
+
+        # Note that subsample_mask is indexed by split_info_idx and not by
+        # feature_idx because we only need to exclude the same features again
+        # and again. We do NOT need to access the features directly by using
+        # allowed_features.
+        if has_feature_subsampling and not subsample_mask[split_info_idx]:
+            return
+
+        if is_categorical[feature_idx]:
+            self._find_best_bin_to_split_category(
+                feature_idx, has_missing_values[feature_idx],
+                histograms, n_samples, sum_gradients, sum_hessians,
+                value, monotonic_cst[feature_idx], lower_bound,
+                upper_bound, &split_infos[split_info_idx])
+        else:
+            # We scan bins from left to right and, if there are any
+            # missing values, we scan a second time with missing
+            # values in the left child. This way, we can consider
+            # whichever case yields the best gain: either missing
+            # values go to the right or to the left. See algo 3 from
+            # the XGBoost paper
+            # https://arxiv.org/abs/1603.02754
+            # Note: for the categorical features above, this isn't
+            # needed since missing values are considered a native
+            # category.
+            for missing_go_to_left in range(has_missing_values[feature_idx] + 1):
+                self._find_best_bin_to_split_numerical(
+                    feature_idx, has_missing_values[feature_idx],
+                    histograms, n_samples, sum_gradients, sum_hessians,
+                    value, monotonic_cst[feature_idx],
+                    lower_bound, upper_bound, missing_go_to_left,
+                    &split_infos[split_info_idx])
+
     def find_node_split(
             Splitter self,
             unsigned int n_samples,
@@ -486,10 +614,14 @@ cdef class Splitter:
             const signed char [::1] monotonic_cst = self.monotonic_cst
             int n_threads = self.n_threads
             bint has_interaction_cst = False
+            bint has_feature_subsampling = False
             Y_DTYPE_C feature_fraction_per_split = self.feature_fraction_per_split
-            uint8_t [:] subsample_mask  # same as npy_bool
+            const uint8_t [:] subsample_mask = None  # same as npy_bool
             int n_subsampled_features
-            uint8_t missing_go_to_left
+            double work_units = 0.0
+            int n_selected_features = 0
+            int n_bins_feature
+            int max_n_threads
 
         has_interaction_cst = allowed_features is not None
         if has_interaction_cst:
@@ -497,7 +629,8 @@ cdef class Splitter:
         else:
             n_allowed_features = self.n_features
 
-        if feature_fraction_per_split < 1.0:
+        has_feature_subsampling = feature_fraction_per_split < 1.0
+        if has_feature_subsampling:
             # We do all random sampling before the nogil and make sure that we sample
             # exactly n_subsampled_features >= 1 features.
             n_subsampled_features = max(
@@ -510,6 +643,28 @@ cdef class Splitter:
             # https://github.com/numpy/numpy/issues/18273
             subsample_mask = subsample_mask_arr
 
+        for split_info_idx in range(n_allowed_features):
+            if has_feature_subsampling and not subsample_mask[split_info_idx]:
+                continue
+            n_selected_features += 1
+            if has_interaction_cst:
+                feature_idx = allowed_features[split_info_idx]
+            else:
+                feature_idx = split_info_idx
+            n_bins_feature = self.n_bins_non_missing[feature_idx]
+            if is_categorical[feature_idx]:
+                work_units += (
+                    n_bins_feature * _ceil_log2_int(max(2, n_bins_feature))
+                    + n_bins_feature
+                )
+            elif has_missing_values[feature_idx]:
+                work_units += 2 * n_bins_feature
+            else:
+                work_units += max(0, n_bins_feature - 1)
+
+        max_n_threads = min(n_threads, n_selected_features)
+        n_threads = _openmp_calibrated_n_threads(work_units, max_n_threads)
+
         with nogil:
 
             split_infos = <split_info_struct *> malloc(
@@ -517,55 +672,23 @@ cdef class Splitter:
 
             # split_info_idx is index of split_infos of size n_allowed_features.
             # features_idx is the index of the feature column in X.
-            for split_info_idx in prange(n_allowed_features, schedule='static',
-                                         num_threads=n_threads):
-                if has_interaction_cst:
-                    feature_idx = allowed_features[split_info_idx]
-                else:
-                    feature_idx = split_info_idx
-
-                split_infos[split_info_idx].feature_idx = feature_idx
-
-                # For each feature, find best bin to split on
-                # Start with a gain of -1 if no better split is found, that
-                # means one of the constraints isn't respected
-                # (min_samples_leaf, etc.) and the grower will later turn the
-                # node into a leaf.
-                split_infos[split_info_idx].gain = -1
-                split_infos[split_info_idx].is_categorical = is_categorical[feature_idx]
-
-                # Note that subsample_mask is indexed by split_info_idx and not by
-                # feature_idx because we only need to exclude the same features again
-                # and again. We do NOT need to access the features directly by using
-                # allowed_features.
-                if feature_fraction_per_split < 1.0 and not subsample_mask[split_info_idx]:
-                    continue
-
-                if is_categorical[feature_idx]:
-                    self._find_best_bin_to_split_category(
-                        feature_idx, has_missing_values[feature_idx],
-                        histograms, n_samples, sum_gradients, sum_hessians,
-                        value, monotonic_cst[feature_idx], lower_bound,
-                        upper_bound, &split_infos[split_info_idx])
-                else:
-                    # We scan bins from left to right and, if there are any
-                    # missing values, we scan a second time with missing
-                    # values in the left child. This way, we can consider
-                    # whichever case yields the best gain: either missing
-                    # values go to the right or to the left. See algo 3 from
-                    # the XGBoost paper
-                    # https://arxiv.org/abs/1603.02754
-                    # Note: for the categorical features above, this isn't
-                    # needed since missing values are considered a native
-                    # category.
-                    for missing_go_to_left in range(has_missing_values[feature_idx] + 1):
-
-                        self._find_best_bin_to_split_numerical(
-                            feature_idx, has_missing_values[feature_idx],
-                            histograms, n_samples, sum_gradients, sum_hessians,
-                            value, monotonic_cst[feature_idx],
-                            lower_bound, upper_bound, missing_go_to_left,
-                            &split_infos[split_info_idx])
+            if n_threads < 2:
+                for split_info_idx in range(n_allowed_features):
+                    self._find_node_split_for_feature(
+                        split_info_idx, split_infos, allowed_features,
+                        has_interaction_cst, has_feature_subsampling,
+                        subsample_mask, has_missing_values, is_categorical,
+                        monotonic_cst, histograms, n_samples, sum_gradients,
+                        sum_hessians, value, lower_bound, upper_bound)
+            else:
+                for split_info_idx in prange(n_allowed_features, schedule='static',
+                                             num_threads=n_threads):
+                    self._find_node_split_for_feature(
+                        split_info_idx, split_infos, allowed_features,
+                        has_interaction_cst, has_feature_subsampling,
+                        subsample_mask, has_missing_values, is_categorical,
+                        monotonic_cst, histograms, n_samples, sum_gradients,
+                        sum_hessians, value, lower_bound, upper_bound)
 
             # then compute best possible split among all features
             # split_info is set to the best of split_infos
