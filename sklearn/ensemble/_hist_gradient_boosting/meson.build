@@ -6,12 +6,11 @@ hist_gradient_boosting_cython_tree = [
 ]
 
 hist_gradient_boosting_extension_metadata = {
-  '_gradient_boosting': {'sources': [cython_gen.process('_gradient_boosting.pyx')],
-                         'dependencies': [openmp_dep]},
-  'histogram': {'sources': [cython_gen.process('histogram.pyx')], 'dependencies': [openmp_dep]},
-  'splitting': {'sources': [cython_gen.process('splitting.pyx')], 'dependencies': [openmp_dep]},
-  '_binning': {'sources': [cython_gen.process('_binning.pyx')], 'dependencies': [openmp_dep]},
-  '_predictor': {'sources': [cython_gen.process('_predictor.pyx')], 'dependencies': [openmp_dep]},
+  '_gradient_boosting': {'sources': [cython_gen.process('_gradient_boosting.pyx')]},
+  'histogram': {'sources': [cython_gen.process('histogram.pyx')]},
+  'splitting': {'sources': [cython_gen.process('splitting.pyx')]},
+  '_binning': {'sources': [cython_gen.process('_binning.pyx')]},
+  '_predictor': {'sources': [cython_gen.process('_predictor.pyx')]},
   'common': {'sources': [cython_gen.process('common.pyx')]},
 }
 

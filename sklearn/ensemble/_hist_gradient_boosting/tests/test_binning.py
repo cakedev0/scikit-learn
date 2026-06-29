@@ -13,9 +13,6 @@ from sklearn.ensemble._hist_gradient_boosting.common import (
     X_BINNED_DTYPE,
     X_DTYPE,
 )
-from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
-
-n_threads = _openmp_effective_n_threads()
 
 
 DATA = (
@@ -100,7 +97,7 @@ def test_map_to_bins(max_bins):
     binned = np.zeros_like(DATA, dtype=X_BINNED_DTYPE, order="F")
     is_categorical = np.zeros(2, dtype=np.uint8)
     last_bin_idx = max_bins
-    _map_to_bins(DATA, bin_thresholds, is_categorical, last_bin_idx, n_threads, binned)
+    _map_to_bins(DATA, bin_thresholds, is_categorical, last_bin_idx, binned)
     assert binned.shape == DATA.shape
     assert binned.dtype == np.uint8
     assert binned.flags.f_contiguous

@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 cimport cython
-from cython.parallel import prange
 from libc.string cimport memset
 
 import numpy as np
@@ -82,13 +81,11 @@ cdef class HistogramBuilder:
         G_H_DTYPE_C [::1] ordered_gradients
         G_H_DTYPE_C [::1] ordered_hessians
         uint8_t hessians_are_constant
-        int n_threads
 
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
                  G_H_DTYPE_C [::1] hessians,
-                 uint8_t hessians_are_constant,
-                 int n_threads):
+                 uint8_t hessians_are_constant):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -101,7 +98,6 @@ cdef class HistogramBuilder:
         self.ordered_gradients = gradients.copy()
         self.ordered_hessians = hessians.copy()
         self.hessians_are_constant = hessians_are_constant
-        self.n_threads = n_threads
 
     def compute_histograms_brute(
         HistogramBuilder self,
@@ -138,13 +134,12 @@ cdef class HistogramBuilder:
             G_H_DTYPE_C [::1] gradients = self.gradients
             G_H_DTYPE_C [::1] ordered_hessians = self.ordered_hessians
             G_H_DTYPE_C [::1] hessians = self.hessians
-            # Histograms will be initialized to zero later within a prange
+            # Histograms will be initialized to zero later.
             hist_struct [:, ::1] histograms = np.empty(
                 shape=(self.n_features, self.n_bins),
                 dtype=HISTOGRAM_DTYPE
             )
             bint has_interaction_cst = allowed_features is not None
-            int n_threads = self.n_threads
 
         if has_interaction_cst:
             n_allowed_features = allowed_features.shape[0]
@@ -157,19 +152,15 @@ cdef class HistogramBuilder:
             # cache hit.
             if sample_indices.shape[0] != gradients.shape[0]:
                 if hessians_are_constant:
-                    for i in prange(n_samples, schedule='static',
-                                    num_threads=n_threads):
+                    for i in range(n_samples):
                         ordered_gradients[i] = gradients[sample_indices[i]]
                 else:
-                    for i in prange(n_samples, schedule='static',
-                                    num_threads=n_threads):
+                    for i in range(n_samples):
                         ordered_gradients[i] = gradients[sample_indices[i]]
                         ordered_hessians[i] = hessians[sample_indices[i]]
 
             # Compute histogram of each feature
-            for f_idx in prange(
-                n_allowed_features, schedule='static', num_threads=n_threads
-            ):
+            for f_idx in range(n_allowed_features):
                 if has_interaction_cst:
                     feature_idx = allowed_features[f_idx]
                 else:
@@ -261,25 +252,24 @@ cdef class HistogramBuilder:
             int f_idx
             int n_allowed_features = self.n_features
             bint has_interaction_cst = allowed_features is not None
-            int n_threads = self.n_threads
 
         if has_interaction_cst:
             n_allowed_features = allowed_features.shape[0]
 
         # Compute histogram of each feature
-        for f_idx in prange(n_allowed_features, schedule='static', nogil=True,
-                            num_threads=n_threads):
-            if has_interaction_cst:
-                feature_idx = allowed_features[f_idx]
-            else:
-                feature_idx = f_idx
+        with nogil:
+            for f_idx in range(n_allowed_features):
+                if has_interaction_cst:
+                    feature_idx = allowed_features[f_idx]
+                else:
+                    feature_idx = f_idx
 
-            _subtract_histograms(
-                feature_idx,
-                self.n_bins,
-                parent_histograms,
-                sibling_histograms,
-            )
+                _subtract_histograms(
+                    feature_idx,
+                    self.n_bins,
+                    parent_histograms,
+                    sibling_histograms,
+                )
         return parent_histograms
 
 

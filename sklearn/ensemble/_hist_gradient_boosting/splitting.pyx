@@ -10,11 +10,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 cimport cython
-from cython.parallel import prange
 import numpy as np
 from libc.math cimport INFINITY, ceil
 from libc.stdlib cimport malloc, free, qsort
-from libc.string cimport memcpy
 
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C
 from sklearn.utils._bitset cimport in_bitset, init_bitset, set_bitset
@@ -160,8 +158,6 @@ cdef class Splitter:
         This is a form of regularization, smaller values make the trees weaker
         learners and might prevent overfitting.
     rng : Generator
-    n_threads : int, default=1
-        Number of OpenMP threads to use.
     """
     cdef public:
         const X_BINNED_DTYPE_C [::1, :] X_binned
@@ -182,7 +178,6 @@ cdef class Splitter:
         unsigned int [::1] partition
         unsigned int [::1] left_indices_buffer
         unsigned int [::1] right_indices_buffer
-        int n_threads
 
     def __init__(self,
                  const X_BINNED_DTYPE_C [::1, :] X_binned,
@@ -197,8 +192,7 @@ cdef class Splitter:
                  Y_DTYPE_C min_gain_to_split=0.,
                  uint8_t hessians_are_constant=False,
                  Y_DTYPE_C feature_fraction_per_split=1.0,
-                 rng=np.random.RandomState(),
-                 unsigned int n_threads=1):
+                 rng=np.random.RandomState()):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -214,7 +208,6 @@ cdef class Splitter:
         self.hessians_are_constant = hessians_are_constant
         self.feature_fraction_per_split = feature_fraction_per_split
         self.rng = rng
-        self.n_threads = n_threads
 
         # The partition array maps each sample index into the leaves of the
         # tree (a leaf in this context is a node that isn't split yet, not
@@ -226,7 +219,7 @@ cdef class Splitter:
         # we have 2 leaves, the left one is at position 0 and the second one at
         # position 3. The order of the samples is irrelevant.
         self.partition = np.arange(X_binned.shape[0], dtype=np.uint32)
-        # buffers used in split_indices to support parallel splitting.
+        # buffers used in split_indices.
         self.left_indices_buffer = np.empty_like(self.partition)
         self.right_indices_buffer = np.empty_like(self.partition)
 
@@ -261,10 +254,9 @@ cdef class Splitter:
         right_child_position : int
             The position of the right child in ``sample_indices``.
         """
-        # This is a multi-threaded implementation inspired by lightgbm. Here
-        # is a quick break down. Let's suppose we want to split a node with 24
-        # samples named from a to x. self.partition looks like this (the * are
-        # indices in other leaves that we don't care about):
+        # Suppose we want to split a node with 24 samples named from a to x.
+        # self.partition looks like this (the * are indices in other leaves
+        # that we don't care about):
         # partition = [*************abcdefghijklmnopqrstuvwx****************]
         #                           ^                       ^
         #                     node_position     node_position + node.n_samples
@@ -279,29 +271,11 @@ cdef class Splitter:
         # and right_child_pos = left_child_pos + left_child.n_samples. The
         # order of the samples inside a leaf is irrelevant.
 
-        # 1. sample_indices is a view on this region a..x. We conceptually
-        #    divide it into n_threads regions. Each thread will be responsible
-        #    for its own region. Here is an example with 4 threads:
-        #    sample_indices = [abcdef|ghijkl|mnopqr|stuvwx]
-        # 2. Each thread processes 6 = 24 // 4 entries and maps them into
-        #    left_indices_buffer or right_indices_buffer. For example, we could
-        #    have the following mapping ('.' denotes an undefined entry):
-        #    - left_indices_buffer =  [abef..|il....|mnopqr|tux...]
-        #    - right_indices_buffer = [cd....|ghjk..|......|svw...]
-        # 3. We keep track of the start positions of the regions (the '|') in
-        #    ``offset_in_buffers`` as well as the size of each region. We also
-        #    keep track of the number of samples put into the left/right child
-        #    by each thread. Concretely:
-        #    - left_counts =  [4, 2, 6, 3]
-        #    - right_counts = [2, 4, 0, 3]
-        # 4. Finally, we put left/right_indices_buffer back into the
-        #    sample_indices, without any undefined entries and the partition
-        #    looks as expected
+        # 1. sample_indices is a view on this region a..x. We first map
+        #    samples into left_indices_buffer and right_indices_buffer.
+        # 2. Finally, we put left/right_indices_buffer back into sample_indices,
+        #    without any undefined entries, and the partition looks as expected:
         #    partition = [*************abefilmnopqrtuxcdghjksvw***************]
-
-        # Note: We here show left/right_indices_buffer as being the same size
-        # as sample_indices for simplicity, but in reality they are of the
-        # same size as partition.
 
         cdef:
             int n_samples = sample_indices.shape[0]
@@ -318,106 +292,41 @@ cdef class Splitter:
             # split_info.left_cat_bitset directly, so we need a tmp var
             BITSET_INNER_DTYPE_C [:] cat_bitset_tmp = split_info.left_cat_bitset
             BITSET_DTYPE_C left_cat_bitset
-            int n_threads = self.n_threads
-
-            int [:] sizes = np.full(n_threads, n_samples // n_threads,
-                                    dtype=np.int32)
-            int [:] offset_in_buffers = np.zeros(n_threads, dtype=np.int32)
-            int [:] left_counts = np.empty(n_threads, dtype=np.int32)
-            int [:] right_counts = np.empty(n_threads, dtype=np.int32)
             int left_count
             int right_count
-            int start
-            int stop
             int i
-            int thread_idx
             int sample_idx
             int right_child_position
             uint8_t turn_left
-            int [:] left_offset = np.zeros(n_threads, dtype=np.int32)
-            int [:] right_offset = np.zeros(n_threads, dtype=np.int32)
 
         # only set left_cat_bitset when is_categorical is True
         if is_categorical:
             left_cat_bitset = &cat_bitset_tmp[0]
 
         with nogil:
-            for thread_idx in range(n_samples % n_threads):
-                sizes[thread_idx] += 1
+            left_count = 0
+            right_count = 0
+            for i in range(n_samples):
+                sample_idx = sample_indices[i]
+                turn_left = sample_goes_left(
+                    missing_go_to_left,
+                    missing_values_bin_idx, bin_idx,
+                    X_binned[sample_idx], is_categorical,
+                    left_cat_bitset)
 
-            for thread_idx in range(1, n_threads):
-                offset_in_buffers[thread_idx] = \
-                    offset_in_buffers[thread_idx - 1] + sizes[thread_idx - 1]
+                if turn_left:
+                    left_indices_buffer[left_count] = sample_idx
+                    left_count += 1
+                else:
+                    right_indices_buffer[right_count] = sample_idx
+                    right_count += 1
 
-            # map indices from sample_indices to left/right_indices_buffer
-            for thread_idx in prange(n_threads, schedule='static',
-                                     chunksize=1, num_threads=n_threads):
-                left_count = 0
-                right_count = 0
+            right_child_position = left_count
 
-                start = offset_in_buffers[thread_idx]
-                stop = start + sizes[thread_idx]
-                for i in range(start, stop):
-                    sample_idx = sample_indices[i]
-                    turn_left = sample_goes_left(
-                        missing_go_to_left,
-                        missing_values_bin_idx, bin_idx,
-                        X_binned[sample_idx], is_categorical,
-                        left_cat_bitset)
-
-                    if turn_left:
-                        left_indices_buffer[start + left_count] = sample_idx
-                        left_count = left_count + 1
-                    else:
-                        right_indices_buffer[start + right_count] = sample_idx
-                        right_count = right_count + 1
-
-                left_counts[thread_idx] = left_count
-                right_counts[thread_idx] = right_count
-
-            # position of right child = just after the left child
-            right_child_position = 0
-            for thread_idx in range(n_threads):
-                right_child_position += left_counts[thread_idx]
-
-            # offset of each thread in sample_indices for left and right
-            # child, i.e. where each thread will start to write.
-            right_offset[0] = right_child_position
-            for thread_idx in range(1, n_threads):
-                left_offset[thread_idx] = \
-                    left_offset[thread_idx - 1] + left_counts[thread_idx - 1]
-                right_offset[thread_idx] = \
-                    right_offset[thread_idx - 1] + right_counts[thread_idx - 1]
-
-            # map indices in left/right_indices_buffer back into
-            # sample_indices. This also updates self.partition since
-            # sample_indices is a view.
-            for thread_idx in prange(n_threads, schedule='static',
-                                     chunksize=1, num_threads=n_threads):
-                memcpy(
-                    &sample_indices[left_offset[thread_idx]],
-                    &left_indices_buffer[offset_in_buffers[thread_idx]],
-                    sizeof(unsigned int) * left_counts[thread_idx]
-                )
-                if right_counts[thread_idx] > 0:
-                    # If we're splitting the rightmost node of the tree, i.e. the
-                    # rightmost node in the partition array, and if n_threads >= 2, one
-                    # might have right_counts[-1] = 0 and right_offset[-1] = len(sample_indices)
-                    # leading to evaluating
-                    #
-                    #    &sample_indices[right_offset[-1]] = &samples_indices[n_samples_at_node]
-                    #                                      = &partition[n_samples_in_tree]
-                    #
-                    # which is an out-of-bounds read access that can cause a segmentation fault.
-                    # When boundscheck=True, removing this check produces this exception:
-                    #
-                    #    IndexError: Out of bounds on buffer access
-                    #
-                    memcpy(
-                        &sample_indices[right_offset[thread_idx]],
-                        &right_indices_buffer[offset_in_buffers[thread_idx]],
-                        sizeof(unsigned int) * right_counts[thread_idx]
-                    )
+            for i in range(left_count):
+                sample_indices[i] = left_indices_buffer[i]
+            for i in range(right_count):
+                sample_indices[right_child_position + i] = right_indices_buffer[i]
 
         return (sample_indices[:right_child_position],
                 sample_indices[right_child_position:],
@@ -484,7 +393,6 @@ cdef class Splitter:
             const uint8_t [::1] has_missing_values = self.has_missing_values
             const uint8_t [::1] is_categorical = self.is_categorical
             const signed char [::1] monotonic_cst = self.monotonic_cst
-            int n_threads = self.n_threads
             bint has_interaction_cst = False
             Y_DTYPE_C feature_fraction_per_split = self.feature_fraction_per_split
             uint8_t [:] subsample_mask  # same as npy_bool
@@ -517,8 +425,7 @@ cdef class Splitter:
 
             # split_info_idx is index of split_infos of size n_allowed_features.
             # features_idx is the index of the feature column in X.
-            for split_info_idx in prange(n_allowed_features, schedule='static',
-                                         num_threads=n_threads):
+            for split_info_idx in range(n_allowed_features):
                 if has_interaction_cst:
                     feature_idx = allowed_features[split_info_idx]
                 else:

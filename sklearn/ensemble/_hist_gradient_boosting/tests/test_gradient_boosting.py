@@ -38,11 +38,8 @@ from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import KBinsDiscretizer, MinMaxScaler, OneHotEncoder
 from sklearn.utils import check_random_state, shuffle
-from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils._testing import _convert_container
 from sklearn.utils.fixes import _IS_32BIT
-
-n_threads = _openmp_effective_n_threads()
 
 X_classification, y_classification = make_classification(random_state=0)
 X_regression, y_regression = make_regression(random_state=0)
@@ -800,7 +797,7 @@ def test_sum_hessians_are_sample_weight(Loss):
         sample_weight=sample_weight,
         gradient_out=gradients,
         hessian_out=hessians,
-        n_threads=n_threads,
+        n_threads=1,
     )
 
     # build sum_sample_weight which contains the sum of the sample weights at

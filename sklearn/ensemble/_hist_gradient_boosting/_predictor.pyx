@@ -1,7 +1,6 @@
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-from cython.parallel import prange
 from libc.math cimport isnan
 import numpy as np
 
@@ -20,14 +19,12 @@ def _predict_from_raw_data(  # raw data = non-binned data
         const BITSET_INNER_DTYPE_C [:, ::1] raw_left_cat_bitsets,
         const BITSET_INNER_DTYPE_C [:, ::1] known_cat_bitsets,
         const unsigned int [::1] f_idx_map,
-        int n_threads,
         Y_DTYPE_C [:] out):
 
     cdef:
         int i
 
-    for i in prange(numeric_data.shape[0], schedule='static', nogil=True,
-                    num_threads=n_threads):
+    for i in range(numeric_data.shape[0]):
         out[i] = _predict_one_from_raw_data(
             nodes, numeric_data, raw_left_cat_bitsets,
             known_cat_bitsets,
@@ -41,9 +38,6 @@ cdef inline Y_DTYPE_C _predict_one_from_raw_data(
         const BITSET_INNER_DTYPE_C [:, ::1] known_cat_bitsets,
         const unsigned int [::1] f_idx_map,
         const int row) noexcept nogil:
-    # Need to pass the whole array and the row index, else prange won't work.
-    # See issue Cython #2798
-
     cdef:
         node_struct node = nodes[0]
         unsigned int node_idx = 0
@@ -90,14 +84,12 @@ def _predict_from_binned_data(
         const X_BINNED_DTYPE_C [:, :] binned_data,
         BITSET_INNER_DTYPE_C [:, :] binned_left_cat_bitsets,
         const uint8_t missing_values_bin_idx,
-        int n_threads,
         Y_DTYPE_C [:] out):
 
     cdef:
         int i
 
-    for i in prange(binned_data.shape[0], schedule='static', nogil=True,
-                    num_threads=n_threads):
+    for i in range(binned_data.shape[0]):
         out[i] = _predict_one_from_binned_data(nodes,
                                                binned_data,
                                                binned_left_cat_bitsets, i,
@@ -110,9 +102,6 @@ cdef inline Y_DTYPE_C _predict_one_from_binned_data(
         const BITSET_INNER_DTYPE_C [:, :] binned_left_cat_bitsets,
         const int row,
         const uint8_t missing_values_bin_idx) noexcept nogil:
-    # Need to pass the whole array and the row index, else prange won't work.
-    # See issue Cython #2798
-
     cdef:
         node_struct node = nodes[0]
         unsigned int node_idx = 0

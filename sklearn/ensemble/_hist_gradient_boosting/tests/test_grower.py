@@ -13,9 +13,6 @@ from sklearn.ensemble._hist_gradient_boosting.common import (
 )
 from sklearn.ensemble._hist_gradient_boosting.grower import TreeGrower
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
-
-n_threads = _openmp_effective_n_threads()
 
 
 def _make_training_data(n_bins=256, constant_hessian=True):
@@ -200,13 +197,13 @@ def test_predictor_from_grower():
     )
     missing_values_bin_idx = n_bins - 1
     predictions = predictor.predict_binned(
-        input_data, missing_values_bin_idx, n_threads
+        input_data, missing_values_bin_idx
     )
     expected_targets = [1, 1, 1, 1, 1, 1, -1, -1, -1]
     assert np.allclose(predictions, expected_targets)
 
     # Check that training set can be recovered exactly:
-    predictions = predictor.predict_binned(X_binned, missing_values_bin_idx, n_threads)
+    predictions = predictor.predict_binned(X_binned, missing_values_bin_idx)
     assert np.allclose(predictions, -all_gradients)
 
 
@@ -385,7 +382,7 @@ def test_missing_value_predict_only():
     known_cat_bitsets = np.zeros((0, 8), dtype=X_BITSET_INNER_DTYPE)
     f_idx_map = np.zeros(0, dtype=np.uint32)
 
-    y_pred = predictor.predict(all_nans, known_cat_bitsets, f_idx_map, n_threads)
+    y_pred = predictor.predict(all_nans, known_cat_bitsets, f_idx_map)
     assert np.all(y_pred == prediction_main_path)
 
 
@@ -413,7 +410,6 @@ def test_split_on_nan_with_infinite_values():
         n_bins_non_missing=n_bins_non_missing,
         has_missing_values=has_missing_values,
         min_samples_leaf=1,
-        n_threads=n_threads,
     )
 
     grower.grow()
@@ -429,11 +425,10 @@ def test_split_on_nan_with_infinite_values():
     # Make sure in particular that the +inf sample is mapped to the left child
     # Note that lightgbm "fails" here and will assign the inf sample to the
     # right child, even though it's a "split on nan" situation.
-    predictions = predictor.predict(X, known_cat_bitsets, f_idx_map, n_threads)
+    predictions = predictor.predict(X, known_cat_bitsets, f_idx_map)
     predictions_binned = predictor.predict_binned(
         X_binned,
         missing_values_bin_idx=bin_mapper.missing_values_bin_idx_,
-        n_threads=n_threads,
     )
     np.testing.assert_allclose(predictions, -gradients)
     np.testing.assert_allclose(predictions_binned, -gradients)
@@ -457,7 +452,6 @@ def test_grow_tree_categories():
         shrinkage=1.0,
         min_samples_leaf=1,
         is_categorical=is_categorical,
-        n_threads=n_threads,
     )
     grower.grow()
     assert grower.n_nodes == 3
@@ -495,7 +489,6 @@ def test_grow_tree_categories():
     prediction_binned = predictor.predict_binned(
         np.asarray([[6]]).astype(X_BINNED_DTYPE),
         missing_values_bin_idx=6,
-        n_threads=n_threads,
     )
     assert_allclose(prediction_binned, [-1])  # negative gradient
 
@@ -504,7 +497,7 @@ def test_grow_tree_categories():
     known_cat_bitsets = np.zeros((1, 8), dtype=np.uint32)  # ignored anyway
     f_idx_map = np.array([0], dtype=np.uint32)
     prediction = predictor.predict(
-        np.array([[np.nan]]), known_cat_bitsets, f_idx_map, n_threads
+        np.array([[np.nan]]), known_cat_bitsets, f_idx_map
     )
     assert_allclose(prediction, [-1])
 
@@ -548,7 +541,7 @@ def test_ohe_equivalence(min_samples_leaf, n_unique_categories, target):
         binning_thresholds=np.zeros((1, n_unique_categories))
     )
     preds = predictor.predict_binned(
-        X_binned, missing_values_bin_idx=255, n_threads=n_threads
+        X_binned, missing_values_bin_idx=255
     )
 
     grower_ohe = TreeGrower(X_ohe, gradients, hessians, **grower_params)
@@ -557,7 +550,7 @@ def test_ohe_equivalence(min_samples_leaf, n_unique_categories, target):
         binning_thresholds=np.zeros((X_ohe.shape[1], n_unique_categories))
     )
     preds_ohe = predictor_ohe.predict_binned(
-        X_ohe, missing_values_bin_idx=255, n_threads=n_threads
+        X_ohe, missing_values_bin_idx=255
     )
 
     assert predictor.get_max_depth() <= predictor_ohe.get_max_depth()
@@ -602,7 +595,6 @@ def test_grower_interaction_constraints():
             n_bins=n_bins,
             min_samples_leaf=1,
             interaction_cst=interaction_cst,
-            n_threads=n_threads,
         )
         grower.grow()
 

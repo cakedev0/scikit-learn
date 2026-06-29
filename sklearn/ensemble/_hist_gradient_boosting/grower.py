@@ -23,7 +23,6 @@ from sklearn.ensemble._hist_gradient_boosting.histogram import HistogramBuilder
 from sklearn.ensemble._hist_gradient_boosting.predictor import TreePredictor
 from sklearn.ensemble._hist_gradient_boosting.splitting import Splitter
 from sklearn.utils._bitset import set_raw_bitset_from_binned_bitset
-from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 
 
 class TreeNode:
@@ -212,12 +211,6 @@ class TreeGrower:
     shrinkage : float, default=1.
         The shrinkage parameter to apply to the leaves values, also known as
         learning rate.
-    n_threads : int, default=None
-        Number of OpenMP threads to use. `_openmp_effective_n_threads` is called
-        to determine the effective number of threads use, which takes cgroups CPU
-        quotes into account. See the docstring of `_openmp_effective_n_threads`
-        for details.
-
     Attributes
     ----------
     histogram_builder : HistogramBuilder
@@ -261,15 +254,12 @@ class TreeGrower:
         feature_fraction_per_split=1.0,
         rng=np.random.default_rng(),
         shrinkage=1.0,
-        n_threads=None,
     ):
         self._validate_parameters(
             X_binned,
             min_gain_to_split,
             min_hessian_to_split,
         )
-        n_threads = _openmp_effective_n_threads(n_threads)
-
         if n_bins_non_missing is None:
             n_bins_non_missing = n_bins - 1
 
@@ -311,7 +301,7 @@ class TreeGrower:
 
         hessians_are_constant = hessians.shape[0] == 1
         self.histogram_builder = HistogramBuilder(
-            X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
+            X_binned, n_bins, gradients, hessians, hessians_are_constant
         )
         missing_values_bin_idx = n_bins - 1
         self.splitter = Splitter(
@@ -328,7 +318,6 @@ class TreeGrower:
             hessians_are_constant=hessians_are_constant,
             feature_fraction_per_split=feature_fraction_per_split,
             rng=rng,
-            n_threads=n_threads,
         )
         self.X_binned = X_binned
         self.max_leaf_nodes = max_leaf_nodes
@@ -344,7 +333,6 @@ class TreeGrower:
         self.l2_regularization = l2_regularization
         self.shrinkage = shrinkage
         self.n_features = X_binned.shape[1]
-        self.n_threads = n_threads
         self.splittable_nodes = []
         self.finalized_leaves = []
         self.total_find_split_time = 0.0  # time spent finding the best splits
