@@ -52,7 +52,11 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         X_columns = []
 
         if is_df_or_series(X):
-            X = nw.from_native(X)
+            try:
+                X = nw.from_native(X)
+            except TypeError:
+                msg = f"Expected a 2-dimensional container but got {type(X)} instead."
+                raise ValueError(msg)
             n_samples, n_features = X.shape
             for i in range(n_features):
                 Xi = X[:, i]

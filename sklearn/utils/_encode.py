@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from numbers import Real
 from typing import NamedTuple
 
+import narwhals as nw
 import numpy as np
 
 from sklearn.utils._array_api import device, get_namespace, size
@@ -43,7 +44,7 @@ def _unique(values, *, return_inverse=False, return_counts=False):
         The number of times each of the unique values comes up in the original
         array. Only provided if `return_counts` is True.
     """
-    if values.dtype == object:
+    if isinstance(values, nw.Series) or values.dtype == object:
         return _unique_python(
             values, return_inverse=return_inverse, return_counts=return_counts
         )
@@ -187,14 +188,14 @@ def _unique_python(values, *, return_inverse, return_counts):
         uniques_set, missing_values = _extract_missing(uniques_set)
 
         uniques = sorted(uniques_set)
-        uniques.extend(missing_values.to_list())
-        uniques = np.array(uniques, dtype=values.dtype)
     except TypeError:
         types = sorted(t.__qualname__ for t in set(type(v) for v in values))
         raise TypeError(
             "Encoders require their input argument must be uniformly "
             f"strings or numbers. Got {types}"
         )
+    uniques.extend(missing_values.to_list())
+    uniques = np.array(uniques, dtype=object)
     ret = (uniques,)
 
     if return_inverse:
@@ -270,7 +271,7 @@ def _encode(values, *, uniques, return_diff=False):
         returned if ``return_diff=True``.
     """
     xp, _ = get_namespace(values, uniques)
-    if not xp.isdtype(values.dtype, "numeric"):
+    if isinstance(values, nw.Series) or not xp.isdtype(values.dtype, "numeric"):
         encoded = _map_to_integer(values, uniques)
     else:
         encoded = xp.searchsorted(uniques, values)
@@ -305,24 +306,11 @@ def _get_counts(values, uniques, nan_values=(np.nan,)):
     to be the last item in `uniques`, if it was one of the values.  For
     non-object dtypes, `uniques` is assumed to be sorted.
     """
-    if values.dtype.kind in "OU":
-        counter = Counter(values)
-        output = np.zeros(len(uniques), dtype=np.int64)
-        for i, item in enumerate(uniques):
-            output[i] = counter[item]
-        if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
-            # Should be the sum of all nans:
-            output[-1] = sum(counter[nan] for nan in nan_values)
-        return output
-
-    unique_values, counts = _unique_np(values, return_counts=True)
-
-    # Recorder unique_values based on input: `uniques`
-    uniques_in_values = np.isin(uniques, unique_values, assume_unique=True)
-    if np.isnan(unique_values[-1]) and np.isnan(uniques[-1]):
-        uniques_in_values[-1] = True
-
-    unique_valid_indices = np.searchsorted(unique_values, uniques[uniques_in_values])
-    output = np.zeros_like(uniques, dtype=np.int64)
-    output[uniques_in_values] = counts[unique_valid_indices]
+    counter = Counter(values)
+    output = np.zeros(len(uniques), dtype=np.int64)
+    for i, item in enumerate(uniques):
+        output[i] = counter[item]
+    if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
+        # Should be the sum of all nans:
+        output[-1] = sum(counter[nan] for nan in nan_values)
     return output
