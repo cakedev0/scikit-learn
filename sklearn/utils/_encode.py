@@ -206,6 +206,52 @@ def _unique_python(values, *, return_inverse, return_counts):
     return ret[0] if len(ret) == 1 else ret
 
 
+def _unique_categorical(
+    values, *, return_inverse=False, return_counts=False, filter_present=True
+):
+    """Find uniques for categorical pandas Series without materializing values."""
+    uniques = values.cat.categories.to_numpy()
+    codes = values.cat.codes.to_numpy(copy=True)
+    isna = codes == -1
+    is_numeric = np.issubdtype(uniques.dtype, np.number)
+    if is_numeric:
+        is_sorted = (uniques[:-1] < uniques[1:]).all()
+        # Pandas sorts numerical categories but user-specified categorical dtypes
+        # can still be unordered. We reject unordered numerical categories because
+        # downstream numerical encoding might rely on sorted categories.
+        if not is_sorted:
+            raise TypeError(
+                "Unsorted categories are not supported for numerical categorical data"
+            )
+
+    codes[isna] = uniques.size
+    if isna.any():
+        if is_numeric:
+            uniques = np.r_[uniques, np.nan]
+        else:
+            uniques = np.r_[uniques.astype(object, copy=False), np.nan]
+
+    if filter_present or return_counts:
+        counts = np.bincount(codes, minlength=uniques.size)
+        is_present = counts > 0
+    if filter_present and not is_present.all():
+        codes_mapping = np.empty_like(is_present, dtype=np.intp)
+        codes_mapping[is_present] = np.arange(is_present.sum())
+        codes = codes_mapping[codes]
+        uniques = uniques[is_present]
+        counts = counts[is_present]
+
+    ret = (uniques,)
+
+    if return_inverse:
+        ret += (codes,)
+
+    if return_counts:
+        ret += (counts,)
+
+    return ret[0] if len(ret) == 1 else ret
+
+
 def _encode_labels(values, *, uniques):
     """Encode labels into [0, n_uniques - 1].
 
