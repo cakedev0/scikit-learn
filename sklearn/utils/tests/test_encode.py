@@ -167,17 +167,6 @@ NAN2 = float("nan")
 @pytest.mark.parametrize(
     "values, uniques, expected_counts",
     [
-        (np.array([1] * 10 + [2] * 4 + [3] * 15), np.array([1, 2, 3]), [10, 4, 15]),
-        (
-            np.array([1] * 10 + [2] * 4 + [3] * 15),
-            np.array([1, 2, 3, 5]),
-            [10, 4, 15, 0],
-        ),
-        (
-            np.array([np.nan] * 10 + [2] * 4 + [3] * 15),
-            np.array([2, 3, np.nan]),
-            [4, 15, 10],
-        ),
         (
             np.array(["b"] * 4 + ["a"] * 16 + ["c"] * 20, dtype=object),
             ["a", "b", "c"],

@@ -176,6 +176,11 @@ def _map_to_integer(values, uniques):
 
     Values not present in `uniques` are encoded as -1.
     """
+    mapping = {val: i for i, val in enumerate(uniques)}
+    if isinstance(values, nw.Series):
+        ret = values.replace_strict(mapping, default=-1).to_numpy().copy()
+        ret[np.isnan(ret)] = -1
+        return ret.astype(int)
     xp, _ = get_namespace(values, uniques)
     table = _nandict({val: i for i, val in enumerate(uniques)})
     return xp.asarray([table[v] for v in values], device=device(values))
@@ -183,8 +188,13 @@ def _map_to_integer(values, uniques):
 
 def _unique_python(values, *, return_inverse, return_counts):
     # Only used in `_unique`, see docstring there for details
-    try:
+    vc = None
+    if isinstance(values, nw.Series):
+        vc = values.value_counts().sort(by=values.name)
+        uniques_set = set(vc[:, 0])
+    else:
         uniques_set = set(values)
+    try:
         uniques_set, missing_values = _extract_missing(uniques_set)
 
         uniques = sorted(uniques_set)
@@ -199,10 +209,14 @@ def _unique_python(values, *, return_inverse, return_counts):
     ret = (uniques,)
 
     if return_inverse:
-        ret += (_map_to_integer(values, uniques),)
+        ret += (_map_to_integer(list(values), uniques),)
 
     if return_counts:
-        ret += (_get_counts(values, uniques, missing_values.all_nans),)
+        if vc is None:
+            ret += (_get_counts(values, uniques, missing_values.all_nans),)
+        else:
+            # FIXME: account for nans
+            ret += (vc[:, 1].to_numpy(),)
 
     return ret[0] if len(ret) == 1 else ret
 
