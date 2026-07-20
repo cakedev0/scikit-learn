@@ -44,7 +44,11 @@ def _unique(values, *, return_inverse=False, return_counts=False):
         The number of times each of the unique values comes up in the original
         array. Only provided if `return_counts` is True.
     """
-    if isinstance(values, nw.Series) or values.dtype == object:
+    if isinstance(values, nw.Series):
+        return _unique_object_series(
+            values, return_inverse=return_inverse, return_counts=return_counts
+        )
+    if values.dtype == object:
         return _unique_python(
             values, return_inverse=return_inverse, return_counts=return_counts
         )
@@ -176,27 +180,38 @@ def _map_to_integer(values, uniques):
 
     Values not present in `uniques` are encoded as -1.
     """
-    mapping = {val: i for i, val in enumerate(uniques)}
-    if isinstance(values, nw.Series):
-        ret = values.replace_strict(mapping, default=-1).to_numpy().copy()
-        ret[np.isnan(ret)] = -1
-        return ret.astype(int)
     xp, _ = get_namespace(values, uniques)
     table = _nandict({val: i for i, val in enumerate(uniques)})
     return xp.asarray([table[v] for v in values], device=device(values))
 
 
+def _encode_series(values, uniques):
+    """Map values based on their position in uniques."""
+    mapping = {val: i for i, val in enumerate(uniques)}
+    return values.replace_strict(mapping, default=-1).to_numpy().copy()
+
+
+def _unique_object_series(values, *, return_inverse, return_counts):
+    # Only used in `_unique`, see docstring there for details
+    value_counts = values.value_counts().sort(by=values.name, nulls_last=True)
+    uniques = value_counts[:, 0].to_numpy()
+    counts = value_counts[:, 1].to_numpy()
+
+    ret = (uniques,)
+    if return_inverse:
+        ret += (_encode_series(values, uniques),)
+
+    if return_counts:
+        ret += (counts,)
+
+    return ret[0] if len(ret) == 1 else ret
+
+
 def _unique_python(values, *, return_inverse, return_counts):
     # Only used in `_unique`, see docstring there for details
-    vc = None
-    if isinstance(values, nw.Series):
-        vc = values.value_counts().sort(by=values.name)
-        uniques_set = set(vc[:, 0])
-    else:
-        uniques_set = set(values)
+    uniques_set = set(values)
+    uniques_set, missing_values = _extract_missing(uniques_set)
     try:
-        uniques_set, missing_values = _extract_missing(uniques_set)
-
         uniques = sorted(uniques_set)
     except TypeError:
         types = sorted(t.__qualname__ for t in set(type(v) for v in values))
@@ -212,11 +227,7 @@ def _unique_python(values, *, return_inverse, return_counts):
         ret += (_map_to_integer(list(values), uniques),)
 
     if return_counts:
-        if vc is None:
-            ret += (_get_counts(values, uniques, missing_values.all_nans),)
-        else:
-            # FIXME: account for nans
-            ret += (vc[:, 1].to_numpy(),)
+        ret += (_get_counts(values, uniques, missing_values.all_nans),)
 
     return ret[0] if len(ret) == 1 else ret
 
@@ -285,7 +296,9 @@ def _encode(values, *, uniques, return_diff=False):
         returned if ``return_diff=True``.
     """
     xp, _ = get_namespace(values, uniques)
-    if isinstance(values, nw.Series) or not xp.isdtype(values.dtype, "numeric"):
+    if isinstance(values, nw.Series):
+        encoded = _encode_series(values, uniques)
+    elif not xp.isdtype(values.dtype, "numeric"):
         encoded = _map_to_integer(values, uniques)
     else:
         encoded = xp.searchsorted(uniques, values)
