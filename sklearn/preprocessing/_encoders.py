@@ -5,7 +5,7 @@ import numbers
 import warnings
 from numbers import Integral
 
-import narwhals as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 from scipy import sparse
 
@@ -18,6 +18,7 @@ from sklearn.base import (
 from sklearn.utils import _align_api_if_sparse, check_array
 from sklearn.utils._dataframe import is_df_or_series
 from sklearn.utils._encode import _encode, _get_counts, _unique
+from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._mask import _get_mask
 from sklearn.utils._missing import is_scalar_nan
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
@@ -216,7 +217,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
             if not np.all(X_mask[:, i]):
                 if handle_unknown == "error":
-                    diff = _unique(Xi[~X_mask[:, i]])
+                    diff = _unique(_safe_indexing(Xi, ~X_mask[:, i]))
                     msg = (
                         "Found unknown categories {0} in column {1}"
                         " during transform".format(diff, i)

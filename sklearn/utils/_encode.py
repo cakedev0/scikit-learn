@@ -6,10 +6,11 @@ from collections.abc import Iterable
 from numbers import Real
 from typing import NamedTuple
 
-import narwhals as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 
 from sklearn.utils._array_api import device, get_namespace, size
+from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._missing import is_scalar_nan
 
 
@@ -316,7 +317,7 @@ def _encode(values, *, uniques, return_diff=False):
         encoded[~matches] = -1
 
     if return_diff:
-        diff = _unique(values[encoded == -1])
+        diff = _unique(_safe_indexing(values, encoded == -1))
         return encoded, diff
 
     return encoded
