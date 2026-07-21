@@ -329,11 +329,24 @@ def _get_counts(values, uniques, nan_values=(np.nan,)):
     to be the last item in `uniques`, if it was one of the values.  For
     non-object dtypes, `uniques` is assumed to be sorted.
     """
-    counter = Counter(values)
-    output = np.zeros(len(uniques), dtype=np.int64)
-    for i, item in enumerate(uniques):
-        output[i] = counter[item]
-    if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
-        # Should be the sum of all nans:
-        output[-1] = sum(counter[nan] for nan in nan_values)
+    if values.dtype.kind in "OU":
+        counter = Counter(values)
+        output = np.zeros(len(uniques), dtype=np.int64)
+        for i, item in enumerate(uniques):
+            output[i] = counter[item]
+        if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
+            # Should be the sum of all nans:
+            output[-1] = sum(counter[nan] for nan in nan_values)
+        return output
+
+    unique_values, counts = _unique_np(values, return_counts=True)
+
+    # Recorder unique_values based on input: `uniques`
+    uniques_in_values = np.isin(uniques, unique_values, assume_unique=True)
+    if np.isnan(unique_values[-1]) and np.isnan(uniques[-1]):
+        uniques_in_values[-1] = True
+
+    unique_valid_indices = np.searchsorted(unique_values, uniques[uniques_in_values])
+    output = np.zeros_like(uniques, dtype=np.int64)
+    output[uniques_in_values] = counts[unique_valid_indices]
     return output
