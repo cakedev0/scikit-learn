@@ -6,10 +6,11 @@ from collections.abc import Iterable
 from numbers import Real
 from typing import NamedTuple
 
-import narwhals as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 
 from sklearn.utils._array_api import device, get_namespace, size
+from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._missing import is_scalar_nan
 
 
@@ -335,7 +336,7 @@ def _encode(values, *, uniques, return_diff=False, cache=None):
         encoded[~matches] = -1
 
     if return_diff:
-        diff = _unique(values[encoded == -1])
+        diff = _unique(_safe_indexing(values, encoded == -1))
         return encoded, diff
 
     return encoded
@@ -348,11 +349,24 @@ def _get_counts(values, uniques, nan_values=(np.nan,)):
     to be the last item in `uniques`, if it was one of the values.  For
     non-object dtypes, `uniques` is assumed to be sorted.
     """
-    counter = Counter(values)
-    output = np.zeros(len(uniques), dtype=np.int64)
-    for i, item in enumerate(uniques):
-        output[i] = counter[item]
-    if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
-        # Should be the sum of all nans:
-        output[-1] = sum(counter[nan] for nan in nan_values)
+    if values.dtype.kind in "OU":
+        counter = Counter(values)
+        output = np.zeros(len(uniques), dtype=np.int64)
+        for i, item in enumerate(uniques):
+            output[i] = counter[item]
+        if len(uniques) > 0 and is_scalar_nan(uniques[-1]):
+            # Should be the sum of all nans:
+            output[-1] = sum(counter[nan] for nan in nan_values)
+        return output
+
+    unique_values, counts = _unique_np(values, return_counts=True)
+
+    # Recorder unique_values based on input: `uniques`
+    uniques_in_values = np.isin(uniques, unique_values, assume_unique=True)
+    if np.isnan(unique_values[-1]) and np.isnan(uniques[-1]):
+        uniques_in_values[-1] = True
+
+    unique_valid_indices = np.searchsorted(unique_values, uniques[uniques_in_values])
+    output = np.zeros_like(uniques, dtype=np.int64)
+    output[uniques_in_values] = counts[unique_valid_indices]
     return output

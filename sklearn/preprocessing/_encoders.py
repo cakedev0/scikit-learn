@@ -5,7 +5,7 @@ import numbers
 import warnings
 from numbers import Integral
 
-import narwhals as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 from scipy import sparse
 
@@ -20,6 +20,7 @@ from sklearn.utils._dataframe import (
     is_df_or_series,
 )
 from sklearn.utils._encode import _encode, _get_counts, _unique
+from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._mask import _get_mask
 from sklearn.utils._missing import is_scalar_nan
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
@@ -117,7 +118,12 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
                 else:
                     cats = result
             else:
-                if np.issubdtype(Xi.dtype, np.str_):
+                # narwhals Series columns (non-numeric dataframe columns, see
+                # `_check_X`) don't carry a numpy dtype, but are always
+                # non-numeric, so they are treated like object/string columns.
+                Xi_is_series = isinstance(Xi, nw.Series)
+
+                if Xi_is_series or np.issubdtype(Xi.dtype, np.str_):
                     # Always convert string categories to objects to avoid
                     # unexpected string truncation for longer category labels
                     # passed in the constructor.
@@ -129,6 +135,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
                 if (
                     cats.dtype == object
                     and isinstance(cats[0], bytes)
+                    and not Xi_is_series
                     and Xi.dtype.kind != "S"
                 ):
                     msg = (
@@ -154,7 +161,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
                     )
                     raise ValueError(msg)
 
-                if Xi.dtype.kind not in "OUS":
+                if not Xi_is_series and Xi.dtype.kind not in "OUS":
                     sorted_cats = np.sort(cats)
                     error_msg = (
                         "Unsorted categories are not supported for numerical categories"
@@ -230,7 +237,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
             if not np.all(X_mask[:, i]):
                 if handle_unknown == "error":
-                    diff = _unique(Xi[~X_mask[:, i]])
+                    diff = _unique(_safe_indexing(Xi, ~X_mask[:, i]))
                     msg = (
                         "Found unknown categories {0} in column {1}"
                         " during transform".format(diff, i)
