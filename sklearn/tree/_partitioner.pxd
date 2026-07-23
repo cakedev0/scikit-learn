@@ -141,12 +141,64 @@ cdef class DensePartitioner:
         float32_t* min_feature_value_out,
         float32_t* max_feature_value_out,
     ) noexcept nogil
-    cdef void next_p(
+    cdef inline void next_p(
         self,
         intp_t* p_prev,
         intp_t* p,
-        bint missing_go_to_left
-    ) noexcept nogil
+        bint missing_go_to_left,
+    ) noexcept nogil:
+        """
+        Compute the next p_prev and p for iterating over feature values.
+
+        This method is used inside the best-split search function pass which starts
+        by setting p = start at the beginning of each search pass and calls
+        this method repeatedly with the same missing_go_to_left as for that pass.
+        The expected layout of self.feature_values[start:end] is:
+        - first pass (missing_go_to_left=False): after
+          sort_samples_and_feature_values(), non-missing values are sorted and
+          missing values are grouped at the right;
+        - second pass (missing_go_to_left=True): after
+          shift_missing_to_the_left(), missing values are grouped at the left.
+
+        Given that layout, this method advances p to the next valid split
+        position while skipping ties up to FEATURE_THRESHOLD:
+        - if missing_go_to_left: iterate p in [start + n_missing + 1, end)
+        - otherwise: iterate p in [start, end - n_missing].
+          The special case p == end - n_missing corresponds to "all non-missing
+          values on the left and all missing values on the right". The next
+          call then sets p to end to terminate the search loop.
+        """
+        cdef intp_t end_non_missing = (
+            self.end if missing_go_to_left
+            else self.end - self.n_missing)
+
+        # First pass special end marker: include "all non-missing left, all missing right"
+        if p[0] == end_non_missing and not missing_go_to_left:
+            p[0] = self.end
+            p_prev[0] = self.end
+            return
+
+        # Second pass starts with missing on the left; jump to first non-missing
+        if missing_go_to_left and p[0] == self.start:
+            p[0] = self.start + self.n_missing
+
+        # Move to next candidate split position
+        p[0] += 1
+
+        if self.n_categories_current > 0:
+            while (
+                p[0] < end_non_missing and
+                self.feature_values[p[0]] == self.feature_values[p[0] - 1]
+            ):
+                p[0] += 1
+        else:
+            while (
+                p[0] < end_non_missing and
+                self.feature_values[p[0]] <= self.feature_values[p[0] - 1] + FEATURE_THRESHOLD
+            ):
+                p[0] += 1
+
+        p_prev[0] = p[0] - 1
     cdef intp_t partition_samples(
         self,
         float64_t current_threshold,
@@ -157,12 +209,33 @@ cdef class DensePartitioner:
         const SplitRecord* best_split,
     ) noexcept nogil
 
-    cdef void cat_position_to_split_bitset(
+    cdef inline void cat_position_to_split_bitset(
         self,
         intp_t position,
         bint missing_go_to_left,
-        BITSET_DTYPE_C left_cat_bitset
-    ) noexcept nogil
+        BITSET_DTYPE_C left_cat_bitset,
+    ) noexcept nogil:
+        """Convert a categorical split position into a bitset."""
+        cdef:
+            intp_t n_left_non_missing = position - self.start
+            intp_t offset = 0
+            intp_t r
+            intp_t c
+
+        if missing_go_to_left:
+            n_left_non_missing -= self.n_missing
+
+        init_bitset(left_cat_bitset)
+
+        if n_left_non_missing <= 0:
+            return
+
+        for r in range(self.n_categories_current):
+            c = self.sorted_cat[r]
+            set_bitset(left_cat_bitset, <uint8_t> c)
+            offset += self.counts[c]
+            if offset >= n_left_non_missing:
+                break
     cdef void sort_categories(
         self,
         intp_t nc
@@ -217,12 +290,34 @@ cdef class SparsePartitioner:
         float32_t* min_feature_value_out,
         float32_t* max_feature_value_out,
     ) noexcept nogil
-    cdef void next_p(
+    cdef inline void next_p(
         self,
         intp_t* p_prev,
         intp_t* p,
-        bint missing_go_to_left
-    ) noexcept nogil
+        bint missing_go_to_left,
+    ) noexcept nogil:
+        """Compute the next p_prev and p for iterating over feature values.
+
+        The missing_go_to_left argument is ignored for sparse data because
+        sparse partitioning does not currently support missing values.
+        """
+        cdef intp_t p_next
+
+        if p[0] + 1 != self.end_negative:
+            p_next = p[0] + 1
+        else:
+            p_next = self.start_positive
+
+        while (p_next < self.end and
+                self.feature_values[p_next] <= self.feature_values[p[0]] + FEATURE_THRESHOLD):
+            p[0] = p_next
+            if p[0] + 1 != self.end_negative:
+                p_next = p[0] + 1
+            else:
+                p_next = self.start_positive
+
+        p_prev[0] = p[0]
+        p[0] = p_next
     cdef intp_t partition_samples(
         self,
         float64_t current_threshold,
@@ -233,12 +328,14 @@ cdef class SparsePartitioner:
         const SplitRecord* best_split,
     ) noexcept nogil
 
-    cdef void cat_position_to_split_bitset(
+    cdef inline void cat_position_to_split_bitset(
         self,
         intp_t position,
         bint missing_go_to_left,
-        BITSET_DTYPE_C left_cat_bitset
-    ) noexcept nogil
+        BITSET_DTYPE_C left_cat_bitset,
+    ) noexcept nogil:
+        # Sparse categorical features are rejected before split search.
+        init_bitset(left_cat_bitset)
     cdef void extract_nnz(
         self,
         intp_t feature
