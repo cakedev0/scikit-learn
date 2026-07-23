@@ -3,9 +3,10 @@
 
 # See _utils.pyx for details.
 cimport numpy as cnp
+from libc.math cimport isnan
 from sklearn.neighbors._quad_tree cimport Cell
 from sklearn.utils._typedefs cimport float32_t, float64_t, intp_t, uint8_t, int32_t, uint32_t, uint64_t
-from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C, N_BITSETS
+from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C, N_BITSETS, in_bitset
 
 
 cdef enum:
@@ -31,13 +32,19 @@ cdef struct Node:
     uint8_t missing_go_to_left           # Whether features have missing values
 
 
-cdef bint goes_left(
+cdef inline bint goes_left(
     float64_t threshold,
     const BITSET_INNER_DTYPE_C* left_cat_bitset,
     bint missing_go_to_left,
     bint is_categorical,
     float32_t value,
-) noexcept nogil
+) noexcept nogil:
+    if isnan(value):
+        return missing_go_to_left
+    elif is_categorical:
+        return in_bitset(left_cat_bitset, <uint8_t> value)
+    else:
+        return value <= threshold
 
 
 cdef enum:
