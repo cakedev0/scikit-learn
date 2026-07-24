@@ -9,7 +9,7 @@ from typing import NamedTuple
 import narwhals.stable.v2 as nw
 import numpy as np
 
-from sklearn.utils._array_api import device, get_namespace, size
+from sklearn.utils._array_api import array_device, get_namespace, size
 from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._missing import is_scalar_nan
 
@@ -183,7 +183,7 @@ def _map_to_integer(values, uniques):
     """
     xp, _ = get_namespace(values, uniques)
     table = _nandict({val: i for i, val in enumerate(uniques)})
-    return xp.asarray([table[v] for v in values], device=device(values))
+    return xp.asarray([table[v] for v in values], device=array_device(values))
 
 
 def _encode_series(values, uniques):
@@ -305,7 +305,7 @@ def _encode(values, *, uniques, return_diff=False):
         encoded = xp.searchsorted(uniques, values)
         if size(uniques):
             max_idx = xp.asarray(
-                uniques.shape[0] - 1, dtype=encoded.dtype, device=device(encoded)
+                uniques.shape[0] - 1, dtype=encoded.dtype, device=array_device(encoded)
             )
             encoded_safe = xp.minimum(encoded, max_idx)
             matches = uniques[encoded_safe] == values
