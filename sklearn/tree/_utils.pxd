@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # See _utils.pyx for details.
-cimport numpy as cnp
 from libc.math cimport isnan
+from libc.math cimport log as ln
+from libc.stdlib cimport realloc
+
+cimport numpy as cnp
 from sklearn.neighbors._quad_tree cimport Cell
 from sklearn.utils._typedefs cimport float32_t, float64_t, intp_t, uint8_t, int32_t, uint32_t, uint64_t
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C, N_BITSETS, in_bitset
-
+from sklearn.utils._random cimport our_rand_r
 
 cdef enum:
     MAX_NUM_CATEGORIES = N_BITSETS
@@ -74,22 +77,32 @@ ctypedef fused realloc_ptr:
     (Cell*)
     (Node**)
 
+
 cdef int safe_realloc(realloc_ptr* p, size_t nelems) except -1 nogil
 
 
-cdef cnp.ndarray sizet_ptr_to_ndarray(intp_t* data, intp_t size)
+cdef inline cnp.ndarray sizet_ptr_to_ndarray(intp_t* data, intp_t size):
+    """Return copied data as 1D numpy array of intp's."""
+    cdef cnp.npy_intp shape[1]
+    shape[0] = <cnp.npy_intp> size
+    return cnp.PyArray_SimpleNewFromData(1, shape, cnp.NPY_INTP, data).copy()
 
 
-cdef intp_t rand_int(intp_t low, intp_t high,
-                     uint32_t* random_state) noexcept nogil
+cdef inline intp_t rand_int(intp_t low, intp_t high,
+                            uint32_t* random_state) noexcept nogil:
+    """Generate a random integer in [low; end)."""
+    return low + our_rand_r(random_state) % (high - low)
 
 
-cdef float64_t rand_uniform(float64_t low, float64_t high,
-                            uint32_t* random_state) noexcept nogil
+cdef inline float64_t rand_uniform(float64_t low, float64_t high,
+                                   uint32_t* random_state) noexcept nogil:
+    """Generate a random float64_t in [low; high)."""
+    return ((high - low) * <float64_t> our_rand_r(random_state) /
+            <float64_t> RAND_R_MAX) + low
 
 
-cdef float64_t log(float64_t x) noexcept nogil
-
+cdef inline float64_t log(float64_t x) noexcept nogil:
+    return ln(x) / ln(2.0)
 
 cdef class WeightedFenwickTree:
     cdef intp_t size         # number of leaves (ranks)
