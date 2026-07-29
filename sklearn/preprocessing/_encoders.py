@@ -5,6 +5,7 @@ import numbers
 import warnings
 from numbers import Integral
 
+import narwhals.stable.v2 as nw
 import numpy as np
 from scipy import sparse
 
@@ -14,8 +15,19 @@ from sklearn.base import (
     TransformerMixin,
     _fit_context,
 )
-from sklearn.utils import _align_api_if_sparse, _safe_indexing, check_array
-from sklearn.utils._encode import _encode, _get_counts, _unique
+from sklearn.utils import (
+    _align_api_if_sparse,
+    _safe_indexing,
+    assert_all_finite,
+    check_array,
+)
+from sklearn.utils._dataframe import is_pandas_df, is_pandas_df_or_series
+from sklearn.utils._encode import (
+    _encode,
+    _get_counts,
+    _unique,
+    _unique_categorical,
+)
 from sklearn.utils._mask import _get_mask
 from sklearn.utils._missing import is_scalar_nan
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
@@ -30,6 +42,21 @@ from sklearn.utils.validation import (
 __all__ = ["OneHotEncoder", "OrdinalEncoder"]
 
 
+def _categories_equal_with_nan(categories, known_categories):
+    """Check category equality while treating NaNs in matching positions as equal."""
+    if known_categories.size < categories.size:
+        return False
+
+    known_categories = known_categories[: categories.size]
+    equal = categories == known_categories
+    if not np.all(equal[:-1]):
+        return False
+
+    return equal[-1] or (
+        is_scalar_nan(categories[-1]) and is_scalar_nan(known_categories[-1])
+    )
+
+
 class _BaseEncoder(TransformerMixin, BaseEstimator):
     """
     Base class for encoders that includes the code to categorize and
@@ -37,7 +64,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
     """
 
-    def _check_X(self, X, ensure_all_finite=True):
+    def _check_X(self, X, ensure_all_finite=True, preserve_categorical=False):
         """
         Perform custom check_array:
         - convert list of strings to object dtype
@@ -49,7 +76,12 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
           and cannot be used, e.g. for the `categories_` attribute.
 
         """
-        if not (hasattr(X, "iloc") and getattr(X, "ndim", 0) == 2):
+        is_dataframe = is_pandas_df(X)
+        if is_dataframe:
+            # pandas dataframe, do validation later column by column, in order
+            # to keep the dtype information to be used in the encoder.
+            needs_validation = ensure_all_finite
+        else:
             # if not a dataframe, do normal check_array validation
             X_temp = check_array(X, dtype=None, ensure_all_finite=ensure_all_finite)
             if not hasattr(X, "dtype") and np.issubdtype(X_temp.dtype, np.str_):
@@ -57,22 +89,35 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
             else:
                 X = X_temp
             needs_validation = False
-        else:
-            # pandas dataframe, do validation later column by column, in order
-            # to keep the dtype information to be used in the encoder.
-            needs_validation = ensure_all_finite
 
         n_samples, n_features = X.shape
         X_columns = []
 
+        if n_samples == 0:
+            raise ValueError("Found empty array")
+
         for i in range(n_features):
             Xi = _safe_indexing(X, indices=i, axis=1)
-            Xi = check_array(
-                Xi, ensure_2d=False, dtype=None, ensure_all_finite=needs_validation
-            )
+            if not needs_validation:
+                X_columns.append(Xi)
+                continue
+            if is_dataframe and self._is_categorical(Xi) and preserve_categorical:
+                categories = _unique_categorical(Xi)
+                allow_nan = ensure_all_finite == "allow-nan"
+                assert_all_finite(categories, allow_nan=allow_nan)
+            elif needs_validation:
+                Xi = check_array(
+                    Xi, ensure_2d=False, dtype=None, ensure_all_finite=needs_validation
+                )
             X_columns.append(Xi)
 
         return X_columns, n_samples, n_features
+
+    def _is_categorical(self, Xi):
+        """Return True if the input is a Narwhals-supported Categorical Series."""
+        if not is_pandas_df_or_series(Xi):
+            return False
+        return nw.from_native(Xi, allow_series=True).dtype in (nw.Categorical, nw.Enum)
 
     def _fit(
         self,
@@ -85,7 +130,9 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         self._check_infrequent_enabled()
         validate_data(self, X=X, reset=True, skip_check_array=True)
         X_list, n_samples, n_features = self._check_X(
-            X, ensure_all_finite=ensure_all_finite
+            X,
+            ensure_all_finite=ensure_all_finite,
+            preserve_categorical=self.categories == "auto",
         )
         self.n_features_in_ = n_features
 
@@ -104,7 +151,10 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
             Xi = X_list[i]
 
             if self.categories == "auto":
-                result = _unique(Xi, return_counts=compute_counts)
+                if self._is_categorical(Xi):
+                    result = _unique_categorical(Xi, return_counts=compute_counts)
+                else:
+                    result = _unique(Xi, return_counts=compute_counts)
                 if compute_counts:
                     cats, counts = result
                     category_counts.append(counts)
@@ -200,7 +250,9 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         ignore_category_indices=None,
     ):
         X_list, n_samples, n_features = self._check_X(
-            X, ensure_all_finite=ensure_all_finite
+            X,
+            ensure_all_finite=ensure_all_finite,
+            preserve_categorical=True,
         )
         validate_data(self, X=X, reset=False, skip_check_array=True)
 
@@ -210,12 +262,17 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         columns_with_unknown = []
         for i in range(n_features):
             Xi = X_list[i]
-            X_int[:, i] = _encode(Xi, uniques=self.categories_[i])
+            if self._is_categorical(Xi):
+                encoded, diff = self._transform_categorical(Xi, self.categories_[i])
+            else:
+                encoded, diff = _encode(
+                    Xi, uniques=self.categories_[i], return_diff=True
+                )
+            X_int[:, i] = encoded
             X_mask[:, i] = X_int[:, i] != -1
 
             if not np.all(X_mask[:, i]):
                 if handle_unknown == "error":
-                    diff = _unique(Xi[~X_mask[:, i]])
                     msg = (
                         "Found unknown categories {0} in column {1}"
                         " during transform".format(diff, i)
@@ -242,6 +299,24 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
         self._map_infrequent_categories(X_int, X_mask, ignore_category_indices)
         return X_int, X_mask
+
+    def _transform_categorical(self, Xi, known_categories):
+        """Encode a Narwhals Categorical Series from its integer codes."""
+        categories, codes = _unique_categorical(
+            Xi, return_inverse=True, filter_present=False
+        )
+        if _categories_equal_with_nan(categories, known_categories):
+            return codes, []
+
+        encoded_categories, diff = _encode(
+            categories, uniques=known_categories, return_diff=True
+        )
+        valid_categories = encoded_categories != -1
+        valid_mask = valid_categories[codes]
+        encoded = np.full_like(codes, fill_value=-1)
+        encoded[valid_mask] = encoded_categories[codes[valid_mask]]
+
+        return encoded, diff
 
     @property
     def infrequent_categories_(self):
