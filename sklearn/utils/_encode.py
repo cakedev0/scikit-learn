@@ -190,10 +190,10 @@ def _map_to_integer(values, uniques, cache=None):
     xp, _ = get_namespace(values, uniques)
     if cache is None:
         table = _nandict({val: i for i, val in enumerate(uniques)})
+    elif "cache" in table:
+        table = cache["table"]
     else:
-        table = cache.get("table")
-        if table is None:
-            table = cache["table"] = _nandict({val: i for i, val in enumerate(uniques)})
+        table = cache["table"] = _nandict({val: i for i, val in enumerate(uniques)})
     return xp.asarray([table[v] for v in values], device=array_device(values))
 
 
