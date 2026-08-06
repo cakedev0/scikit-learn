@@ -161,7 +161,10 @@ def _extract_missing(values):
 
 
 class _nandict(dict):
-    """Dictionary with support for nans."""
+    """Dictionary with support for nans.
+
+    Accessing missing keys always return the -1 value instead of raising KeyError.
+    """
 
     def __init__(self, mapping):
         super().__init__(mapping)
@@ -207,13 +210,13 @@ def _unique_object_series(values, *, return_inverse, return_counts):
     # Only used in `_unique`, see docstring there for details
     value_counts = values.value_counts().sort(by=values.name, nulls_last=True)
     uniques = value_counts[:, 0].to_numpy()
-    counts = value_counts[:, 1].to_numpy()
 
     ret = (uniques,)
     if return_inverse:
         ret += (_encode_series(values, uniques),)
 
     if return_counts:
+        counts = value_counts[:, 1].to_numpy()
         ret += (counts,)
 
     return ret[0] if len(ret) == 1 else ret
@@ -323,6 +326,11 @@ def _encode(values, *, uniques, return_diff=False, cache=None):
     else:
         encoded = xp.searchsorted(uniques, values)
         if size(uniques):
+            # Post-process the results to collect unknown values and encode them
+            # as -1. Since xp.searchsorted can assign indices larger than the
+            # maximum index in uniques for large unknown values, we first clip
+            # them before checking the decoding the encoded values recovers
+            # the original values or not to identify the unknown values.
             max_idx = xp.asarray(
                 uniques.shape[0] - 1, dtype=encoded.dtype, device=array_device(encoded)
             )
