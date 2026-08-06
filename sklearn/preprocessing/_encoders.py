@@ -209,7 +209,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
                         raise ValueError(error_msg)
 
                 if handle_unknown == "error":
-                    _, diff = _encode(Xi, uniques=cats, return_diff=True)
+                    _, diff = _encode(_unique(Xi), uniques=cats, return_diff=True)
                     if diff.size:
                         msg = (
                             "Found unknown categories {0} in column {1}"
@@ -273,6 +273,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
             if not np.all(X_mask[:, i]):
                 if handle_unknown == "error":
+                    diff = _unique(Xi[~X_mask[:, i]])
                     msg = (
                         "Found unknown categories {0} in column {1}"
                         " during transform".format(diff, i)

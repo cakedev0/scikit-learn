@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from sklearn.utils._array_api import device, get_namespace, size
+from sklearn.utils._array_api import array_device, get_namespace, size
 from sklearn.utils._missing import is_scalar_nan
 
 
@@ -155,7 +155,10 @@ def _extract_missing(values):
 
 
 class _nandict(dict):
-    """Dictionary with support for nans."""
+    """Dictionary with support for nans.
+
+    Accessing missing keys always return the -1 value instead of raising KeyError.
+    """
 
     def __init__(self, mapping):
         super().__init__(mapping)
@@ -177,7 +180,7 @@ def _map_to_integer(values, uniques):
     """
     xp, _ = get_namespace(values, uniques)
     table = _nandict({val: i for i, val in enumerate(uniques)})
-    return xp.asarray([table[v] for v in values], device=device(values))
+    return xp.asarray([table[v] for v in values], device=array_device(values))
 
 
 def _unique_python(values, *, return_inverse, return_counts):
@@ -321,8 +324,13 @@ def _encode(values, *, uniques, return_diff=False):
     else:
         encoded = xp.searchsorted(uniques, values)
         if size(uniques):
+            # Post-process the results to collect unknown values and encode them
+            # as -1. Since xp.searchsorted can assign indices larger than the
+            # maximum index in uniques for large unknown values, we first clip
+            # them before checking the decoding the encoded values recovers
+            # the original values or not to identify the unknown values.
             max_idx = xp.asarray(
-                uniques.shape[0] - 1, dtype=encoded.dtype, device=device(encoded)
+                uniques.shape[0] - 1, dtype=encoded.dtype, device=array_device(encoded)
             )
             encoded_safe = xp.minimum(encoded, max_idx)
             matches = uniques[encoded_safe] == values
