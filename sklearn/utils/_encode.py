@@ -179,13 +179,24 @@ class _nandict(dict):
         return -1
 
 
-def _map_to_integer(values, uniques):
+def _map_to_integer(values, uniques, cache=None):
     """Map values based on their position in uniques.
 
     Values not present in `uniques` are encoded as -1.
+
+    `cache`, if given, is a plain dict that this function may use to avoid
+    rebuilding the `uniques` lookup table on every call: building it is
+    O(n_uniques), which otherwise dominates the cost of encoding small
+    batches against a large set of categories (e.g. repeated single-row
+    calls to `transform`).
     """
     xp, _ = get_namespace(values, uniques)
-    table = _nandict({val: i for i, val in enumerate(uniques)})
+    if cache is None:
+        table = _nandict({val: i for i, val in enumerate(uniques)})
+    elif "cache" in table:
+        table = cache["table"]
+    else:
+        table = cache["table"] = _nandict({val: i for i, val in enumerate(uniques)})
     return xp.asarray([table[v] for v in values], device=array_device(values))
 
 
@@ -268,7 +279,7 @@ def _encode_labels(values, *, uniques):
     return encoded
 
 
-def _encode(values, *, uniques, return_diff=False):
+def _encode(values, *, uniques, return_diff=False, cache=None):
     """Encode values into [0, n_uniques - 1].
 
     Uses pure python method for object dtype, and numpy method for
@@ -290,6 +301,14 @@ def _encode(values, *, uniques, return_diff=False):
     return_diff : bool, default=False
         If True, also return the unique values in `values` that are not
         present in `uniques`.
+    cache : dict, default=None
+        Mutable dict used to cache, across repeated calls with the same
+        `uniques`, the lookup table built from `uniques`. Only used for
+        object dtype (non-`narwhals.Series`) inputs, where building that
+        table is O(len(uniques)) and would otherwise dominate the cost of
+        encoding small batches (e.g. repeated single-row calls to
+        `transform`). Callers are responsible for invalidating (e.g.
+        replacing with a fresh dict) the cache whenever `uniques` changes.
 
     Returns
     -------
@@ -303,7 +322,7 @@ def _encode(values, *, uniques, return_diff=False):
     if isinstance(values, nw.Series):
         encoded = _encode_series(values, uniques)
     elif not xp.isdtype(values.dtype, "numeric"):
-        encoded = _map_to_integer(values, uniques)
+        encoded = _map_to_integer(values, uniques, cache=cache)
     else:
         encoded = xp.searchsorted(uniques, values)
         if size(uniques):

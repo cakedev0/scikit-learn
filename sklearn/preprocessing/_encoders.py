@@ -16,7 +16,9 @@ from sklearn.base import (
     _fit_context,
 )
 from sklearn.utils import _align_api_if_sparse, check_array
-from sklearn.utils._dataframe import is_df_or_series
+from sklearn.utils._dataframe import (
+    is_df_or_series,
+)
 from sklearn.utils._encode import _encode, _get_counts, _unique
 from sklearn.utils._indexing import _safe_indexing
 from sklearn.utils._mask import _get_mask
@@ -40,7 +42,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
     """
 
-    def _check_X(self, X):
+    def _check_X(self, X, transform=False):
         """
         Perform custom check_array:
         - convert list of strings to object dtype
@@ -49,10 +51,16 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
           constructed feature by feature to preserve the data types
           of pandas DataFrame columns, as otherwise information is lost
           and cannot be used, e.g. for the `categories_` attribute.
+
+        For small pandas/polars inputs, columns are extracted as plain numpy
+        arrays instead of going through `narwhals`: at this size, there's no
+        bulk work to vectorize, so `narwhals`'s own per-column overhead (e.g.
+        dtype introspection, building a `pandas.Index` for lookups) costs
+        more than it saves, and dominates `transform` latency (see gh-32368).
         """
         X_columns = []
 
-        if is_df_or_series(X):
+        if is_df_or_series(X) and (not transform or len(X) > 128):
             try:
                 X = nw.from_native(X)
             except TypeError:
@@ -176,6 +184,16 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
             self.categories_.append(cats)
 
+        # Lazily populated by `_transform` (not here) with, per feature, the
+        # lookup table used to look up values in `categories_[i]`. Building
+        # it is O(len(categories_[i])), so we avoid paying that cost in
+        # `fit` for models that are never used for `transform`, and only pay
+        # it once, on the first `transform` call, rather than on every call.
+        # This is what makes small-batch `transform` calls fast: `_check_X`
+        # routes small pandas/polars batches through this same cached path
+        # (see its docstring), rather than through `narwhals`.
+        self._transform_cache = [{} for _ in range(n_features)]
+
         output = {"n_samples": n_samples}
         if return_counts:
             output["category_counts"] = category_counts
@@ -203,7 +221,7 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         warn_on_unknown=False,
         ignore_category_indices=None,
     ):
-        X_list, n_samples, n_features = self._check_X(X)
+        X_list, n_samples, n_features = self._check_X(X, transform=True)
         validate_data(self, X=X, reset=False, skip_check_array=True)
 
         X_int = np.zeros((n_samples, n_features), dtype=int, order="F")
@@ -212,7 +230,9 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         columns_with_unknown = []
         for i in range(n_features):
             Xi = X_list[i]
-            X_int[:, i] = _encode(Xi, uniques=self.categories_[i])
+            X_int[:, i] = _encode(
+                Xi, uniques=self.categories_[i], cache=self._transform_cache[i]
+            )
             X_mask[:, i] = X_int[:, i] != -1
 
             if not np.all(X_mask[:, i]):
