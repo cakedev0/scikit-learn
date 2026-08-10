@@ -234,12 +234,13 @@ def _encode_pandas(values, uniques, cache=None):
     """
     import pandas as pd
 
+    dtype = None if isinstance(values.dtype, pd.CategoricalDtype) else "string"
     if cache is None:
-        index = pd.Index(uniques)
+        index = pd.Index(uniques, dtype=dtype)
     elif "index" in cache:
         index = cache["index"]
     else:
-        index = cache["index"] = pd.Index(uniques)
+        index = cache["index"] = pd.Index(uniques, dtype=dtype)
     encoded = np.asarray(index.get_indexer(values))
     if (
         uniques.size
