@@ -204,6 +204,12 @@ def _unique_pandas(values, *, return_inverse, return_counts):
 
     codes, index = pd.factorize(values, sort=True, use_na_sentinel=False)
     uniques = index.to_numpy()
+    if uniques.size and pd.isna(uniques[-1]):
+        # `factorize` doesn't always normalize the missing-value entry to
+        # `np.nan` (e.g. pandas StringDtype keeps it as `pd.NA`), but the
+        # rest of the codebase (`is_scalar_nan`-based checks) expects
+        # `np.nan` specifically.
+        uniques[-1] = np.nan
 
     ret = (uniques,)
     if return_inverse:
@@ -234,7 +240,17 @@ def _encode_pandas(values, uniques, cache=None):
         index = cache["index"]
     else:
         index = cache["index"] = pd.Index(uniques)
-    return np.asarray(index.get_indexer(values))
+    encoded = np.asarray(index.get_indexer(values))
+    if (
+        uniques.size
+        and isinstance(values.dtype, pd.StringDtype)
+        and pd.isna(uniques[-1])
+    ):
+        # On pandas<3, `Index.get_indexer` fails to match a string-dtype Series'
+        # missing entries (stored as `pandas.NA`) against an Index's `np.nan` entry,
+        # incorrectly reporting them as unknown (-1).
+        encoded[np.asarray(values.isna())] = len(uniques) - 1
+    return encoded
 
 
 def _unique_python(values, *, return_inverse, return_counts):
