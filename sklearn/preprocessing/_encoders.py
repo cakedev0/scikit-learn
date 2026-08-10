@@ -185,6 +185,11 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
 
             self.categories_.append(cats)
 
+        # Lazily populated by `_transform` (not here) with, per feature.
+        # This is used to make repeated small-batch `transform` calls
+        # (e.g. online prediction pipeline) fast.
+        self._transform_cache = [{} for _ in range(n_features)]
+
         output = {"n_samples": n_samples}
         if return_counts:
             output["category_counts"] = category_counts
@@ -221,7 +226,9 @@ class _BaseEncoder(TransformerMixin, BaseEstimator):
         columns_with_unknown = []
         for i in range(n_features):
             Xi = X_list[i]
-            X_int[:, i] = _encode(Xi, uniques=self.categories_[i])
+            X_int[:, i] = _encode(
+                Xi, uniques=self.categories_[i], cache=self._transform_cache[i]
+            )
             X_mask[:, i] = X_int[:, i] != -1
 
             if not np.all(X_mask[:, i]):

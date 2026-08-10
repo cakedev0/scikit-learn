@@ -178,13 +178,18 @@ class _nandict(dict):
         return -1
 
 
-def _map_to_integer(values, uniques):
+def _map_to_integer(values, uniques, cache=None):
     """Map values based on their position in uniques.
 
     Values not present in `uniques` are encoded as -1.
     """
     xp, _ = get_namespace(values, uniques)
-    table = _nandict({val: i for i, val in enumerate(uniques)})
+    if cache is None:
+        table = _nandict({val: i for i, val in enumerate(uniques)})
+    elif "table" in cache:
+        table = cache["table"]
+    else:
+        table = cache["table"] = _nandict({val: i for i, val in enumerate(uniques)})
     return xp.asarray([table[v] for v in values], device=array_device(values))
 
 
@@ -215,16 +220,27 @@ def _unique_pandas(values, *, return_inverse, return_counts):
     return ret[0] if len(ret) == 1 else ret
 
 
-def _encode_pandas(values, uniques):
+def _encode_pandas(values, uniques, cache=None):
     """Fast pandas equivalent of `_map_to_integer`.
 
     Values not present in `uniques` are encoded as -1.
 
-    As in `_unique_pandas`, plain `object` dtype Series never reach this function.
+    As in `_unique_pandas`, plain `object` dtype Series never reach this
+    function.
+
+    `cache`, if given, is used the same way as in `_map_to_integer`, but to
+    avoid rebuilding the `pandas.Index` (used for `get_indexer`) on every
+    call instead of a plain dict.
     """
     import pandas as pd
 
-    index = pd.Index(uniques)
+    dtype = None if isinstance(values.dtype, pd.CategoricalDtype) else "string"
+    if cache is None:
+        index = pd.Index(uniques, dtype=dtype)
+    elif "index" in cache:
+        index = cache["index"]
+    else:
+        index = cache["index"] = pd.Index(uniques, dtype=dtype)
     encoded = np.asarray(index.get_indexer(values))
     if (
         uniques.size
@@ -296,7 +312,7 @@ def _encode_labels(values, *, uniques):
     return encoded
 
 
-def _encode(values, *, uniques, return_diff=False):
+def _encode(values, *, uniques, return_diff=False, cache=None):
     """Encode values into [0, n_uniques - 1].
 
     Uses pure python method for object dtype, and numpy method for
@@ -318,6 +334,14 @@ def _encode(values, *, uniques, return_diff=False):
     return_diff : bool, default=False
         If True, also return the unique values in `values` that are not
         present in `uniques`.
+    cache : dict, default=None
+        Mutable dict used to cache, across repeated calls with the same `uniques`,
+        the lookup table built from `uniques` (see `_map_to_integer`/`_encode_pandas`).
+        Only used for object dtype arrays and pandas Series, where building that table
+        is O(len(uniques)) and would otherwise dominate the cost of encoding
+        small batches (e.g. repeated single-row calls to `transform`).
+        Callers are responsible for invalidating (e.g. replacing with a
+        fresh dict) the cache whenever `uniques` changes.
 
     Returns
     -------
@@ -328,7 +352,7 @@ def _encode(values, *, uniques, return_diff=False):
         returned if ``return_diff=True``.
     """
     if is_pandas_df_or_series(values):
-        encoded = _encode_pandas(values, uniques)
+        encoded = _encode_pandas(values, uniques, cache=cache)
         if return_diff:
             diff = _unique(values[encoded == -1])
             return encoded, diff
@@ -336,7 +360,7 @@ def _encode(values, *, uniques, return_diff=False):
 
     xp, _ = get_namespace(values, uniques)
     if not xp.isdtype(values.dtype, "numeric"):
-        encoded = _map_to_integer(values, uniques)
+        encoded = _map_to_integer(values, uniques, cache=cache)
     else:
         encoded = xp.searchsorted(uniques, values)
         if size(uniques):
