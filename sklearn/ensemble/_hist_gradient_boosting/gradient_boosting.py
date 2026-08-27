@@ -777,7 +777,10 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
             n_samples=n_samples, dtype=G_H_DTYPE, order="F"
         )
 
+        self._times = getattr(self, "_times", [])
+
         for iteration in range(begin_at_stage, self.max_iter):
+            tic_iteration = time()
             if self.verbose >= 2:
                 iteration_start_time = time()
                 print(
@@ -907,6 +910,8 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
                         raw_predictions_small_train=raw_predictions_small_train,
                         raw_predictions_val=raw_predictions_val,
                     )
+
+            self._times.append(time() - tic_iteration)
 
             if self.verbose >= 2:
                 self._print_iteration_stats(iteration_start_time)
