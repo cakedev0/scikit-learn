@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import itertools
+import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext, suppress
 from functools import partial
@@ -32,6 +33,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble._hist_gradient_boosting._gradient_boosting import (
     _update_raw_predictions,
 )
+from sklearn.ensemble._hist_gradient_boosting._n_threads_search import NThreadsSearch
 from sklearn.ensemble._hist_gradient_boosting.binning import _BinMapper
 from sklearn.ensemble._hist_gradient_boosting.common import G_H_DTYPE, X_DTYPE, Y_DTYPE
 from sklearn.ensemble._hist_gradient_boosting.grower import TreeGrower
@@ -525,6 +527,20 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
         # into account when determine the maximum number of threads to use.
         n_threads = _openmp_effective_n_threads()
 
+        # Prototype: empirically probe a few smaller thread counts early in
+        # the fit and stick to whichever is fastest, to avoid pathological
+        # cases where multithreading makes tree building much slower (e.g.
+        # oversubscription). Opt-in only, see `NThreadsSearch`.
+        n_threads_search = None
+        self._n_threads_search_ = None
+        if os.environ.get("SKLEARN_HGB_AUTO_TUNE_N_THREADS", "0") == "1":
+            n_threads_search = NThreadsSearch(max_n_threads=n_threads)
+            # Kept as a public-ish (but private) attribute so that the search
+            # can be inspected after fit: `.history` lists every thread count
+            # that was tried with its measured time, `.best_n_threads` /
+            # `.best_time` report the outcome.
+            self._n_threads_search_ = n_threads_search
+
         if isinstance(self.loss, str):
             self._loss = self._get_loss(sample_weight=sample_weight)
         elif isinstance(self.loss, BaseLoss):
@@ -781,6 +797,8 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
 
         for iteration in range(begin_at_stage, self.max_iter):
             tic_iteration = time()
+            if n_threads_search is not None:
+                n_threads = n_threads_search.current_n_threads
             if self.verbose >= 2:
                 iteration_start_time = time()
                 print(
@@ -911,7 +929,10 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
                         raw_predictions_val=raw_predictions_val,
                     )
 
-            self._times.append(time() - tic_iteration)
+            iteration_time = time() - tic_iteration
+            self._times.append(iteration_time)
+            if n_threads_search is not None:
+                n_threads_search.record(iteration_time)
 
             if self.verbose >= 2:
                 self._print_iteration_stats(iteration_start_time)

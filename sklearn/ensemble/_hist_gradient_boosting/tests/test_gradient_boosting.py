@@ -1762,3 +1762,43 @@ def test_pandas_nullable_dtype():
 
     clf = HistGradientBoostingClassifier()
     clf.fit(X, y)
+
+
+def test_n_threads_search_disabled_by_default(monkeypatch):
+    # Without the opt-in env var, `n_threads` must stay constant across
+    # iterations and no search state should be exposed.
+    monkeypatch.setattr(hgb_module, "_openmp_effective_n_threads", lambda *a, **k: 8)
+
+    X, y = make_regression(n_samples=100, random_state=0)
+    est = HistGradientBoostingRegressor(max_iter=5, random_state=0).fit(X, y)
+
+    assert est._n_threads_search_ is None
+
+
+def test_n_threads_search_instrumentation(monkeypatch):
+    # With the opt-in env var set, the empirical thread-count search must
+    # run, and its history must be inspectable after fit.
+    monkeypatch.setenv("SKLEARN_HGB_AUTO_TUNE_N_THREADS", "1")
+    monkeypatch.setattr(hgb_module, "_openmp_effective_n_threads", lambda *a, **k: 8)
+
+    X, y = make_regression(n_samples=200, random_state=0)
+    max_iter = 10
+    est = HistGradientBoostingRegressor(max_iter=max_iter, random_state=0).fit(X, y)
+
+    search = est._n_threads_search_
+    assert search is not None
+
+    # One history entry per boosting iteration that actually ran.
+    assert len(search.history) == est.n_iter_
+    assert len(search.history) <= max_iter
+
+    # The search always starts by (re-)trying the default thread count.
+    assert search.history[0]["n_threads"] == 8
+    for entry in search.history:
+        assert entry["n_threads"] in search.candidates
+        assert entry["time"] >= 0
+
+    # The final recommendation must be one of the probed candidates, and a
+    # single thread must be a reachable outcome.
+    assert search.best_n_threads in search.candidates
+    assert 1 in search.candidates
