@@ -47,11 +47,9 @@ from sklearn.utils._missing import is_scalar_nan
 from sklearn.utils._param_validation import Hidden, Interval, RealNotInt, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import (
-    _assert_all_finite_element_wise,
     _check_categorical_features,
     _check_n_features,
     _check_sample_weight,
-    assert_all_finite,
     check_array,
     check_is_fitted,
     validate_data,
@@ -200,46 +198,6 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
     def _support_missing_values(self, X):
         return not issparse(X) and self.__sklearn_tags__().input_tags.allow_nan
 
-    def _compute_missing_values_in_feature_mask(self, X, estimator_name=None):
-        """Return boolean mask denoting if there are missing values for each feature.
-
-        This method also ensures that X is finite.
-
-        Parameter
-        ---------
-        X : array-like of shape (n_samples, n_features)
-            Input data.
-
-        estimator_name : str or None, default=None
-            Name to use when raising an error. Defaults to the class name.
-
-        Returns
-        -------
-        missing_values_in_feature_mask : ndarray of shape (n_features,), or None
-            Missing value mask. If missing values are not supported or there
-            are no missing values, return None.
-        """
-        estimator_name = estimator_name or self.__class__.__name__
-        common_kwargs = dict(estimator_name=estimator_name, input_name="X")
-
-        if not self._support_missing_values(X):
-            assert_all_finite(X, **common_kwargs)
-            return None
-
-        with np.errstate(over="ignore"):
-            overall_sum = np.sum(X)
-
-        if not np.isfinite(overall_sum):
-            # Raise a ValueError in case of the presence of an infinite element.
-            _assert_all_finite_element_wise(X, xp=np, allow_nan=True, **common_kwargs)
-
-        # If the sum is not nan, then there are no missing values
-        if not np.isnan(overall_sum):
-            return None
-
-        missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
-        return missing_values_in_feature_mask
-
     def _fit(
         self,
         X,
@@ -293,11 +251,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             # Need to validate separately here.
             # We can't pass multi_output=True because that would allow y to be
             # csr.
-
-            # _compute_missing_values_in_feature_mask will check for finite values and
-            # compute the missing mask if the tree supports missing values
+            support_missing_values = self._support_missing_values(X)
             check_X_params = dict(
-                dtype=np.float32, accept_sparse="csc", ensure_all_finite=False
+                dtype=np.float32,
+                accept_sparse="csc",
+                ensure_all_finite="allow-nan" if support_missing_values else True,
             )
             check_y_params = dict(ensure_2d=False, dtype=None)
             if has_categorical:
@@ -313,12 +271,9 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                     self, X, y, validate_separately=(check_X_params, check_y_params)
                 )
 
-            # Note: we must check missing after the categorical features
-            # because it is assumed X is fully numeric by then. Thus, missing value mask
-            # need to be checked separately.
-            missing_values_in_feature_mask = (
-                self._compute_missing_values_in_feature_mask(X)
-            )
+            if support_missing_values:
+                missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
+
             if issparse(X):
                 X.sort_indices()
 

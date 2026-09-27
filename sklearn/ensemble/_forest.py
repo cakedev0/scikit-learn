@@ -337,6 +337,12 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
         if issparse(y):
             raise ValueError("sparse multilabel-indicator for y is not supported.")
 
+        # Only the criterion is required to determine if the tree supports
+        # missing values.
+        estimator = type(self.estimator)(criterion=self.criterion)
+        support_missing_values = estimator._support_missing_values(X)
+        ensure_all_finite = "allow-nan" if support_missing_values else True
+
         if hasattr(self, "categorical_features"):
             self.is_categorical_ = _check_categorical_features(
                 X, self.categorical_features
@@ -379,7 +385,7 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 multi_output=True,
                 accept_sparse="csc",
                 dtype=np.float32,
-                ensure_all_finite=False,
+                ensure_all_finite=ensure_all_finite,
                 reset=False,
             )
         else:
@@ -393,18 +399,11 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 multi_output=True,
                 accept_sparse="csc",
                 dtype=np.float32,
-                ensure_all_finite=False,
+                ensure_all_finite=ensure_all_finite,
             )
-        # _compute_missing_values_in_feature_mask checks if X has missing values and
-        # will raise an error if the underlying tree base estimator can't handle missing
-        # values. Only the criterion is required to determine if the tree supports
-        # missing values.
-        estimator = type(self.estimator)(criterion=self.criterion)
-        missing_values_in_feature_mask = (
-            estimator._compute_missing_values_in_feature_mask(
-                X, estimator_name=self.__class__.__name__
-            )
-        )
+        missing_values_in_feature_mask = None
+        if support_missing_values:
+            missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
 
         if sample_weight is not None:
             sample_weight = _check_sample_weight(sample_weight, X)
