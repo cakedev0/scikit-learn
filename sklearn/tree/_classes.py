@@ -227,60 +227,26 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             )
             has_categorical = self.is_categorical_ is not None
 
-            if has_categorical:
-                if issparse(X):
-                    raise NotImplementedError(
-                        "Categorical features not supported with sparse inputs"
-                    )
-
-                if check_input:
-                    # Capture feature names on the original dataframe-like input before
-                    # categorical encoding converts X to a NumPy array.
-                    validate_data(self, X, reset=True, skip_check_array=True)
-
-                # Categorical feature selection must see the original container for
-                # names/dtypes, but tree fitting needs numeric values. Encode selected
-                # columns before numeric validation, preserving column order.
-                X = self._preprocess_X(X, reset=True)
-            else:
+            if not has_categorical:
                 self._categorical_encoder = None
                 self._preprocessor = None
                 self._categorical_counts = None
+            elif not check_input:
+                X = self._preprocess_X(X, reset=True)
 
         if check_input:
-            # Need to validate separately here.
-            # We can't pass multi_output=True because that would allow y to be
-            # csr.
-            support_missing_values = self._support_missing_values(X)
-            check_X_params = dict(
-                dtype=np.float32,
-                accept_sparse="csc",
-                ensure_all_finite="allow-nan" if support_missing_values else True,
+            X = self._validate_X(X, y, reset=True, accept_sparse="csc")
+            # We can't use validate_data(multi_output=True) because that would
+            # allow y to be csr.
+            y = check_array(
+                y, input_name="y", estimator=self, ensure_2d=False, dtype=None
             )
-            check_y_params = dict(ensure_2d=False, dtype=None)
-            if has_categorical:
-                # Feature names were already stored from the original dataframe above.
-                # Encoding turns X into a plain ndarray with no names.
-                # validate_data(reset=True) would treat that as "no feature names" and
-                # delete feature_names_in_.
-                X = check_array(X, input_name="X", estimator=self, **check_X_params)
-                y = check_array(y, input_name="y", estimator=self, **check_y_params)
-                _check_n_features(self, X, reset=False)
-            else:
-                X, y = validate_data(
-                    self, X, y, validate_separately=(check_X_params, check_y_params)
-                )
 
-            if support_missing_values:
+            if self._support_missing_values(X):
                 missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
 
             if issparse(X):
                 X.sort_indices()
-
-                if X.indices.dtype != np.intc or X.indptr.dtype != np.intc:
-                    raise ValueError(
-                        "No support for np.int64 index based sparse matrices"
-                    )
 
             if self.criterion == "poisson":
                 if np.any(y < 0):
@@ -560,6 +526,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
     def _preprocess_X(self, X, *, reset):
         """Encode categorical features and cast numerical features to float32."""
+        if issparse(X):
+            raise NotImplementedError(
+                "Categorical features not supported with sparse inputs"
+            )
         if reset:
             ordinal_encoder = OrdinalEncoder(
                 dtype=np.float32,
@@ -612,56 +582,47 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         return X_out
 
+    def _validate_X(self, X, y="no_validation", *, reset, accept_sparse):
+        """Validate X and encode its categorical features.
+
+        Used at fit time (``reset=True``) and predict time (``reset=False``), by
+        trees and forests alike. `y` is only passed at fit time, to raise an
+        informative error if it is None. It is not validated here.
+        """
+        # Check feature names on the original input before categorical encoding
+        # converts it to a NumPy array and drops dataframe metadata. The number
+        # of features is checked after check_array (ensure_2d=False here), so
+        # that 1D inputs get check_array's informative error.
+        validate_data(self, X, y, reset=reset, skip_check_array=True, ensure_2d=False)
+        if getattr(self, "is_categorical_", None) is not None:
+            X = self._preprocess_X(X, reset=reset)
+        X = check_array(
+            X,
+            input_name="X",
+            estimator=self,
+            dtype=np.float32,
+            accept_sparse=accept_sparse,
+            ensure_all_finite="allow-nan" if self._support_missing_values(X) else True,
+        )
+        _check_n_features(self, X, reset=reset)
+
+        if issparse(X) and (X.indices.dtype != np.intc or X.indptr.dtype != np.intc):
+            raise ValueError("No support for np.int64 index based sparse matrices")
+        return X
+
     def _validate_X_predict(self, X, check_input):
         """Validate X for predict/predict_proba/apply."""
-        has_categorical = self.is_categorical_ is not None
-
-        if has_categorical and issparse(X):
-            raise NotImplementedError(
-                "Categorical features not supported with sparse inputs"
-            )
-
         if check_input:
-            if self._support_missing_values(X):
-                ensure_all_finite = "allow-nan"
-            else:
-                ensure_all_finite = True
+            return self._validate_X(X, reset=False, accept_sparse="csr")
 
-            if has_categorical:
-                # Check feature names on the original input before categorical
-                # encoding converts it to a NumPy array and drops dataframe metadata.
-                validate_data(self, X, reset=False, skip_check_array=True)
-                X = self._preprocess_X(X, reset=False)
-                X = check_array(
-                    X,
-                    input_name="X",
-                    estimator=self,
-                    dtype=np.float32,
-                    accept_sparse="csr",
-                    ensure_all_finite=ensure_all_finite,
-                )
-                _check_n_features(self, X, reset=False)
-            else:
-                X = validate_data(
-                    self,
-                    X,
-                    dtype=np.float32,
-                    accept_sparse="csr",
-                    reset=False,
-                    ensure_all_finite=ensure_all_finite,
-                )
-            if issparse(X) and (
-                X.indices.dtype != np.intc or X.indptr.dtype != np.intc
-            ):
-                raise ValueError("No support for np.int64 index based sparse matrices")
-        else:
-            # The number of features is checked regardless of `check_input`
-            _check_n_features(self, X, reset=False)
-            # Ensembles that already encoded X leave `_preprocessor` unset and pass
-            # check_input=False; skip transform so prediction stays on the encoded
-            # float array.
-            if has_categorical and getattr(self, "_preprocessor", None) is not None:
-                X = self._preprocess_X(X, reset=False)
+        # The number of features is checked regardless of `check_input`
+        _check_n_features(self, X, reset=False)
+        # Ensembles that already encoded X leave `_preprocessor` unset and pass
+        # check_input=False; skip transform so prediction stays on the encoded
+        # float array.
+        has_categorical = self.is_categorical_ is not None
+        if has_categorical and getattr(self, "_preprocessor", None) is not None:
+            X = self._preprocess_X(X, reset=False)
         return X
 
     def predict(self, X, check_input=True):

@@ -76,12 +76,11 @@ from sklearn.utils.parallel import Parallel, delayed
 from sklearn.utils.validation import (
     _check_categorical_features,
     _check_feature_names_in,
-    _check_n_features,
     _check_sample_weight,
+    _check_y,
     _num_samples,
-    check_array,
+    check_consistent_length,
     check_is_fitted,
-    validate_data,
 )
 
 __all__ = [
@@ -337,12 +336,6 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
         if issparse(y):
             raise ValueError("sparse multilabel-indicator for y is not supported.")
 
-        # Only the criterion is required to determine if the tree supports
-        # missing values.
-        estimator = type(self.estimator)(criterion=self.criterion)
-        support_missing_values = estimator._support_missing_values(X)
-        ensure_all_finite = "allow-nan" if support_missing_values else True
-
         if hasattr(self, "categorical_features"):
             self.is_categorical_ = _check_categorical_features(
                 X, self.categorical_features
@@ -358,51 +351,17 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 "learned by trees from earlier iterations."
             )
 
-        if has_categorical:
-            if issparse(X):
-                raise NotImplementedError(
-                    "Categorical features not supported with sparse inputs"
-                )
-            # Capture feature names on the original dataframe-like input before
-            # categorical encoding converts X to a NumPy array.
-            validate_data(
-                self,
-                X,
-                y,
-                multi_output=True,
-                reset=True,
-                skip_check_array=True,
-            )
-            X = self._preprocess_X(X, reset=True)
-            # Feature names were already stored from the original dataframe above.
-            # Encoding turns X into a plain ndarray with no names.
-            # validate_data(reset=True) would treat that as "no feature names"
-            # and delete feature_names_in_.
-            X, y = validate_data(
-                self,
-                X,
-                y,
-                multi_output=True,
-                accept_sparse="csc",
-                dtype=np.float32,
-                ensure_all_finite=ensure_all_finite,
-                reset=False,
-            )
-        else:
+        if not has_categorical:
             self._categorical_encoder = None
             self._preprocessor = None
             self._categorical_counts = None
-            X, y = validate_data(
-                self,
-                X,
-                y,
-                multi_output=True,
-                accept_sparse="csc",
-                dtype=np.float32,
-                ensure_all_finite=ensure_all_finite,
-            )
+
+        X = self._validate_X(X, y, reset=True, accept_sparse="csc")
+        y = _check_y(y, multi_output=True, estimator=self)
+        check_consistent_length(X, y)
+
         missing_values_in_feature_mask = None
-        if support_missing_values:
+        if self._support_missing_values(X):
             missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
 
         if sample_weight is not None:
@@ -664,55 +623,17 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
         # Default implementation
         return y, None
 
-    def _preprocess_X(self, X, *, reset):
-        """Encode categorical features and cast numerical features to float32.
-
-        Reuses the tree implementation so forests stay aligned with
-        :class:`~sklearn.tree.DecisionTreeClassifier` /
-        :class:`~sklearn.tree.DecisionTreeRegressor` preprocessing.
-        """
-        return BaseDecisionTree._preprocess_X(self, X, reset=reset)
+    # Reuse the tree implementations so forests stay aligned with
+    # DecisionTreeClassifier / DecisionTreeRegressor validation and preprocessing.
+    _support_missing_values = BaseDecisionTree._support_missing_values
+    _preprocess_X = BaseDecisionTree._preprocess_X
+    _validate_X = BaseDecisionTree._validate_X
 
     def _validate_X_predict(self, X):
         """
         Validate X whenever one tries to predict, apply, predict_proba."""
         check_is_fitted(self)
-        if self.estimators_[0]._support_missing_values(X):
-            ensure_all_finite = "allow-nan"
-        else:
-            ensure_all_finite = True
-
-        has_categorical = getattr(self, "is_categorical_", None) is not None
-        if has_categorical:
-            if issparse(X):
-                raise NotImplementedError(
-                    "Categorical features not supported with sparse inputs"
-                )
-            # Check feature names on the original input before categorical
-            # encoding converts it to a NumPy array and drops dataframe metadata.
-            validate_data(self, X, reset=False, skip_check_array=True)
-            X = self._preprocess_X(X, reset=False)
-            X = check_array(
-                X,
-                input_name="X",
-                estimator=self,
-                dtype=np.float32,
-                accept_sparse="csr",
-                ensure_all_finite=ensure_all_finite,
-            )
-            _check_n_features(self, X, reset=False)
-        else:
-            X = validate_data(
-                self,
-                X,
-                dtype=np.float32,
-                accept_sparse="csr",
-                reset=False,
-                ensure_all_finite=ensure_all_finite,
-            )
-        if issparse(X) and (X.indices.dtype != np.intc or X.indptr.dtype != np.intc):
-            raise ValueError("No support for np.int64 index based sparse matrices")
-        return X
+        return self._validate_X(X, reset=False, accept_sparse="csr")
 
     @property
     def feature_importances_(self):
