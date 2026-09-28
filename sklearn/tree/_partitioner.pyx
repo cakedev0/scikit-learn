@@ -148,7 +148,7 @@ cdef class DensePartitioner:
                 &self.feature_values[self.start],
                 &self.samples[self.start],
                 end_non_missing - self.start,
-                use_three_way_partition=True,
+                use_three_way_partition=False,
             )
 
             # if there are missing values found in this current candidate split, then

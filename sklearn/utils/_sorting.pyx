@@ -27,6 +27,9 @@ cdef void simultaneous_sort(
     - If use_three_way_partition is False, use 2-way partitioning:
       [x <= pivot] [pivot] [x >= pivot]. There are three parts too, but the middle
       part is only the selected pivot element, not all values equal to the pivot.
+      When the median of 3 pivot sample contains duplicates, the 3-way partition
+      is used instead for that level, so this variant is also fast with many
+      duplicate values.
 
     Notes
     -----
@@ -77,6 +80,16 @@ cdef void introsort_2way(
 
         pivot = inplace_median3(values, indices, n)
 
+        if values[0] == pivot or values[n // 2] == pivot:
+            # The median of 3 sample has duplicates: many values are likely
+            # equal to the pivot, group them all with a 3-way partition.
+            partition_3way(values, indices, n, pivot, &i, &j)
+            introsort_2way(values, indices, i, maxd)
+            values += j
+            indices += j
+            n -= j
+            continue
+
         i = 1  # the median3 step ensures values[0] <= pivot
         j = n - 2  # the median3 step ensures values[-1] >= pivot
         while True:
@@ -117,7 +130,7 @@ cdef void introsort_3way(
     (fast for repeated elements, e.g. lots of zeros).
     """
     cdef floating pivot
-    cdef intp_t i, l, r
+    cdef intp_t l, r
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -126,24 +139,7 @@ cdef void introsort_3way(
         maxd -= 1
 
         pivot = median3(values, n)
-
-        i = l = 0
-        r = n
-        while i < r:
-            if values[i] < pivot:
-                swap(values, indices, i, l)
-                i += 1
-                l += 1
-            elif values[i] > pivot:
-                r -= 1
-                swap(values, indices, i, r)
-            else:
-                i += 1
-
-        # Three-way partition:
-        # - values[:l] contains elements < pivot
-        # - values[l:r] contains elements == pivot
-        # - values[r:] contains elements > pivot
+        partition_3way(values, indices, n, pivot, &l, &r)
 
         # Recursively sort left side:
         introsort_3way(values, indices, l, maxd)
@@ -155,6 +151,30 @@ cdef void introsort_3way(
 
     # in the small-array case, insertion sort is faster
     insertion_sort(values, indices, n)
+
+cdef inline void partition_3way(
+    floating* values, intp_t* indices, intp_t n, floating pivot,
+    intp_t* l_out, intp_t* r_out,
+) noexcept nogil:
+    """Three-way partition around pivot, such that:
+
+    - values[:l] contains elements < pivot
+    - values[l:r] contains elements == pivot
+    - values[r:] contains elements > pivot
+    """
+    cdef intp_t i = 0, l = 0, r = n
+    while i < r:
+        if values[i] < pivot:
+            swap(values, indices, i, l)
+            i += 1
+            l += 1
+        elif values[i] > pivot:
+            r -= 1
+            swap(values, indices, i, r)
+        else:
+            i += 1
+    l_out[0] = l
+    r_out[0] = r
 
 # ------------ HEAP SORT -------------
 
