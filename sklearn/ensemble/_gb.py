@@ -944,7 +944,9 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
 
     def _raw_predict_init(self, X):
         """Check input and compute raw predictions of the init estimator."""
-        X = self.estimators_[0, 0]._validate_X_predict(X, check_input=True)
+        X = self.estimators_[0, 0]._validate_and_preprocess_X(
+            X, reset=False, check_input=True
+        )
         if self.init_ == "zero":
             raw_predictions = np.zeros(
                 shape=(X.shape[0], self.n_trees_per_iteration_), dtype=np.float64
@@ -1100,7 +1102,9 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
         """
 
         check_is_fitted(self)
-        X = self.estimators_[0, 0]._validate_X_predict(X, check_input=True)
+        X = self.estimators_[0, 0]._validate_and_preprocess_X(
+            X, reset=False, check_input=True
+        )
 
         # n_classes will be equal to 1 in the binary classification or the
         # regression case.

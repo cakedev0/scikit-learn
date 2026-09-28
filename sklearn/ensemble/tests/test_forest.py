@@ -1944,7 +1944,9 @@ def test_fit_categorical_raw_labels_are_reencoded(name):
     est = Forest(categorical_features=[0], n_estimators=5, random_state=0).fit(X, y)
 
     assert_array_equal(est.is_categorical_, [True])
-    assert_array_equal(est._categorical_encoder.categories_[0], ["a", "b"])
+    assert_array_equal(
+        est._preprocessor.named_transformers_["categorical"].categories_[0], ["a", "b"]
+    )
     assert_array_equal(est.estimators_[0].is_categorical_, [True])
     # Forest owns encoding; trees must not re-fit their own preprocessor.
     assert est.estimators_[0]._preprocessor is None
@@ -2053,19 +2055,26 @@ def test_invalid_categorical(name, categorical_features, match):
         )
 
 
-@pytest.mark.parametrize("Forest", [RandomForestRegressor, ExtraTreesRegressor])
-def test_categorical_absolute_error_unsupported(Forest):
-    """absolute_error categorical splits are rejected (same limit as trees)."""
+def test_categorical_absolute_error():
+    """absolute_error categorical splits are only rejected with the best splitter.
+
+    Same limit as trees.
+    """
     X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float64)
     y = np.array([0.0, 1.0, 0.0, 1.0])
+    params = dict(categorical_features=[0], criterion="absolute_error", random_state=0)
 
     with pytest.raises(
         ValueError,
-        match="Categorical features are not supported with criterion='absolute_error'",
+        match=(
+            "Categorical features with splitter='best' are not supported with "
+            "criterion='absolute_error'"
+        ),
     ):
-        Forest(
-            categorical_features=[0], criterion="absolute_error", random_state=0
-        ).fit(X, y)
+        RandomForestRegressor(**params).fit(X, y)
+
+    forest = ExtraTreesRegressor(bootstrap=False, **params).fit(X, y)
+    assert_allclose(forest.predict(X), y)
 
 
 @pytest.mark.parametrize("Forest", [ExtraTreesClassifier, ExtraTreesRegressor])

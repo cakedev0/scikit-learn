@@ -74,12 +74,9 @@ from sklearn.utils._tags import get_tags
 from sklearn.utils.multiclass import check_classification_targets, type_of_target
 from sklearn.utils.parallel import Parallel, delayed
 from sklearn.utils.validation import (
-    _check_categorical_features,
     _check_feature_names_in,
     _check_sample_weight,
-    _check_y,
     _num_samples,
-    check_consistent_length,
     check_is_fitted,
 )
 
@@ -137,13 +134,12 @@ def _parallel_build_trees(
     X,
     y,
     sample_weight,
+    fit_kwargs,
     tree_idx,
     n_trees,
     verbose=0,
     class_weight=None,
     n_samples_bootstrap=None,
-    missing_values_in_feature_mask=None,
-    categorical_counts=None,
 ):
     """
     Private function used to fit a single tree in parallel."""
@@ -163,23 +159,9 @@ def _parallel_build_trees(
             )
             sample_weight_tree = sample_weight_tree * expanded_class_weight
 
-        tree._fit(
-            X,
-            y,
-            sample_weight=sample_weight_tree,
-            check_input=False,
-            missing_values_in_feature_mask=missing_values_in_feature_mask,
-            categorical_counts=categorical_counts,
-        )
+        tree._fit_validated(X, y, sample_weight_tree, **fit_kwargs)
     else:
-        tree._fit(
-            X,
-            y,
-            sample_weight=sample_weight,
-            check_input=False,
-            missing_values_in_feature_mask=missing_values_in_feature_mask,
-            categorical_counts=categorical_counts,
-        )
+        tree._fit_validated(X, y, sample_weight, **fit_kwargs)
 
     return tree
 
@@ -333,16 +315,10 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
             Fitted estimator.
         """
         # Validate or convert input data
-        if issparse(y):
-            raise ValueError("sparse multilabel-indicator for y is not supported.")
-
-        if hasattr(self, "categorical_features"):
-            self.is_categorical_ = _check_categorical_features(
-                X, self.categorical_features
-            )
-            has_categorical = self.is_categorical_ is not None
-        else:
-            has_categorical = False
+        X, y, fit_kwargs = self._validate_and_preprocess_X(
+            X, y, reset=True, check_input=True
+        )
+        has_categorical = self._preprocessor is not None
 
         if has_categorical and self.warm_start and getattr(self, "estimators_", None):
             raise ValueError(
@@ -351,27 +327,10 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 "learned by trees from earlier iterations."
             )
 
-        if not has_categorical:
-            self._categorical_encoder = None
-            self._preprocessor = None
-            self._categorical_counts = None
-
-        X = self._validate_X(X, y, reset=True, accept_sparse="csc")
-        y = _check_y(y, multi_output=True, estimator=self)
-        check_consistent_length(X, y)
-
-        missing_values_in_feature_mask = None
-        if self._support_missing_values(X):
-            missing_values_in_feature_mask = np.isnan(X.sum(axis=0))
-
         if sample_weight is not None:
             sample_weight = _check_sample_weight(sample_weight, X)
 
-        if issparse(X):
-            # Pre-sort indices to avoid that each individual tree of the
-            # ensemble sorts the indices.
-            X.sort_indices()
-
+        # TODO: work on y really needed?
         y = np.atleast_1d(y)
         if y.ndim == 2 and y.shape[1] == 1:
             warn(
@@ -388,18 +347,6 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
             # reshape is necessary to preserve the data contiguity against vs
             # [:, np.newaxis] that does not.
             y = np.reshape(y, (-1, 1))
-
-        if self.criterion == "poisson":
-            if np.any(y < 0):
-                raise ValueError(
-                    "Some value(s) of y are negative which is "
-                    "not allowed for Poisson regression."
-                )
-            if np.sum(y) <= 0:
-                raise ValueError(
-                    "Sum of y is not strictly positive which "
-                    "is necessary for Poisson regression."
-                )
 
         self._n_samples, self.n_outputs_ = y.shape
 
@@ -471,12 +418,6 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 self._make_estimator(append=False, random_state=random_state)
                 for i in range(n_more_estimators)
             ]
-            # Trees must get the bool mask, not categorical_features="from_dtype" (or
-            # column names). The forest already turned X into a NumPy array, so trees
-            # can no longer read dtypes/names and would treat all features as numeric.
-            if has_categorical:
-                for tree in trees:
-                    tree.set_params(categorical_features=self.is_categorical_)
 
             # Parallel loop: we prefer the threading backend as the Cython code
             # for fitting the trees is internally releasing the Python GIL
@@ -495,13 +436,12 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                     X,
                     y,
                     _sample_weight,
+                    fit_kwargs,
                     i,
                     len(trees),
                     verbose=self.verbose,
                     class_weight=self.class_weight,
                     n_samples_bootstrap=n_samples_bootstrap,
-                    missing_values_in_feature_mask=missing_values_in_feature_mask,
-                    categorical_counts=self._categorical_counts,
                 )
                 for i, t in enumerate(trees)
             )
@@ -623,17 +563,14 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
         # Default implementation
         return y, None
 
-    # Reuse the tree implementations so forests stay aligned with
-    # DecisionTreeClassifier / DecisionTreeRegressor validation and preprocessing.
-    _support_missing_values = BaseDecisionTree._support_missing_values
-    _preprocess_X = BaseDecisionTree._preprocess_X
-    _validate_X = BaseDecisionTree._validate_X
+    # Reuse the tree implementation:
+    _validate_and_preprocess_X = BaseDecisionTree._validate_and_preprocess_X
 
     def _validate_X_predict(self, X):
         """
         Validate X whenever one tries to predict, apply, predict_proba."""
         check_is_fitted(self)
-        return self._validate_X(X, reset=False, accept_sparse="csr")
+        return self._validate_and_preprocess_X(X, reset=False, check_input=True)
 
     @property
     def feature_importances_(self):
@@ -1852,8 +1789,8 @@ class RandomForestRegressor(ForestRegressor):
         also treated as missing values.
 
         Trees in the forest use the best split strategy, so categorical
-        features are only supported for single-output regression.
-        Categorical features are not supported with `criterion="absolute_error"`.
+        features are only supported for single-output regression, and not with
+        `criterion="absolute_error"`.
 
         ``warm_start`` is not supported when categorical features are used.
 
@@ -2694,7 +2631,6 @@ class ExtraTreesRegressor(ForestRegressor):
 
         Trees in the forest use the random split strategy, including
         multi-output targets.
-        Categorical features are not supported with `criterion="absolute_error"`.
 
         ``warm_start`` is not supported when categorical features are used.
 
