@@ -100,6 +100,7 @@ cdef class TreeBuilder:
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight=None,
         const uint8_t[::1] missing_values_in_feature_mask=None,
+        const uint8_t[::1] unique_values_feature_mask=None,
     ):
         """Build a decision tree from the training set (X, y)."""
         pass
@@ -163,7 +164,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         object X,
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight=None,
-        const uint8_t[::1] missing_values_in_feature_mask=None
+        const uint8_t[::1] missing_values_in_feature_mask=None,
+        const uint8_t[::1] unique_values_feature_mask=None,
     ):
         """Build a decision tree from the training set (X, y)."""
 
@@ -193,7 +195,10 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef const intp_t[::1] n_categories = n_categories_arr
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight, missing_values_in_feature_mask, n_categories)
+        splitter.init(
+            X, y, sample_weight, missing_values_in_feature_mask,
+            unique_values_feature_mask, n_categories
+        )
 
         cdef intp_t start
         cdef intp_t end
@@ -424,7 +429,8 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         object X,
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight=None,
-        const uint8_t[::1] missing_values_in_feature_mask=None
+        const uint8_t[::1] missing_values_in_feature_mask=None,
+        const uint8_t[::1] unique_values_feature_mask=None,
     ):
         """Build a decision tree from the training set (X, y)."""
 
@@ -440,7 +446,10 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef const intp_t[::1] n_categories = n_categories_arr
 
         # Recursive partition (without actual recursion)
-        splitter.init(X, y, sample_weight, missing_values_in_feature_mask, n_categories)
+        splitter.init(
+            X, y, sample_weight, missing_values_in_feature_mask,
+            unique_values_feature_mask, n_categories
+        )
 
         cdef vector[FrontierRecord] frontier
         cdef FrontierRecord record

@@ -46,6 +46,7 @@ cdef class DensePartitioner:
         intp_t[::1] samples,
         float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
+        const uint8_t[::1] unique_values_feature_mask,
         const intp_t[::1] n_categories,
     ):
         self.X = X
@@ -54,6 +55,7 @@ cdef class DensePartitioner:
         self.samples = samples
         self.feature_values = feature_values
         self.missing_values_in_feature_mask = missing_values_in_feature_mask
+        self.unique_values_feature_mask = unique_values_feature_mask
         buffer_size = samples.size * max(samples.itemsize, feature_values.itemsize)
         self.swap_buffer = np.empty(buffer_size, dtype=np.uint8)
         # TODO: As optimization we could make `swap_array_slices` always pick the smallest side
@@ -143,12 +145,17 @@ cdef class DensePartitioner:
 
         # apply sort, different paths for numerical and categorical features
         if self.n_categories_current <= 0:
-            # numerical feature: sort the feature values
+            # numerical feature: sort the feature values. 3-way partitioning is
+            # much faster with many duplicated values, 2-way partitioning is
+            # faster otherwise.
             simultaneous_sort(
                 &self.feature_values[self.start],
                 &self.samples[self.start],
                 end_non_missing - self.start,
-                use_three_way_partition=True,
+                use_three_way_partition=(
+                    self.unique_values_feature_mask is None
+                    or not self.unique_values_feature_mask[current_feature]
+                ),
             )
 
             # if there are missing values found in this current candidate split, then

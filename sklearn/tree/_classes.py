@@ -572,12 +572,21 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
+        # Features without any duplicated value in a sample of ~1000 rows are
+        # (almost surely) sorted faster with a 2-way than a 3-way partitioning:
+        # duplicated values would be frequent enough to show up in the sample.
+        unique_values_feature_mask = np.zeros(X.shape[1], dtype=bool)
+        if not issparse(X):
+            X_sample = np.sort(X[:: max(1, X.shape[0] // 1000)], axis=0)
+            unique_values_feature_mask = np.all(X_sample[1:] != X_sample[:-1], axis=0)
+
         builder.build(
             self.tree_,
             X,
             y,
             sample_weight,
             missing_values_in_feature_mask,
+            unique_values_feature_mask,
         )
 
         if self.n_outputs_ == 1 and is_classifier(self):
