@@ -82,6 +82,14 @@ cdef class Splitter:
     # Per-feature number of categories; -1 means the feature is numerical.
     cdef const intp_t[:] n_categories
 
+    # PHASE TIMERS (benchmarking only): wall time in seconds spent in each
+    # phase of the tree construction, accumulated over all nodes.
+    cdef public float64_t time_sort      # sort_samples_and_feature_values
+    cdef public float64_t time_search    # split search loop over positions
+    cdef public float64_t time_final     # partition_samples_final + children impurity
+    cdef public float64_t time_node_reset  # node_reset (criterion.init)
+    cdef public intp_t n_sorts
+
     # The samples vector `samples` is maintained by the Splitter object such
     # that the samples contained in a node are contiguous. With this setting,
     # `node_split` reorganizes the node samples `samples[start:end]` in two

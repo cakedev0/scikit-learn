@@ -8,6 +8,7 @@ randomized trees. Single and multi-output problems are both handled.
 
 import copy
 import numbers
+import time
 import warnings
 from abc import ABCMeta, abstractmethod
 from math import ceil
@@ -472,6 +473,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
+        build_tic = time.perf_counter()  # PHASE TIMERS
         builder.build(
             self.tree_,
             X,
@@ -479,6 +481,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             sample_weight,
             missing_values_in_feature_mask,
         )
+
+        # PHASE TIMERS (benchmarking only): wall time per phase of this tree.
+        self._phase_times = {
+            "build": time.perf_counter() - build_tic,
+            "sort": splitter.time_sort,
+            "search": splitter.time_search,
+            "final": splitter.time_final,
+            "node_reset": splitter.time_node_reset,
+            "n_sorts": splitter.n_sorts,
+        }
 
         if self.n_outputs_ == 1 and is_classifier(self):
             self.n_classes_ = self.n_classes_[0]
