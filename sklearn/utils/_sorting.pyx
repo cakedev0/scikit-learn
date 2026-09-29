@@ -66,13 +66,10 @@ def _py_simultaneous_sort(
 
 
 cdef void introsort_2way(
-    floating* values,
-    intp_t* indices,
-    intp_t n,
-    intp_t maxd,
+    floating* values, intp_t* indices, intp_t n, intp_t maxd
 ) noexcept nogil:
     cdef floating pivot
-    cdef intp_t pivot_idx, i, j
+    cdef intp_t pivot_idx
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -81,25 +78,7 @@ cdef void introsort_2way(
         maxd -= 1
 
         pivot = inplace_median3(values, indices, n)
-
-        i = 1  # the median3 step ensures values[0] <= pivot
-        j = n - 2  # the median3 step ensures values[-1] >= pivot
-        while True:
-            # Find element >= pivot from left
-            while i <= j and values[i] < pivot:
-                i += 1
-            # Find element <= pivot from right
-            while i <= j and values[j] > pivot:
-                j -= 1
-            if i >= j:
-                break
-            swap(values, indices, i, j)
-            i += 1
-            j -= 1
-
-        # Put pivot at pivot_idx
-        pivot_idx = i
-        swap(values, indices, pivot_idx, n - 1)
+        pivot_idx = partition_2way(values, indices, n, pivot)
 
         # Recursively sort left side of the pivot
         introsort_2way(values, indices, pivot_idx, maxd)
@@ -114,15 +93,10 @@ cdef void introsort_2way(
 
 
 cdef void introsort_3way(
-    floating* values, intp_t *indices,
-    intp_t n, intp_t maxd
+    floating* values, intp_t* indices, intp_t n, intp_t maxd
 ) noexcept nogil:
-    """
-    Introsort with median of 3 pivot selection and 3-way partition function
-    (fast for repeated elements, e.g. lots of zeros).
-    """
     cdef floating pivot
-    cdef intp_t i, l, r
+    cdef intp_t l, r
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -131,24 +105,7 @@ cdef void introsort_3way(
         maxd -= 1
 
         pivot = median3(values, n)
-
-        i = l = 0
-        r = n
-        while i < r:
-            if values[i] < pivot:
-                swap(values, indices, i, l)
-                i += 1
-                l += 1
-            elif values[i] > pivot:
-                r -= 1
-                swap(values, indices, i, r)
-            else:
-                i += 1
-
-        # Three-way partition:
-        # - values[:l] contains elements < pivot
-        # - values[l:r] contains elements == pivot
-        # - values[r:] contains elements > pivot
+        partition_3way(values, indices, n, pivot, &l, &r)
 
         # Recursively sort left side:
         introsort_3way(values, indices, l, maxd)
@@ -163,13 +120,10 @@ cdef void introsort_3way(
 
 
 cdef void introsort_mixed(
-    floating* values,
-    intp_t* indices,
-    intp_t n,
-    intp_t maxd,
+    floating* values, intp_t* indices, intp_t n, intp_t maxd
 ) noexcept nogil:
     cdef floating pivot
-    cdef intp_t pivot_idx, i, j
+    cdef intp_t pivot_idx, l, r
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -182,31 +136,14 @@ cdef void introsort_mixed(
         if values[0] == pivot or values[n // 2] == pivot:
             # The median of 3 sample has duplicates: many values are likely
             # equal to the pivot, group them all with a 3-way partition.
-            partition_3way(values, indices, n, pivot, &i, &j)
-            introsort_mixed(values, indices, i, maxd)
-            values += j
-            indices += j
-            n -= j
+            partition_3way(values, indices, n, pivot, &l, &r)
+            introsort_mixed(values, indices, l, maxd)
+            values += r
+            indices += r
+            n -= r
             continue
 
-        i = 1  # the median3 step ensures values[0] <= pivot
-        j = n - 2  # the median3 step ensures values[-1] >= pivot
-        while True:
-            # Find element >= pivot from left
-            while i <= j and values[i] < pivot:
-                i += 1
-            # Find element <= pivot from right
-            while i <= j and values[j] > pivot:
-                j -= 1
-            if i >= j:
-                break
-            swap(values, indices, i, j)
-            i += 1
-            j -= 1
-
-        # Put pivot at pivot_idx
-        pivot_idx = i
-        swap(values, indices, pivot_idx, n - 1)
+        pivot_idx = partition_2way(values, indices, n, pivot)
 
         # Recursively sort left side of the pivot
         introsort_mixed(values, indices, pivot_idx, maxd)
@@ -218,6 +155,34 @@ cdef void introsort_mixed(
 
     # in the small-array case, insertion sort is faster
     insertion_sort(values, indices, n)
+
+
+cdef inline intp_t partition_2way(
+    floating* values, intp_t* indices, intp_t n, floating pivot
+) noexcept nogil:
+    """Two-way partition around the pivot placed at the end by inplace_median3.
+
+    Returns the final index of the pivot: values before it are <= pivot, values
+    after it are >= pivot.
+    """
+    cdef intp_t i = 1  # the median3 step ensures values[0] <= pivot
+    cdef intp_t j = n - 2  # the median3 step ensures values[-1] >= pivot
+    while True:
+        # Find element >= pivot from left
+        while i <= j and values[i] < pivot:
+            i += 1
+        # Find element <= pivot from right
+        while i <= j and values[j] > pivot:
+            j -= 1
+        if i >= j:
+            break
+        swap(values, indices, i, j)
+        i += 1
+        j -= 1
+
+    # Put pivot at its final index
+    swap(values, indices, i, n - 1)
+    return i
 
 
 cdef inline void partition_3way(
