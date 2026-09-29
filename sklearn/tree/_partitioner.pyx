@@ -22,7 +22,7 @@ from scipy.sparse import issparse
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, init_bitset
 from sklearn.tree._utils cimport goes_left, MAX_NUM_CATEGORIES
 from sklearn.tree._splitter cimport SplitRecord
-from sklearn.utils._sorting cimport simultaneous_sort
+from sklearn.utils._sorting cimport MIXED, THREE_WAY, simultaneous_sort
 
 # Constant to switch between algorithm non zero value extract algorithm
 # in SparsePartitioner
@@ -148,7 +148,7 @@ cdef class DensePartitioner:
                 &self.feature_values[self.start],
                 &self.samples[self.start],
                 end_non_missing - self.start,
-                use_three_way_partition=False,
+                MIXED,
             )
 
             # if there are missing values found in this current candidate split, then
@@ -219,7 +219,7 @@ cdef class DensePartitioner:
         # sorted_cat[i] = i-th categories sorted by ascending means
         for c in range(nc):
             sorted_cat[c] = c
-        simultaneous_sort(means, sorted_cat, nc, use_three_way_partition=True)
+        simultaneous_sort(means, sorted_cat, nc, THREE_WAY)
 
         # build offsets such that:
         # offsets[c] = sum( counts[x] for all x s.t. rank(x) <= rank(c) ) - 1
@@ -521,14 +521,14 @@ cdef class SparsePartitioner:
             &self.feature_values[self.start],
             &self.samples[self.start],
             self.end_negative - self.start,
-            use_three_way_partition=True,
+            THREE_WAY,
         )
         if self.start_positive < self.end:
             simultaneous_sort(
                 &self.feature_values[self.start_positive],
                 &self.samples[self.start_positive],
                 self.end - self.start_positive,
-                use_three_way_partition=True,
+                THREE_WAY,
             )
 
         # Update index_to_samples to take into account the sort

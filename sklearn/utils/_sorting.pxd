@@ -2,9 +2,17 @@ from sklearn.utils._typedefs cimport intp_t
 
 from cython cimport floating
 
+
+cpdef enum SortPartitioning:
+    # See simultaneous_sort for when to use each of them.
+    TWO_WAY
+    THREE_WAY
+    MIXED
+
+
 cdef void simultaneous_sort(
     floating* values,
     intp_t* indices,
     intp_t n,
-    bint use_three_way_partition=*,
+    SortPartitioning partitioning=*,
 ) noexcept nogil

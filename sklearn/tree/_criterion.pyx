@@ -13,7 +13,7 @@ from scipy.special.cython_special cimport xlogy
 
 from sklearn.tree._utils cimport log
 from sklearn.tree._utils cimport WeightedFenwickTree
-from sklearn.utils._sorting cimport simultaneous_sort
+from sklearn.utils._sorting cimport THREE_WAY, simultaneous_sort
 
 # EPSILON is used in the Poisson criterion
 cdef float64_t EPSILON = 10 * np.finfo('double').eps
@@ -1138,7 +1138,7 @@ cdef inline void compute_ranks(
     cdef intp_t i
     for i in range(n):
         sorted_indices[i] = i
-    simultaneous_sort(sorted_y, sorted_indices, n, use_three_way_partition=True)
+    simultaneous_sort(sorted_y, sorted_indices, n, THREE_WAY)
     for i in range(n):
         ranks[sorted_indices[i]] = i
 
