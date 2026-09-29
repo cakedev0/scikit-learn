@@ -349,6 +349,13 @@ cdef inline int node_split_best(
 
     cdef int i
 
+    # With dense data, the samples are ordered such that the best split found so
+    # far sends samples[start:best_split.pos] to the left child, as long as the
+    # samples are not reordered by the next sort or shift of missing values.
+    # This order is then saved to reuse it instead of partitioning the samples
+    # again by reading X, which is slow.
+    cdef bint best_order_is_current = False
+
     _init_split(&best_split, end)
 
     partitioner.init_node_split(start, end)
@@ -396,6 +403,10 @@ cdef inline int node_split_best(
         f_j += n_found_constants
         # f_j in the interval [n_total_constants, f_i[
         current_split.feature = features[f_j]
+        if Partitioner is DensePartitioner:
+            if best_order_is_current:
+                partitioner.save_samples_order()
+                best_order_is_current = False
         is_constant = partitioner.sort_samples_and_feature_values(
             current_split.feature
         )
@@ -429,6 +440,10 @@ cdef inline int node_split_best(
         for i in range(n_searches):
             missing_go_to_left = i == 1
             if missing_go_to_left:
+                if Partitioner is DensePartitioner:
+                    if best_order_is_current:
+                        partitioner.save_samples_order()
+                        best_order_is_current = False
                 partitioner.shift_missing_to_the_left()
 
             criterion.reset()
@@ -498,12 +513,17 @@ cdef inline int node_split_best(
                         current_split.missing_go_to_left = missing_go_to_left
 
                     best_split = current_split  # copy
+                    best_order_is_current = True
 
     # Reorganize into samples[start:best_split.pos] + samples[best_split.pos:end]
     if best_split.pos < end:
-        partitioner.partition_samples_final(
-            &best_split
-        )
+        if Partitioner is DensePartitioner:
+            if not best_order_is_current:
+                partitioner.restore_samples_order()
+        else:
+            partitioner.partition_samples_final(
+                &best_split
+            )
 
         criterion.reset()
         criterion.update(best_split.pos)
@@ -830,6 +850,7 @@ cdef class BestSplitter(Splitter):
             X, y, sample_weight, self.samples, self.feature_values,
             missing_values_in_feature_mask, n_categories, rank_encoding,
         )
+        self.partitioner.best_samples = np.empty_like(self.samples)
 
     cdef int node_split(
             self,

@@ -13,6 +13,8 @@ from scipy.sparse import issparse
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.utils import _safe_indexing
 from sklearn.utils._missing import is_scalar_nan
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
+from sklearn.utils.parallel import Parallel, delayed
 from sklearn.utils.validation import (
     _check_categorical_features,
     _check_n_features,
@@ -205,6 +207,20 @@ class _RankEncoding:
 
 _CODE_DTYPES = (np.uint8, np.uint16, np.uint32)
 
+# Below this number of values to encode, encoding features in parallel threads
+# is not worth its overhead.
+_MIN_VALUES_FOR_PARALLEL_ENCODING = 1_000_000
+
+
+def _rank_encode_feature(values):
+    """Sorted unique values of a feature and the codes of its values."""
+    # NaNs are sorted last and collapsed into a single unique value.
+    uniques, codes = np.unique(values, return_inverse=True)
+    dtype = next(
+        dtype for dtype in _CODE_DTYPES if uniques.shape[0] - 1 <= np.iinfo(dtype).max
+    )
+    return uniques, codes.reshape(-1).astype(dtype)
+
 
 def _rank_encode(X, n_categories):
     """Rank-encode the numerical features of a dense X.
@@ -230,30 +246,34 @@ def _rank_encode(X, n_categories):
     all_uniques = []
     codes_per_dtype = {dtype: [] for dtype in _CODE_DTYPES}
 
-    for j in range(n_features):
-        if n_categories[j] < 0:
-            # NaNs are sorted last and collapsed into a single unique value.
-            uniques, codes = np.unique(X[:, j], return_inverse=True)
-            dtype = next(
-                dtype
-                for dtype in _CODE_DTYPES
-                if uniques.shape[0] - 1 <= np.iinfo(dtype).max
-            )
-            code_width[j] = np.dtype(dtype).itemsize
-            code_column[j] = len(codes_per_dtype[dtype])
-            max_code[j] = uniques.shape[0] - 1
-            codes_per_dtype[dtype].append(codes.reshape(-1).astype(dtype))
-            all_uniques.append(uniques)
-        uniques_offset[j + 1] = uniques_offset[j] + (
-            all_uniques[-1].shape[0] if n_categories[j] < 0 else 0
-        )
+    numerical_features = np.flatnonzero(np.asarray(n_categories) < 0)
+    # np.unique sorts with the GIL released.
+    n_threads = (
+        min(_openmp_effective_n_threads(), numerical_features.shape[0])
+        if n_samples * numerical_features.shape[0] >= _MIN_VALUES_FOR_PARALLEL_ENCODING
+        else 1
+    )
+    encoded_features = Parallel(n_jobs=n_threads, prefer="threads")(
+        delayed(_rank_encode_feature)(X[:, j]) for j in numerical_features
+    )
+
+    for j, (uniques, codes) in zip(numerical_features, encoded_features):
+        code_width[j] = codes.dtype.itemsize
+        code_column[j] = len(codes_per_dtype[codes.dtype.type])
+        max_code[j] = uniques.shape[0] - 1
+        codes_per_dtype[codes.dtype.type].append(codes)
+        all_uniques.append(uniques)
+        uniques_offset[j + 1] = uniques.shape[0]
+    uniques_offset = np.cumsum(uniques_offset)
 
     codes = tuple(
-        np.asfortranarray(np.stack(codes_list, axis=1))
-        if codes_list
-        else np.empty((n_samples, 0), dtype=dtype, order="F")
+        np.empty((n_samples, len(codes_list)), dtype=dtype, order="F")
         for dtype, codes_list in codes_per_dtype.items()
     )
+    for dtype_codes, codes_list in zip(codes, codes_per_dtype.values()):
+        for column, column_codes in enumerate(codes_list):
+            # Contiguous copy into a Fortran-ordered array: cheap.
+            dtype_codes[:, column] = column_codes
     uniques = (
         np.concatenate(all_uniques).astype(np.float32, copy=False)
         if all_uniques

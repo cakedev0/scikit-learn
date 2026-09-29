@@ -142,12 +142,17 @@ cdef class DensePartitioner:
     cdef uint8_t[::1] node_codes_buffer
     cdef intp_t[::1] samples_buffer
     cdef intp_t[::1] radix_counts
+    # Samples order of the best split found so far in the current node (see
+    # node_split_best). Only allocated for best splits.
+    cdef intp_t[::1] best_samples
 
     cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
     cdef intp_t radix_sort_samples(self, intp_t current_feature) noexcept nogil
     cdef void shift_missing_to_the_left(self) noexcept nogil
+    cdef void save_samples_order(self) noexcept nogil
+    cdef void restore_samples_order(self) noexcept nogil
     cdef void init_node_split(
         self,
         intp_t start,

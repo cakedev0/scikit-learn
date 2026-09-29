@@ -363,6 +363,22 @@ cdef class DensePartitioner:
         swap_array_slices(self.samples, self.start, self.end, n_non_missing, self.swap_buffer)
         swap_array_slices(self.feature_values, self.start, self.end, n_non_missing, self.swap_buffer)
 
+    cdef void save_samples_order(self) noexcept nogil:
+        """Save the order of samples[start:end] in best_samples."""
+        memcpy(
+            &self.best_samples[self.start],
+            &self.samples[self.start],
+            (self.end - self.start) * sizeof(intp_t),
+        )
+
+    cdef void restore_samples_order(self) noexcept nogil:
+        """Restore the order of samples[start:end] saved by save_samples_order."""
+        memcpy(
+            &self.samples[self.start],
+            &self.best_samples[self.start],
+            (self.end - self.start) * sizeof(intp_t),
+        )
+
     cdef inline void find_min_max(
         self,
         intp_t current_feature,
