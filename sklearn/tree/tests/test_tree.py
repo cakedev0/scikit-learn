@@ -633,10 +633,10 @@ def test_error():
 
     # non positive target for Poisson splitting Criterion
     est = DecisionTreeRegressor(criterion="poisson")
-    with pytest.raises(ValueError, match="y is not positive.*Poisson"):
-        est.fit([[0, 1, 2]], [0, 0, 0])
+    with pytest.raises(ValueError, match="y is not strictly positive.*Poisson"):
+        est.fit([[0], [1], [2]], [0, 0, 0])
     with pytest.raises(ValueError, match="Some.*y are negative.*Poisson"):
-        est.fit([[0, 1, 2]], [5, -0.1, 2])
+        est.fit([[0], [1], [2]], [5, -0.1, 2])
 
 
 def test_min_samples_split():
@@ -1714,7 +1714,7 @@ def test_no_sparse_y_support(name, csr_container):
     # Currently we don't support sparse y
     X, y = X_multilabel, csr_container(y_multilabel)
     TreeEstimator = ALL_TREES[name]
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="sparse multilabel-indicator for y"):
         TreeEstimator(random_state=0).fit(X, y)
 
 
@@ -3144,19 +3144,56 @@ def test_fit_categorical_with_monotonic_constraint(Tree):
 
 
 def test_fit_categorical_with_absolute_error():
-    # Non-regression test: the categorical split-finding algorithm is not
-    # valid for criterion="absolute_error" (see gh-34578), so it should be
-    # rejected rather than silently return a possibly suboptimal split.
+    # Non-regression test: the best splitter's categorical split-finding
+    # algorithm is not valid for criterion="absolute_error" (see gh-34578), so it
+    # should be rejected rather than silently return a possibly suboptimal split.
     X = np.array([[0.0], [1.0], [0.0], [1.0]], dtype=np.float64)
     y = np.array([0.0, 1.0, 0.0, 1.0])
 
     with pytest.raises(
         ValueError,
-        match="Categorical features are not supported with criterion='absolute_error'",
+        match=(
+            "Categorical features with splitter='best' are not supported with "
+            "criterion='absolute_error'"
+        ),
     ):
         DecisionTreeRegressor(categorical_features=[0], criterion="absolute_error").fit(
             X, y
         )
+
+
+@pytest.mark.parametrize("with_sample_weight", [False, True])
+def test_random_splitter_categorical_absolute_error(with_sample_weight):
+    """Random categorical splits are evaluated exactly with absolute_error.
+
+    Each node must store the weighted median of its training targets and the
+    corresponding weighted mean absolute error as impurity.
+    """
+    rng = np.random.RandomState(0)
+    n_samples = 300
+    X = np.c_[rng.randint(0, 12, n_samples), rng.randint(0, 5, n_samples)]
+    y = X[:, 0] % 3 + 2 * (X[:, 1] == 2) + rng.laplace(size=n_samples)
+    sample_weight = rng.randint(1, 4, n_samples) if with_sample_weight else None
+
+    tree = ExtraTreeRegressor(
+        criterion="absolute_error",
+        categorical_features=[0, 1],
+        min_samples_leaf=5,
+        random_state=0,
+    ).fit(X, y, sample_weight=sample_weight)
+    assert tree.tree_.max_depth > 1
+
+    weights = np.ones(n_samples) if sample_weight is None else sample_weight
+    node_indicator = tree.decision_path(X).toarray().astype(bool)
+    for node in range(tree.tree_.node_count):
+        y_node = y[node_indicator[:, node]]
+        w_node = weights[node_indicator[:, node]]
+        # A weighted median is reached at one of the targets.
+        errors = np.abs(y_node[:, None] - y_node[None, :]).T @ w_node / w_node.sum()
+        median = tree.tree_.value[node, 0, 0]
+        error_at_median = np.abs(y_node - median) @ w_node / w_node.sum()
+        assert error_at_median == pytest.approx(errors.min())
+        assert tree.tree_.impurity[node] == pytest.approx(errors.min())
 
 
 def test_predict_sparse_int64_indices_raises():
@@ -3199,8 +3236,14 @@ def test_fit_categorical_raw_labels_are_reencoded(Tree, X, raw_categories):
 
     assert_array_equal(est.is_categorical_, [True])
     assert_array_equal(est.tree_._n_categories, [2])
-    assert_array_equal(est._categorical_encoder.categories_[0], raw_categories)
-    assert_array_equal(est._categorical_encoder.transform(X).ravel(), [0, 0, 1, 1])
+    assert_array_equal(
+        est._categorical_encoder.categories_[0],
+        raw_categories,
+    )
+    assert_array_equal(
+        est._categorical_encoder.transform(X).ravel(),
+        [0, 0, 1, 1],
+    )
     assert_array_equal(est.predict(X), y)
 
 
