@@ -6,7 +6,6 @@ from cython cimport floating
 cpdef enum SortPartitioning:
     # See simultaneous_sort for when to use each of them.
     TWO_WAY
-    THREE_WAY
     MIXED
 
 

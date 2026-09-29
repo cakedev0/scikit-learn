@@ -18,18 +18,18 @@ cdef void simultaneous_sort(
              i = np.argsort(values)
              return values[i], indices[i]
 
-    Algorithm: Introsort (Musser, SP&E, 1997) with three variants for the
+    Algorithm: Introsort (Musser, SP&E, 1997) with two variants for the
     partitioning of the quicksort part:
 
-    - TWO_WAY: [x <= pivot] [pivot] [x >= pivot]. There are three parts too,
-      but the middle part is only the selected pivot element, not all values
-      equal to the pivot. This variant is the fastest when values are distinct.
-    - THREE_WAY: [x < pivot] [x == pivot] [x > pivot]. This variant is fast
-      when working with many duplicate values, otherwise it's slower.
+    - TWO_WAY: 2-way partitioning, [x <= pivot] [pivot] [x >= pivot]. There
+      are three parts too, but the middle part is only the selected pivot
+      element, not all values equal to the pivot. This variant is fast when
+      values are distinct, but slow when working with many duplicate values.
     - MIXED: 2-way partitioning, except at the recursion levels where the
       median of 3 pivot sample contains duplicates, which use 3-way
-      partitioning. This variant is close to the fastest of the two others in
-      both cases.
+      partitioning: [x < pivot] [x == pivot] [x > pivot]. This variant is
+      fast in both cases, but can be slower than TWO_WAY on some structured
+      inputs (e.g. periodic values).
 
     Notes
     -----
@@ -46,9 +46,7 @@ cdef void simultaneous_sort(
     if n == 0:
         return
     cdef intp_t maxd = 2 * <intp_t>log2(n)
-    if partitioning == THREE_WAY:
-        introsort_3way(values, indices, n, maxd)
-    elif partitioning == TWO_WAY:
+    if partitioning == TWO_WAY:
         introsort_2way(values, indices, n, maxd)
     else:
         introsort_mixed(values, indices, n, maxd)
@@ -87,33 +85,6 @@ cdef void introsort_2way(
         values += pivot_idx + 1
         indices += pivot_idx + 1
         n -= pivot_idx + 1
-
-    # in the small-array case, insertion sort is faster
-    insertion_sort(values, indices, n)
-
-
-cdef void introsort_3way(
-    floating* values, intp_t* indices, intp_t n, intp_t maxd
-) noexcept nogil:
-    cdef floating pivot
-    cdef intp_t l, r
-
-    while n > 15:
-        if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
-            heapsort(values, indices, n)
-            return
-        maxd -= 1
-
-        pivot = median3(values, n)
-        partition_3way(values, indices, n, pivot, &l, &r)
-
-        # Recursively sort left side:
-        introsort_3way(values, indices, l, maxd)
-
-        # Continue with right side:
-        values += r
-        indices += r
-        n -= r
 
     # in the small-array case, insertion sort is faster
     insertion_sort(values, indices, n)
@@ -269,26 +240,6 @@ cdef inline floating inplace_median3(floating* values, intp_t* indices, intp_t n
         if values[0] > values[n - 1]:
             swap(values, indices, 0, n - 1)
     return values[n - 1]
-
-
-cdef inline floating median3(floating* feature_values, intp_t n) noexcept nogil:
-    # Median of three pivot selection, after Bentley and McIlroy (1993).
-    # Engineering a sort function. SP&E. Requires 8/3 comparisons on average.
-    cdef floating a = feature_values[0], b = feature_values[n / 2], c = feature_values[n - 1]
-    if a < b:
-        if b < c:
-            return b
-        elif a < c:
-            return c
-        else:
-            return a
-    elif b < c:
-        if a < c:
-            return a
-        else:
-            return c
-    else:
-        return b
 
 
 cdef inline void swap(floating* values, intp_t* indices,
