@@ -39,6 +39,7 @@ cdef void _radix_sort_by_code(
     radix_t max_code,
     const float32_t* uniques,
     intp_t* samples,
+    const intp_t* node_samples,
     float32_t* feature_values,
     intp_t n,
     radix_t* node_codes,
@@ -53,8 +54,12 @@ cdef void _radix_sort_by_code(
     As codes are sorted, uniques is read in increasing order.
     """
     cdef intp_t i
-    for i in range(n):
-        node_codes[i] = feature_codes[samples[i]]
+    if node_samples == NULL:
+        for i in range(n):
+            node_codes[i] = feature_codes[samples[i]]
+    else:
+        for i in range(n):
+            node_codes[i] = feature_codes[node_samples[samples[i]]]
     radix_sort(
         node_codes, samples, n, max_code, node_codes_buffer, samples_buffer, radix_counts
     )
@@ -244,21 +249,21 @@ cdef class DensePartitioner:
         if width == 1:
             _radix_sort_by_code(
                 &self.codes_uint8[0, column], <uint8_t> max_code, uniques,
-                &self.samples[start], &self.feature_values[start], n,
+                &self.samples[start], self.node_samples, &self.feature_values[start], n,
                 <uint8_t*> &self.node_codes[0], <uint8_t*> &self.node_codes_buffer[0],
                 &self.samples_buffer[0], &self.radix_counts[0],
             )
         elif width == 2:
             _radix_sort_by_code(
                 &self.codes_uint16[0, column], <uint16_t> max_code, uniques,
-                &self.samples[start], &self.feature_values[start], n,
+                &self.samples[start], self.node_samples, &self.feature_values[start], n,
                 <uint16_t*> &self.node_codes[0], <uint16_t*> &self.node_codes_buffer[0],
                 &self.samples_buffer[0], &self.radix_counts[0],
             )
         else:
             _radix_sort_by_code(
                 &self.codes_uint32[0, column], <uint32_t> max_code, uniques,
-                &self.samples[start], &self.feature_values[start], n,
+                &self.samples[start], self.node_samples, &self.feature_values[start], n,
                 <uint32_t*> &self.node_codes[0], <uint32_t*> &self.node_codes_buffer[0],
                 &self.samples_buffer[0], &self.radix_counts[0],
             )
@@ -517,9 +522,13 @@ cdef class DensePartitioner:
             bint best_missing_go_to_left = best_split[0].missing_go_to_left
             float32_t current_value
             bint go_to_left
+            intp_t sample, j
 
         while partition_start < partition_end:
-            current_value = self.X[samples[partition_start], best_feature]
+            sample = samples[partition_start]
+            if self.node_samples != NULL:
+                sample = self.node_samples[sample]
+            current_value = self.X[sample, best_feature]
 
             go_to_left = goes_left(
                 best_split[0].threshold,
@@ -534,6 +543,16 @@ cdef class DensePartitioner:
                 partition_end -= 1
                 samples[partition_start], samples[partition_end] = (
                     samples[partition_end], samples[partition_start])
+
+        if self.node_samples != NULL:
+            # Reorder the node samples like their positions.
+            for j in range(self.start, self.end):
+                self.samples_buffer[j] = self.node_samples[samples[j]]
+            memcpy(
+                &self.node_samples[self.start],
+                &self.samples_buffer[self.start],
+                (self.end - self.start) * sizeof(intp_t),
+            )
 
     cdef inline void cat_position_to_split_bitset(
         self,

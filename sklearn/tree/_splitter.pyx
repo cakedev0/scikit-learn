@@ -831,6 +831,17 @@ cdef inline int node_split_random(
 cdef class BestSplitter(Splitter):
     """Splitter for finding the best split on dense data."""
     cdef DensePartitioner partitioner
+
+    # NODE-LOCAL PROTOTYPE: when all features are rank-encoded, y and
+    # sample_weight of the node samples are gathered once per node into
+    # y_node / w_node, and the split search sorts positions in the node
+    # (local_pos) instead of sample indices, so that the criterion reads
+    # node-local arrays instead of the whole y / sample_weight.
+    cdef bint node_local
+    cdef float64_t[:, ::1] y_node
+    cdef float64_t[::1] w_node
+    cdef intp_t[::1] local_pos
+
     cdef int init(
         self,
         object X,
@@ -844,23 +855,88 @@ cdef class BestSplitter(Splitter):
             self, X, y, sample_weight, missing_values_in_feature_mask, n_categories,
             rank_encoding,
         )
+        self.node_local = (
+            rank_encoding is not None and bool(np.all(rank_encoding.code_width != 0))
+        )
+        if self.node_local:
+            self.y_node = np.empty_like(np.asarray(y))
+            self.w_node = (
+                None if sample_weight is None
+                else np.empty(y.shape[0], dtype=np.float64)
+            )
+            self.local_pos = np.empty(y.shape[0], dtype=np.intp)
         self.partitioner = DensePartitioner(
-            X, y, sample_weight, self.samples, self.feature_values,
+            X, y, sample_weight,
+            self.local_pos if self.node_local else self.samples,
+            self.feature_values,
             missing_values_in_feature_mask, n_categories, rank_encoding,
         )
+
+    cdef int node_reset(
+        self,
+        intp_t start,
+        intp_t end,
+        float64_t* weighted_n_node_samples
+    ) except -1 nogil:
+        if not self.node_local:
+            return Splitter.node_reset(self, start, end, weighted_n_node_samples)
+
+        self.start = start
+        self.end = end
+        cdef float64_t tic = _now()
+        cdef intp_t j, k, sample
+        cdef intp_t n_outputs = self.y.shape[1]
+        for j in range(end - start):
+            sample = self.samples[start + j]
+            self.local_pos[j] = j
+            for k in range(n_outputs):
+                self.y_node[j, k] = self.y[sample, k]
+            if self.sample_weight is not None:
+                self.w_node[j] = self.sample_weight[sample]
+        self.criterion.init(
+            self.y_node,
+            self.w_node,
+            self.weighted_n_samples,
+            self.local_pos,
+            0,
+            end - start,
+        )
+        self.time_node_reset += _now() - tic
+        weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
+        return 0
 
     cdef int node_split(
             self,
             ParentInfo* parent_record,
             SplitRecord* split,
     ) except -1 nogil:
-        return node_split_best(
+        if not self.node_local:
+            return node_split_best(
+                self,
+                self.partitioner,
+                self.criterion,
+                split,
+                parent_record,
+            )
+
+        # Search in node-local positions [0, n_node).
+        cdef intp_t start = self.start
+        cdef intp_t end = self.end
+        cdef int ret
+        self.partitioner.node_samples = &self.samples[start]
+        self.start = 0
+        self.end = end - start
+        ret = node_split_best(
             self,
             self.partitioner,
             self.criterion,
             split,
             parent_record,
         )
+        self.start = start
+        self.end = end
+        split[0].pos += start
+        return ret
 
 cdef class BestSparseSplitter(Splitter):
     """Splitter for finding the best split, using the sparse data."""

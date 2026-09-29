@@ -129,6 +129,9 @@ cdef class DensePartitioner:
     # Rank encoding of the numerical features (see `_RankEncoding`), to sort
     # samples by radix sort.
     cdef bint has_rank_encoding
+    # NODE-LOCAL PROTOTYPE: when not NULL, `samples` holds positions in the
+    # current node, and node_samples[position] is the sample index.
+    cdef intp_t* node_samples
     cdef const uint8_t[::1, :] codes_uint8
     cdef const uint16_t[::1, :] codes_uint16
     cdef const uint32_t[::1, :] codes_uint32
