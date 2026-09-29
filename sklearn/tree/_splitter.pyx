@@ -22,6 +22,7 @@ of splitting strategies:
 
 from libc.math cimport INFINITY
 from libc.string cimport memcpy
+from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
 
 from sklearn.tree._criterion cimport Criterion
 from sklearn.tree._partitioner cimport (
@@ -246,6 +247,7 @@ cdef class Splitter:
         self.start = start
         self.end = end
 
+        cdef float64_t tic = _now()
         self.criterion.init(
             self.y,
             self.sample_weight,
@@ -254,6 +256,7 @@ cdef class Splitter:
             start,
             end
         )
+        self.time_node_reset += _now() - tic
 
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
         return 0
@@ -288,6 +291,13 @@ cdef class Splitter:
         """Return the impurity of the current node."""
 
         return self.criterion.node_impurity()
+
+
+cdef inline float64_t _now() noexcept nogil:
+    """Monotonic wall time in seconds (PHASE TIMERS)."""
+    cdef timespec ts
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    return ts.tv_sec + 1e-9 * ts.tv_nsec
 
 
 cdef inline int node_split_best(
@@ -348,6 +358,7 @@ cdef inline int node_split_best(
     cdef intp_t n_total_constants = n_known_constants
 
     cdef int i
+    cdef float64_t tic
 
     _init_split(&best_split, end)
 
@@ -396,9 +407,12 @@ cdef inline int node_split_best(
         f_j += n_found_constants
         # f_j in the interval [n_total_constants, f_i[
         current_split.feature = features[f_j]
+        tic = _now()
         is_constant = partitioner.sort_samples_and_feature_values(
             current_split.feature
         )
+        splitter.time_sort += _now() - tic
+        splitter.n_sorts += 1
         n_missing = partitioner.n_missing
 
         if is_constant:
@@ -426,6 +440,7 @@ cdef inline int node_split_best(
         # optimal split.
         n_searches = 2 if has_missing else 1
 
+        tic = _now()
         for i in range(n_searches):
             missing_go_to_left = i == 1
             if missing_go_to_left:
@@ -498,9 +513,11 @@ cdef inline int node_split_best(
                         current_split.missing_go_to_left = missing_go_to_left
 
                     best_split = current_split  # copy
+        splitter.time_search += _now() - tic
 
     # Reorganize into samples[start:best_split.pos] + samples[best_split.pos:end]
     if best_split.pos < end:
+        tic = _now()
         partitioner.partition_samples_final(
             &best_split
         )
@@ -516,6 +533,7 @@ cdef inline int node_split_best(
             best_split.impurity_left,
             best_split.impurity_right
         )
+        splitter.time_final += _now() - tic
 
     # Respect invariant for constant features: the original order of
     # element in features[:n_known_constants] must be preserved for sibling
