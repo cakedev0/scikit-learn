@@ -1788,7 +1788,7 @@ def test_categorical_from_dtype(constructor_name):
     assert_array_equal(est.is_categorical_, [False, True])
     assert_array_equal(est.feature_names_in_, ["f_num", "f_cat"])
     for tree in est.estimators_.ravel():
-        assert tree._preprocessor is None
+        assert tree._categorical_encoder is None
     assert_array_equal(est.predict(X), y)
 
 

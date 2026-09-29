@@ -318,7 +318,7 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
         X, y, fit_kwargs = self._validate_and_preprocess_X(
             X, y, reset=True, check_input=True
         )
-        has_categorical = self._preprocessor is not None
+        has_categorical = self._categorical_encoder is not None
 
         if has_categorical and self.warm_start and getattr(self, "estimators_", None):
             raise ValueError(

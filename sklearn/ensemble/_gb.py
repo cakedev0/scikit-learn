@@ -649,7 +649,7 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
         X, y, fit_kwargs = self._validate_and_preprocess_X(
             X, y, reset=True, check_input=True
         )
-        if self._preprocessor is not None and self._is_fitted():
+        if self._categorical_encoder is not None and self._is_fitted():
             raise ValueError(
                 "warm_start is not supported with categorical features. "
                 "Refitting would re-encode categories and invalidate splits "

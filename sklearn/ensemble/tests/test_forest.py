@@ -1944,12 +1944,10 @@ def test_fit_categorical_raw_labels_are_reencoded(name):
     est = Forest(categorical_features=[0], n_estimators=5, random_state=0).fit(X, y)
 
     assert_array_equal(est.is_categorical_, [True])
-    assert_array_equal(
-        est._preprocessor.named_transformers_["categorical"].categories_[0], ["a", "b"]
-    )
+    assert_array_equal(est._categorical_encoder.categories_[0], ["a", "b"])
     assert_array_equal(est.estimators_[0].is_categorical_, [True])
     # Forest owns encoding; trees must not re-fit their own preprocessor.
-    assert est.estimators_[0]._preprocessor is None
+    assert est.estimators_[0]._categorical_encoder is None
     assert_array_equal(est.predict(X), y)
 
 
@@ -1984,7 +1982,7 @@ def test_categorical_from_dtype_propagated_to_trees(name, constructor_name):
     assert_array_equal(est.is_categorical_, [False, True])
     for tree in est.estimators_:
         assert_array_equal(tree.is_categorical_, [False, True])
-        assert tree._preprocessor is None
+        assert tree._categorical_encoder is None
 
 
 @pytest.mark.parametrize("name", FOREST_CLASSIFIERS_REGRESSORS)

@@ -3237,11 +3237,11 @@ def test_fit_categorical_raw_labels_are_reencoded(Tree, X, raw_categories):
     assert_array_equal(est.is_categorical_, [True])
     assert_array_equal(est.tree_._n_categories, [2])
     assert_array_equal(
-        est._preprocessor.named_transformers_["categorical"].categories_[0],
+        est._categorical_encoder.categories_[0],
         raw_categories,
     )
     assert_array_equal(
-        est._preprocessor.named_transformers_["categorical"].transform(X).ravel(),
+        est._categorical_encoder.transform(X).ravel(),
         [0, 0, 1, 1],
     )
     assert_array_equal(est.predict(X), y)

@@ -25,10 +25,9 @@ from sklearn.base import (
     clone,
     is_classifier,
 )
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder
 from sklearn.tree import _criterion, _splitter
 from sklearn.tree._criterion import Criterion
+from sklearn.tree._preprocessing import _get_n_categories, _validate_X
 from sklearn.tree._tree import MAX_NUM_CATEGORIES_PY as MAX_NUM_CATEGORIES
 from sklearn.tree._tree import (
     BestFirstTreeBuilder,
@@ -43,17 +42,13 @@ from sklearn.utils import (
     compute_sample_weight,
     metadata_routing,
 )
-from sklearn.utils._missing import is_scalar_nan
 from sklearn.utils._param_validation import Hidden, Interval, RealNotInt, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import (
-    _check_categorical_features,
-    _check_n_features,
     _check_sample_weight,
     check_array,
     check_consistent_length,
     check_is_fitted,
-    validate_data,
 )
 
 __all__ = [
@@ -90,69 +85,6 @@ SPARSE_SPLITTERS = {
     "best": _splitter.BestSparseSplitter,
     "random": _splitter.RandomSparseSplitter,
 }
-
-
-def _preprocess_X(estimator, X, *, reset):
-    """Encode categorical features and cast numerical features to float32.
-
-    Shared by trees and forests. At fit time (``reset=True``), also detect the
-    categorical features. X is returned unchanged if there is no categorical
-    feature.
-    """
-    if reset:
-        estimator._preprocessor = None
-        # RandomTreesEmbedding has no `categorical_features` parameter.
-        if hasattr(estimator, "categorical_features"):
-            estimator.is_categorical_ = _check_categorical_features(
-                X, estimator.categorical_features
-            )
-        if getattr(estimator, "is_categorical_", None) is not None:
-            ordinal_encoder = OrdinalEncoder(
-                dtype=np.float32,
-                categories="auto",
-                handle_unknown="use_encoded_value",
-                unknown_value=np.nan,
-                encoded_missing_value=np.nan,
-            )
-            numerical_transformer = FunctionTransformer(
-                check_array,
-                kw_args={"dtype": np.float32, "ensure_all_finite": False},
-            )
-            transformers = [
-                ("categorical", ordinal_encoder, estimator.is_categorical_),
-                ("numerical", numerical_transformer, ~estimator.is_categorical_),
-            ]
-            estimator._preprocessor = ColumnTransformer(
-                transformers, sparse_threshold=0
-            )
-            estimator._preprocessor.set_output(transform="default")
-
-    if estimator._preprocessor is None:
-        return X
-
-    if issparse(X):
-        raise NotImplementedError(
-            "Categorical features not supported with sparse inputs"
-        )
-
-    if reset:
-        X_transformed = estimator._preprocessor.fit_transform(X)
-    else:
-        X_transformed = estimator._preprocessor.transform(X)
-
-    # ColumnTransformer outputs categorical columns first. Remap back to the
-    # original input order so tree_.feature indices match user column order.
-    n_samples = X_transformed.shape[0]
-    n_features = estimator.is_categorical_.shape[0]
-    X_out = np.empty((n_samples, n_features), dtype=np.float32)
-
-    cat_idx = estimator._preprocessor.output_indices_["categorical"]
-    X_out[:, estimator.is_categorical_] = X_transformed[:, cat_idx]
-
-    num_idx = estimator._preprocessor.output_indices_["numerical"]
-    X_out[:, ~estimator.is_categorical_] = X_transformed[:, num_idx]
-
-    return X_out
 
 
 # =============================================================================
@@ -260,9 +192,9 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         check_is_fitted(self)
         return self.tree_.n_leaves
 
-    # Set by `_preprocess_X` when `fit` encodes categorical features. Ensembles
+    # Set by `_validate_X` when `fit` encodes categorical features. Ensembles
     # encode X themselves and call `_fit_validated`, leaving it to None.
-    _preprocessor = None
+    _categorical_encoder = None
 
     def _fit_validated(
         self, X, y, sample_weight, missing_values_in_feature_mask, categorical_counts
@@ -577,49 +509,30 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             The `missing_values_in_feature_mask` and `categorical_counts`
             arguments of `_fit_validated`. Only returned at fit time.
         """
-        if check_input:
-            if reset and issparse(y):
-                raise ValueError("sparse multilabel-indicator for y is not supported.")
-            # Check feature names on the original input before categorical
-            # encoding converts it to a NumPy array and drops dataframe metadata.
-            # The number of features is checked after check_array
-            # (ensure_2d=False here), so that 1D inputs get check_array's
-            # informative error. At fit time, this also raises an informative
-            # error if y is None.
-            validate_data(
-                self,
-                X,
-                y if reset else "no_validation",
-                reset=reset,
-                skip_check_array=True,
-                ensure_2d=False,
-            )
-
-        X = _preprocess_X(self, X, reset=reset)
-
-        if check_input:
-            X = check_array(
-                X,
-                input_name="X",
-                estimator=self,
-                dtype=np.float32,
-                # Trees are built from CSC matrices and predict from CSR matrices.
-                accept_sparse="csc" if reset else "csr",
-                ensure_all_finite=(
-                    "allow-nan"
-                    if not issparse(X) and self.__sklearn_tags__().input_tags.allow_nan
-                    else True
-                ),
-            )
-            if issparse(X):
-                if X.indices.dtype != np.intc or X.indptr.dtype != np.intc:
-                    raise ValueError(
-                        "No support for np.int64 index based sparse matrices"
-                    )
-                if reset:
-                    # Sort once for all trees of an ensemble.
-                    X.sort_indices()
-        _check_n_features(self, X, reset=reset)
+        if check_input and reset and issparse(y):
+            raise ValueError("sparse multilabel-indicator for y is not supported.")
+        X = _validate_X(
+            self,
+            X,
+            # At fit time, validate_data raises an informative error if y is None.
+            y if reset else "no_validation",
+            reset=reset,
+            check_input=check_input,
+            dtype=np.float32,
+            # Trees are built from CSC matrices and predict from CSR matrices.
+            accept_sparse="csc" if reset else "csr",
+            ensure_all_finite=(
+                "allow-nan"
+                if not issparse(X) and self.__sklearn_tags__().input_tags.allow_nan
+                else True
+            ),
+        )
+        if check_input and issparse(X):
+            if X.indices.dtype != np.intc or X.indptr.dtype != np.intc:
+                raise ValueError("No support for np.int64 index based sparse matrices")
+            if reset:
+                # Sort once for all trees of an ensemble.
+                X.sort_indices()
 
         if not reset:
             return X
@@ -644,22 +557,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                         "is necessary for Poisson regression."
                     )
 
-        # Number of categories of each categorical feature, -1 for numerical ones.
-        categorical_counts = np.full(X.shape[1], -1, dtype=np.intp)
-        if self._preprocessor is not None:
-            categorical_encoder = self._preprocessor.named_transformers_["categorical"]
-            for idx, categories in zip(
-                np.flatnonzero(self.is_categorical_), categorical_encoder.categories_
-            ):
-                # OrdinalEncoder places np.nan last if missing values reach fit.
-                has_nan = len(categories) > 0 and is_scalar_nan(categories[-1])
-                categorical_counts[idx] = len(categories) - has_nan
-
         fit_kwargs = {
             "missing_values_in_feature_mask": np.isnan(
                 np.asarray(X.sum(axis=0)).ravel()
             ),
-            "categorical_counts": categorical_counts,
+            "categorical_counts": _get_n_categories(self),
         }
         return X, y, fit_kwargs
 
