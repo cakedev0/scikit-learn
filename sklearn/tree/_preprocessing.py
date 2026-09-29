@@ -1,4 +1,4 @@
-"""Input validation and categorical encoding shared by tree-based estimators.
+"""Input validation and encoding shared by tree-based estimators.
 
 Used by decision trees, forests, gradient boosting and histogram-based gradient
 boosting.
@@ -139,3 +139,126 @@ def _get_n_categories(estimator):
             has_nan = len(categories) > 0 and is_scalar_nan(categories[-1])
             n_categories[idx] = len(categories) - has_nan
     return n_categories
+
+
+class _RankEncoding:
+    """Rank encoding of the numerical features of a dense X.
+
+    Each numerical feature is encoded into the integer codes of its sorted
+    unique values (NaN, if any, being the last one). Trees use it to sort
+    samples by radix sort on the codes instead of comparison sort on X.
+
+    Codes are stored in the narrowest of uint8, uint16 and uint32, with one
+    Fortran-ordered array per dtype.
+
+    Attributes
+    ----------
+    codes_uint8, codes_uint16, codes_uint32 : ndarray of shape (n_samples, n)
+        Codes of the features encoded with each dtype.
+
+    code_width : ndarray of shape (n_features,), dtype=uint8
+        Number of bytes of the codes of each feature: 1, 2 or 4, or 0 for
+        features that are not encoded (categorical features).
+
+    code_column : ndarray of shape (n_features,), dtype=intp
+        Column of each feature in the codes array of its dtype.
+
+    max_code : ndarray of shape (n_features,), dtype=intp
+        Largest code of each feature, i.e. its number of unique values minus 1.
+
+    uniques : ndarray of shape (n_uniques,), dtype=float32
+        Sorted unique values of all features, concatenated: the unique values
+        of feature `j` are `uniques[uniques_offset[j]:uniques_offset[j + 1]]`.
+
+    uniques_offset : ndarray of shape (n_features + 1,), dtype=intp
+    """
+
+    def __init__(
+        self, codes, code_width, code_column, max_code, uniques, uniques_offset
+    ):
+        self.codes_uint8, self.codes_uint16, self.codes_uint32 = codes
+        self.code_width = code_width
+        self.code_column = code_column
+        self.max_code = max_code
+        self.uniques = uniques
+        self.uniques_offset = uniques_offset
+
+    def take(self, indices):
+        """Rank encoding of the samples at `indices`.
+
+        The unique values are kept: the codes stay valid even if some values
+        are not present anymore.
+        """
+        codes = tuple(
+            np.asfortranarray(codes.take(indices, axis=0))
+            for codes in (self.codes_uint8, self.codes_uint16, self.codes_uint32)
+        )
+        return _RankEncoding(
+            codes,
+            self.code_width,
+            self.code_column,
+            self.max_code,
+            self.uniques,
+            self.uniques_offset,
+        )
+
+
+_CODE_DTYPES = (np.uint8, np.uint16, np.uint32)
+
+
+def _rank_encode(X, n_categories):
+    """Rank-encode the numerical features of a dense X.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_samples, n_features), dtype=float32
+        Validated training data.
+
+    n_categories : ndarray of shape (n_features,)
+        Number of categories of each feature, -1 for numerical features. Only
+        numerical features are encoded.
+
+    Returns
+    -------
+    rank_encoding : _RankEncoding
+    """
+    n_samples, n_features = X.shape
+    code_width = np.zeros(n_features, dtype=np.uint8)
+    code_column = np.zeros(n_features, dtype=np.intp)
+    max_code = np.full(n_features, -1, dtype=np.intp)
+    uniques_offset = np.zeros(n_features + 1, dtype=np.intp)
+    all_uniques = []
+    codes_per_dtype = {dtype: [] for dtype in _CODE_DTYPES}
+
+    for j in range(n_features):
+        if n_categories[j] < 0:
+            # NaNs are sorted last and collapsed into a single unique value.
+            uniques, codes = np.unique(X[:, j], return_inverse=True)
+            dtype = next(
+                dtype
+                for dtype in _CODE_DTYPES
+                if uniques.shape[0] - 1 <= np.iinfo(dtype).max
+            )
+            code_width[j] = np.dtype(dtype).itemsize
+            code_column[j] = len(codes_per_dtype[dtype])
+            max_code[j] = uniques.shape[0] - 1
+            codes_per_dtype[dtype].append(codes.reshape(-1).astype(dtype))
+            all_uniques.append(uniques)
+        uniques_offset[j + 1] = uniques_offset[j] + (
+            all_uniques[-1].shape[0] if n_categories[j] < 0 else 0
+        )
+
+    codes = tuple(
+        np.asfortranarray(np.stack(codes_list, axis=1))
+        if codes_list
+        else np.empty((n_samples, 0), dtype=dtype, order="F")
+        for dtype, codes_list in codes_per_dtype.items()
+    )
+    uniques = (
+        np.concatenate(all_uniques).astype(np.float32, copy=False)
+        if all_uniques
+        else np.empty(0, dtype=np.float32)
+    )
+    return _RankEncoding(
+        codes, code_width, code_column, max_code, uniques, uniques_offset
+    )

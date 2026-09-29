@@ -8,6 +8,7 @@ import io
 import pickle
 import re
 import struct
+from functools import partial
 from itertools import chain, pairwise, product
 
 import joblib
@@ -19,6 +20,11 @@ from numpy.testing import assert_allclose
 
 from sklearn import clone, datasets, tree
 from sklearn.dummy import DummyRegressor
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from sklearn.exceptions import NotFittedError
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
@@ -44,6 +50,7 @@ from sklearn.tree._classes import (
     SPARSE_SPLITTERS,
 )
 from sklearn.tree._criterion import _py_precompute_absolute_errors
+from sklearn.tree._preprocessing import _rank_encode
 from sklearn.tree._tree import (
     NODE_DTYPE,
     TREE_LEAF,
@@ -3740,3 +3747,118 @@ def test_random_splitter_missing_values_uses_non_missing_min_max(X, y):
 
     assert np.isfinite(threshold)
     assert non_missing.min() <= threshold <= non_missing.max()
+
+
+def _fit_with_and_without_rank_encoding(tree, X, y):
+    """Fit tree with radix sort (rank encoding) and with comparison sort."""
+    trees = []
+    for use_rank_encoding in [True, False]:
+        est = clone(tree)
+        X_val, y_val, fit_kwargs = est._validate_and_preprocess_X(
+            X, y, reset=True, check_input=True
+        )
+        assert fit_kwargs["rank_encoding"] is not None
+        if not use_rank_encoding:
+            fit_kwargs["rank_encoding"] = None
+        est._fit_validated(X_val, y_val, None, **fit_kwargs)
+        trees.append(est.tree_)
+    return trees
+
+
+def _assert_same_tree(tree_a, tree_b):
+    assert_array_equal(tree_a.feature, tree_b.feature)
+    assert_array_equal(tree_a.threshold, tree_b.threshold)
+    assert_array_equal(tree_a.missing_go_to_left, tree_b.missing_go_to_left)
+    assert_array_equal(tree_a.value, tree_b.value)
+
+
+@pytest.mark.parametrize("criterion", ["gini", "entropy", "log_loss"])
+def test_radix_sort_same_tree_classification(criterion):
+    """Sorting by radix sort on rank-encoded X gives the same trees.
+
+    Class counts are exact whatever the order of the samples, so trees are
+    identical even with ties and missing values.
+    """
+    rng = np.random.RandomState(0)
+    n_samples = 1000
+    X = rng.randn(n_samples, 5)
+    X[:, 1] = np.round(X[:, 1] * 3)  # ties
+    X[:, 2] = rng.randint(0, 300, n_samples)  # uint16 codes
+    X[rng.rand(n_samples) < 0.1, 3] = np.nan
+    X[:, 4] = 1.0  # constant
+    y = (X[:, 0] + X[:, 1] + np.nan_to_num(X[:, 3]) > 0).astype(int)
+    y[rng.rand(n_samples) < 0.1] = 2
+
+    tree = DecisionTreeClassifier(criterion=criterion, random_state=0)
+    _assert_same_tree(*_fit_with_and_without_rank_encoding(tree, X, y))
+
+
+@pytest.mark.parametrize("criterion", ["squared_error", "absolute_error", "poisson"])
+def test_radix_sort_same_tree_regression(criterion):
+    """Sorting by radix sort on rank-encoded X gives the same trees.
+
+    Without ties, samples are sorted in the same order by both sorts.
+    """
+    rng = np.random.RandomState(0)
+    X = rng.randn(500, 4)
+    y = np.abs(X[:, 0] + X[:, 1] ** 2 + rng.randn(X.shape[0]))
+
+    tree = DecisionTreeRegressor(criterion=criterion, max_depth=6, random_state=0)
+    _assert_same_tree(*_fit_with_and_without_rank_encoding(tree, X, y))
+
+
+def test_rank_encode():
+    X = np.array(
+        [[0.5, 3, 1], [np.nan, 1, 0], [0.5, 2, 1], [-1, 1, 0]], dtype=np.float32
+    )
+    rank_encoding = _rank_encode(X, n_categories=np.array([-1, -1, 2]))
+
+    assert_array_equal(rank_encoding.code_width, [1, 1, 0])
+    assert_array_equal(rank_encoding.max_code, [2, 2, -1])
+    # NaN is the last unique value.
+    assert_array_equal(rank_encoding.uniques, [-1, 0.5, np.nan, 1, 2, 3])
+    assert_array_equal(rank_encoding.uniques_offset, [0, 3, 6, 6])
+    assert_array_equal(rank_encoding.codes_uint8, [[1, 2], [2, 0], [1, 1], [0, 0]])
+    assert rank_encoding.codes_uint8.flags.f_contiguous
+    assert rank_encoding.codes_uint16.shape == (4, 0)
+
+    subset = rank_encoding.take([3, 0])
+    assert_array_equal(subset.codes_uint8, [[0, 0], [1, 2]])
+    assert_array_equal(subset.uniques, rank_encoding.uniques)
+
+
+def test_rank_encode_code_dtypes():
+    """Codes use the narrowest unsigned integer dtype."""
+    X = np.stack(
+        [np.arange(70_000) % 256, np.arange(70_000) % 257, np.arange(70_000)], axis=1
+    ).astype(np.float32)
+    rank_encoding = _rank_encode(X, n_categories=np.full(3, -1))
+
+    assert_array_equal(rank_encoding.code_width, [1, 2, 4])
+    assert_array_equal(rank_encoding.code_column, [0, 0, 0])
+    assert_array_equal(rank_encoding.codes_uint32[:, 0], np.arange(70_000))
+
+
+@pytest.mark.parametrize(
+    "Estimator, n_calls",
+    [
+        (DecisionTreeRegressor, 1),
+        (ExtraTreeRegressor, 0),
+        (partial(RandomForestRegressor, n_estimators=3), 1),
+        (partial(ExtraTreesRegressor, n_estimators=3), 0),
+        (partial(GradientBoostingRegressor, n_estimators=3), 1),
+        (partial(GradientBoostingRegressor, n_estimators=3, n_iter_no_change=1), 1),
+    ],
+)
+def test_rank_encoding_computed_once(monkeypatch, Estimator, n_calls):
+    """Ensembles rank-encode X once for all trees, and only for best splits."""
+    calls = []
+
+    def counting_rank_encode(*args, **kwargs):
+        calls.append(1)
+        return _rank_encode(*args, **kwargs)
+
+    monkeypatch.setattr("sklearn.tree._classes._rank_encode", counting_rank_encode)
+    X, y = datasets.make_regression(n_samples=50, n_features=3, random_state=0)
+    Estimator(random_state=0).fit(X, y)
+    assert len(calls) == n_calls

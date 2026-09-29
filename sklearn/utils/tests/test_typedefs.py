@@ -14,6 +14,7 @@ from sklearn.utils._typedefs import testing_make_array_from_typed_val
         ("int32_t", 1, np.int32),
         ("int64_t", 1, np.int64),
         ("uint8_t", 1, np.uint8),
+        ("uint16_t", 1, np.uint16),
         ("uint32_t", 1, np.uint32),
         ("uint64_t", 1, np.uint64),
     ],

@@ -22,7 +22,9 @@ from scipy.sparse import issparse
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, init_bitset
 from sklearn.tree._utils cimport goes_left, MAX_NUM_CATEGORIES
 from sklearn.tree._splitter cimport SplitRecord
-from sklearn.utils._sorting cimport simultaneous_sort
+from sklearn.utils._sorting cimport (
+    RADIX_SORT_COUNTS_SIZE, radix_sort, radix_t, simultaneous_sort
+)
 
 # Constant to switch between algorithm non zero value extract algorithm
 # in SparsePartitioner
@@ -30,6 +32,34 @@ cdef float32_t EXTRACT_NNZ_SWITCH = 0.1
 
 # Allow for 32 bit float comparisons
 cdef float64_t INFINITY_64t = np.inf
+
+
+cdef void _radix_sort_by_code(
+    const radix_t* feature_codes,
+    radix_t max_code,
+    const float32_t* uniques,
+    intp_t* samples,
+    float32_t* feature_values,
+    intp_t n,
+    radix_t* node_codes,
+    radix_t* node_codes_buffer,
+    intp_t* samples_buffer,
+    intp_t* radix_counts,
+) noexcept nogil:
+    """Sort samples[:n] by their codes and fill feature_values[:n] accordingly.
+
+    feature_codes are the codes of all samples for one feature, uniques its
+    sorted unique values: the value of sample i is uniques[feature_codes[i]].
+    As codes are sorted, uniques is read in increasing order.
+    """
+    cdef intp_t i
+    for i in range(n):
+        node_codes[i] = feature_codes[samples[i]]
+    radix_sort(
+        node_codes, samples, n, max_code, node_codes_buffer, samples_buffer, radix_counts
+    )
+    for i in range(n):
+        feature_values[i] = uniques[node_codes[i]]
 
 
 @final
@@ -47,6 +77,7 @@ cdef class DensePartitioner:
         float32_t[::1] feature_values,
         const uint8_t[::1] missing_values_in_feature_mask,
         const intp_t[::1] n_categories,
+        object rank_encoding,
     ):
         self.X = X
         self.y = y
@@ -68,6 +99,21 @@ cdef class DensePartitioner:
         self.means = np.empty(MAX_NUM_CATEGORIES, dtype=np.float64)
         self.sorted_cat = np.empty(MAX_NUM_CATEGORIES, dtype=np.intp)
         self.offsets = np.empty(MAX_NUM_CATEGORIES, dtype=np.intp)
+
+        self.has_rank_encoding = rank_encoding is not None
+        if self.has_rank_encoding:
+            self.codes_uint8 = rank_encoding.codes_uint8
+            self.codes_uint16 = rank_encoding.codes_uint16
+            self.codes_uint32 = rank_encoding.codes_uint32
+            self.code_width = rank_encoding.code_width
+            self.code_column = rank_encoding.code_column
+            self.max_code = rank_encoding.max_code
+            self.uniques = rank_encoding.uniques
+            self.uniques_offset = rank_encoding.uniques_offset
+            self.node_codes = np.empty(4 * samples.size, dtype=np.uint8)
+            self.node_codes_buffer = np.empty(4 * samples.size, dtype=np.uint8)
+            self.samples_buffer = np.empty(samples.size, dtype=np.intp)
+            self.radix_counts = np.empty(RADIX_SORT_COUNTS_SIZE, dtype=np.intp)
 
     cdef inline void init_node_split(self, intp_t start, intp_t end) noexcept nogil:
         """Initialize splitter at the beginning of node_split."""
@@ -102,71 +148,128 @@ cdef class DensePartitioner:
             intp_t n_missing = 0
             const uint8_t[::1] missing_values_in_feature_mask = self.missing_values_in_feature_mask
 
-        # Sort samples along that feature; by copying the values into an array and
-        # sorting the array in a manner which utilizes the cache more effectively.
-        #
-        # Final layout puts missing values to the right side of the array.
-        # samples[start : end - n_missing]     -> all NON-MISSING values
-        # samples[end - n_missing : end]       -> all MISSING values (NaNs)
-        if missing_values_in_feature_mask is not None and missing_values_in_feature_mask[current_feature]:
-            i, current_end = self.start, self.end - 1
-            # Missing values are placed at the end and do not participate in the sorting.
-            while i <= current_end:
-                # Finds the right-most value that is not missing so that
-                # it can be swapped with missing values at its left.
-                if isnan(X[self.samples[current_end], current_feature]):
-                    n_missing += 1
-                    current_end -= 1
-                    continue
-
-                # X[samples[current_end], current_feature] is a non-missing value
-                if isnan(X[self.samples[i], current_feature]):
-                    self.samples[i], self.samples[current_end] = self.samples[current_end], self.samples[i]
-                    n_missing += 1
-                    current_end -= 1
-
-                self.feature_values[i] = X[self.samples[i], current_feature]
-                i += 1
-        else:
-            # When there are no missing values, we only need to copy the data into
-            # feature_values
-            for i in range(self.start, self.end):
-                self.feature_values[i] = X[self.samples[i], current_feature]
-
-        self.n_missing = n_missing
         self.n_categories_current = self.n_categories[current_feature]
-        end_non_missing = self.end - n_missing
 
-        if n_missing == self.end - self.start:
-            # if all the values at this point are missing, the values are sorted by default
-            return True
+        if self.has_rank_encoding and self.code_width[current_feature] != 0:
+            # Numerical feature with a rank encoding: radix sort, without
+            # reading X.
+            n_missing = self.radix_sort_samples(current_feature)
+            self.n_missing = n_missing
+            if n_missing == self.end - self.start:
+                return True
+        else:
+            # Sort samples along that feature; by copying the values into an array and
+            # sorting the array in a manner which utilizes the cache more effectively.
+            #
+            # Final layout puts missing values to the right side of the array.
+            # samples[start : end - n_missing]     -> all NON-MISSING values
+            # samples[end - n_missing : end]       -> all MISSING values (NaNs)
+            if missing_values_in_feature_mask is not None and missing_values_in_feature_mask[current_feature]:
+                i, current_end = self.start, self.end - 1
+                # Missing values are placed at the end and do not participate in the sorting.
+                while i <= current_end:
+                    # Finds the right-most value that is not missing so that
+                    # it can be swapped with missing values at its left.
+                    if isnan(X[self.samples[current_end], current_feature]):
+                        n_missing += 1
+                        current_end -= 1
+                        continue
 
-        # apply sort, different paths for numerical and categorical features
-        if self.n_categories_current <= 0:
+                    # X[samples[current_end], current_feature] is a non-missing value
+                    if isnan(X[self.samples[i], current_feature]):
+                        self.samples[i], self.samples[current_end] = self.samples[current_end], self.samples[i]
+                        n_missing += 1
+                        current_end -= 1
+
+                    self.feature_values[i] = X[self.samples[i], current_feature]
+                    i += 1
+            else:
+                # When there are no missing values, we only need to copy the data into
+                # feature_values
+                for i in range(self.start, self.end):
+                    self.feature_values[i] = X[self.samples[i], current_feature]
+
+            self.n_missing = n_missing
+
+            if n_missing == self.end - self.start:
+                # if all the values at this point are missing, the values are sorted by default
+                return True
+
+            if self.n_categories_current > 0:
+                # categorical feature: sort feature values by mean target values
+                self.sort_categories(self.n_categories_current)
+                if n_missing > 0:
+                    return False
+                return (
+                    self.feature_values[self.start]
+                    == self.feature_values[self.end - 1]
+                )
+
             # numerical feature: sort the feature values
             simultaneous_sort(
                 &self.feature_values[self.start],
                 &self.samples[self.start],
-                end_non_missing - self.start,
+                self.end - n_missing - self.start,
                 use_three_way_partition=True,
             )
 
-            # if there are missing values found in this current candidate split, then
-            # by definition the features cannot be constant
-            if n_missing > 0:
-                return False
+        # if there are missing values found in this current candidate split, then
+        # by definition the features cannot be constant
+        if n_missing > 0:
+            return False
 
-            # This feature is considered constant if (max - min <= FEATURE_THRESHOLD)
-            return (
-                self.feature_values[end_non_missing - 1]
-                <= self.feature_values[self.start] + FEATURE_THRESHOLD
+        # This feature is considered constant if (max - min <= FEATURE_THRESHOLD)
+        end_non_missing = self.end - n_missing
+        return (
+            self.feature_values[end_non_missing - 1]
+            <= self.feature_values[self.start] + FEATURE_THRESHOLD
+        )
+
+    cdef intp_t radix_sort_samples(self, intp_t current_feature) noexcept nogil:
+        """Sort samples by radix sort on the rank encoding of current_feature.
+
+        feature_values is filled with the sorted values of the feature. Missing
+        values, which have the largest code, end up at the right. Returns the
+        number of missing values.
+        """
+        cdef:
+            intp_t start = self.start
+            intp_t n = self.end - self.start
+            intp_t column = self.code_column[current_feature]
+            intp_t max_code = self.max_code[current_feature]
+            uint8_t width = self.code_width[current_feature]
+            const float32_t* uniques = &self.uniques[self.uniques_offset[current_feature]]
+            intp_t n_missing = 0
+
+        if width == 1:
+            _radix_sort_by_code(
+                &self.codes_uint8[0, column], <uint8_t> max_code, uniques,
+                &self.samples[start], &self.feature_values[start], n,
+                <uint8_t*> &self.node_codes[0], <uint8_t*> &self.node_codes_buffer[0],
+                &self.samples_buffer[0], &self.radix_counts[0],
+            )
+        elif width == 2:
+            _radix_sort_by_code(
+                &self.codes_uint16[0, column], <uint16_t> max_code, uniques,
+                &self.samples[start], &self.feature_values[start], n,
+                <uint16_t*> &self.node_codes[0], <uint16_t*> &self.node_codes_buffer[0],
+                &self.samples_buffer[0], &self.radix_counts[0],
             )
         else:
-            # categorical feature: sort feature values by mean target values
-            self.sort_categories(self.n_categories_current)
-            if n_missing > 0:
-                return False
-            return self.feature_values[self.start] == self.feature_values[end_non_missing - 1]
+            _radix_sort_by_code(
+                &self.codes_uint32[0, column], <uint32_t> max_code, uniques,
+                &self.samples[start], &self.feature_values[start], n,
+                <uint32_t*> &self.node_codes[0], <uint32_t*> &self.node_codes_buffer[0],
+                &self.samples_buffer[0], &self.radix_counts[0],
+            )
+
+        if (
+            self.missing_values_in_feature_mask is not None
+            and self.missing_values_in_feature_mask[current_feature]
+        ):
+            while n_missing < n and isnan(self.feature_values[self.end - n_missing - 1]):
+                n_missing += 1
+        return n_missing
 
     cdef void sort_categories(self, intp_t nc) noexcept nogil:
         """Sort categorical features for the Breiman shortcut.

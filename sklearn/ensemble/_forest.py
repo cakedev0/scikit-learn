@@ -566,6 +566,9 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
     # Reuse the tree implementation:
     _validate_and_preprocess_X = BaseDecisionTree._validate_and_preprocess_X
 
+    def _splitter_kind(self):
+        return self.estimator.splitter
+
     def _validate_X_predict(self, X):
         """
         Validate X whenever one tries to predict, apply, predict_proba."""

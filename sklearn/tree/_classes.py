@@ -27,7 +27,7 @@ from sklearn.base import (
 )
 from sklearn.tree import _criterion, _splitter
 from sklearn.tree._criterion import Criterion
-from sklearn.tree._preprocessing import _get_n_categories, _validate_X
+from sklearn.tree._preprocessing import _get_n_categories, _rank_encode, _validate_X
 from sklearn.tree._tree import MAX_NUM_CATEGORIES_PY as MAX_NUM_CATEGORIES
 from sklearn.tree._tree import (
     BestFirstTreeBuilder,
@@ -197,7 +197,13 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
     _categorical_encoder = None
 
     def _fit_validated(
-        self, X, y, sample_weight, missing_values_in_feature_mask, categorical_counts
+        self,
+        X,
+        y,
+        sample_weight,
+        missing_values_in_feature_mask,
+        categorical_counts,
+        rank_encoding,
     ):
         """Build the tree from validated X, with categorical features encoded.
 
@@ -222,6 +228,11 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         categorical_counts : ndarray of shape (n_features,)
             Number of categories of each categorical feature, -1 for numerical
             features.
+
+        rank_encoding : _RankEncoding or None
+            Rank encoding of the numerical features of dense X, used to sort
+            samples by radix sort with `splitter="best"`. If None, samples are
+            sorted by comparison sort.
         """
         random_state = check_random_state(self.random_state)
         is_categorical = categorical_counts >= 0
@@ -478,6 +489,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             y,
             sample_weight,
             missing_values_in_feature_mask,
+            rank_encoding,
         )
 
         if self.n_outputs_ == 1 and is_classifier(self):
@@ -506,8 +518,9 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             Validated y. Only returned at fit time.
 
         fit_kwargs : dict
-            The `missing_values_in_feature_mask` and `categorical_counts`
-            arguments of `_fit_validated`. Only returned at fit time.
+            The `missing_values_in_feature_mask`, `categorical_counts` and
+            `rank_encoding` arguments of `_fit_validated`. Only returned at fit
+            time.
         """
         if check_input and reset and issparse(y):
             raise ValueError("sparse multilabel-indicator for y is not supported.")
@@ -557,13 +570,24 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                         "is necessary for Poisson regression."
                     )
 
+        categorical_counts = _get_n_categories(self)
         fit_kwargs = {
             "missing_values_in_feature_mask": np.isnan(
                 np.asarray(X.sum(axis=0)).ravel()
             ),
-            "categorical_counts": _get_n_categories(self),
+            "categorical_counts": categorical_counts,
+            # Only best splits sort feature values.
+            "rank_encoding": (
+                _rank_encode(X, categorical_counts)
+                if not issparse(X) and self._splitter_kind() == "best"
+                else None
+            ),
         }
         return X, y, fit_kwargs
+
+    def _splitter_kind(self):
+        """The `splitter` of the trees fitted with `_fit_validated`."""
+        return self.splitter
 
     def predict(self, X, check_input=True):
         """Predict class or regression value for X.

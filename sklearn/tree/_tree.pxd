@@ -103,7 +103,8 @@ cdef class TreeBuilder:
         object X,
         const float64_t[:, ::1] y,
         const float64_t[:] sample_weight=*,
-        const uint8_t[::1] missing_values_in_feature_mask=*
+        const uint8_t[::1] missing_values_in_feature_mask=*,
+        object rank_encoding=*,
     )
 
     cdef _check_input(

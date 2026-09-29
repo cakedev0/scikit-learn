@@ -6,7 +6,7 @@
 from libc.math cimport INFINITY
 
 from sklearn.utils._typedefs cimport (
-    float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint32_t, uint64_t
+    float32_t, float64_t, int8_t, int32_t, intp_t, uint8_t, uint16_t, uint32_t, uint64_t
 )
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, init_bitset, set_bitset
 from sklearn.tree._splitter cimport SplitRecord
@@ -126,9 +126,27 @@ cdef class DensePartitioner:
     cdef intp_t[::1] sorted_cat
     cdef intp_t[::1] offsets
 
+    # Rank encoding of the numerical features (see `_RankEncoding`), to sort
+    # samples by radix sort.
+    cdef bint has_rank_encoding
+    cdef const uint8_t[::1, :] codes_uint8
+    cdef const uint16_t[::1, :] codes_uint16
+    cdef const uint32_t[::1, :] codes_uint32
+    cdef const uint8_t[::1] code_width
+    cdef const intp_t[::1] code_column
+    cdef const intp_t[::1] max_code
+    cdef const float32_t[::1] uniques
+    cdef const intp_t[::1] uniques_offset
+    # Buffers for the radix sort, of n_samples codes of 4 bytes at most.
+    cdef uint8_t[::1] node_codes
+    cdef uint8_t[::1] node_codes_buffer
+    cdef intp_t[::1] samples_buffer
+    cdef intp_t[::1] radix_counts
+
     cdef bint sort_samples_and_feature_values(
         self, intp_t current_feature
     ) noexcept nogil
+    cdef intp_t radix_sort_samples(self, intp_t current_feature) noexcept nogil
     cdef void shift_missing_to_the_left(self) noexcept nogil
     cdef void init_node_split(
         self,

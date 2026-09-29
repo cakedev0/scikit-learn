@@ -1,6 +1,9 @@
 from libc.math cimport log2
+from libc.string cimport memcpy, memset
 
 from cython cimport floating
+
+import numpy as np
 
 from sklearn.utils._typedefs cimport intp_t
 
@@ -263,3 +266,163 @@ cdef inline void insertion_sort(
 
         values[j] = temp_val
         indices[j] = temp_idx
+
+
+# ------------ RADIX SORT -------------
+
+# Digits have at most MAX_RADIX_BITS bits, so that `counts` has at most
+# RADIX_SORT_COUNTS_SIZE elements.
+cdef int MAX_RADIX_BITS = 16
+
+# Below this size, the fixed overhead of a radix pass (zeroing and
+# accumulating `counts`) is not worth it.
+cdef intp_t RADIX_INSERTION_SORT_THRESHOLD = 64
+
+
+cdef inline int _bit_length(radix_t x) noexcept nogil:
+    """Number of bits needed to represent x (0 for x == 0)."""
+    cdef int n_bits = 0
+    while x:
+        x >>= 1
+        n_bits += 1
+    return n_bits
+
+
+cdef int _best_radix_width(intp_t n, int needed_bits, int type_bits) noexcept nogil:
+    """Pick the digit width (in bits) of each radix sort pass.
+
+    Sorting keys of `needed_bits` bits with `w`-bit digits takes
+    `ceil(needed_bits / w)` counting sort passes, each costing
+    `O(n + 2**w)`. Only widths dividing `type_bits` are considered, so that
+    all passes have the same width. The number of candidate widths is tiny, so
+    the cost is just evaluated for each of them.
+    """
+    cdef int w, best_w = 1
+    cdef intp_t cost, best_cost = -1
+    for w in range(1, MAX_RADIX_BITS + 1):
+        if type_bits % w != 0:
+            continue
+        cost = ((needed_bits + w - 1) // w) * (n + ((<intp_t> 1) << w))
+        if best_cost < 0 or cost < best_cost:
+            best_cost = cost
+            best_w = w
+    return best_w
+
+
+cdef void radix_sort(
+    radix_t* values,
+    intp_t* indices,
+    intp_t n,
+    radix_t max_value,
+    radix_t* values_buffer,
+    intp_t* indices_buffer,
+    intp_t* counts,
+) noexcept nogil:
+    """Sort values and indices simultaneously by values, using radix sort.
+
+    The numpy equivalent is:
+        def radix_sort(values, indices):
+             i = np.argsort(values, kind="stable")
+             return values[i], indices[i]
+
+    This is a stable LSD (least significant digit first) radix sort: a series
+    of counting sort passes over the digits of `values`. Unlike
+    `simultaneous_sort`, it only supports unsigned integer keys, but it runs in
+    O(n) for a fixed number of passes instead of O(n log n).
+
+    `max_value` must be an upper bound of `values` (a too small bound gives a
+    wrong result). The number of passes depends on its number of bits, so a
+    tight bound makes the sort faster when the values span a small range.
+
+    `values_buffer` and `indices_buffer` are scratch buffers of size at least
+    `n`, and `counts` of size at least `RADIX_SORT_COUNTS_SIZE`. They are
+    passed by the caller to avoid allocating them at each call.
+    """
+    cdef int needed_bits = _bit_length(max_value)
+    if n <= 1 or needed_bits == 0:
+        return
+
+    if n <= RADIX_INSERTION_SORT_THRESHOLD:
+        _insertion_sort_radix(values, indices, n)
+        return
+
+    cdef int width = _best_radix_width(n, needed_bits, sizeof(radix_t) * 8)
+    cdef int n_passes = (needed_bits + width - 1) // width
+    cdef intp_t n_buckets = (<intp_t> 1) << width
+    cdef radix_t mask = <radix_t> (n_buckets - 1)
+
+    cdef radix_t* src_values = values
+    cdef radix_t* dst_values = values_buffer
+    cdef intp_t* src_indices = indices
+    cdef intp_t* dst_indices = indices_buffer
+    cdef radix_t* tmp_values
+    cdef intp_t* tmp_indices
+    cdef int pass_idx, shift
+    cdef intp_t i, bucket, pos
+
+    for pass_idx in range(n_passes):
+        shift = pass_idx * width
+
+        memset(counts, 0, (n_buckets + 1) * sizeof(intp_t))
+        for i in range(n):
+            counts[((src_values[i] >> shift) & mask) + 1] += 1
+
+        # Turn per-bucket counts into starting offsets.
+        for bucket in range(n_buckets):
+            counts[bucket + 1] += counts[bucket]
+
+        # Stable scatter into the destination buffers.
+        for i in range(n):
+            bucket = (src_values[i] >> shift) & mask
+            pos = counts[bucket]
+            dst_values[pos] = src_values[i]
+            dst_indices[pos] = src_indices[i]
+            counts[bucket] = pos + 1
+
+        tmp_values = src_values
+        src_values = dst_values
+        dst_values = tmp_values
+        tmp_indices = src_indices
+        src_indices = dst_indices
+        dst_indices = tmp_indices
+
+    # After an odd number of passes, the sorted data is in the buffers.
+    if n_passes % 2 == 1:
+        memcpy(values, src_values, n * sizeof(radix_t))
+        memcpy(indices, src_indices, n * sizeof(intp_t))
+
+
+cdef inline void _insertion_sort_radix(
+    radix_t* values, intp_t* indices, intp_t n
+) noexcept nogil:
+    """Stable insertion sort, used by radix_sort for small arrays."""
+    cdef intp_t i, j, temp_idx
+    cdef radix_t temp_val
+
+    for i in range(1, n):
+        temp_val = values[i]
+        temp_idx = indices[i]
+        j = i
+        while j > 0 and values[j - 1] > temp_val:
+            values[j] = values[j - 1]
+            indices[j] = indices[j - 1]
+            j -= 1
+        values[j] = temp_val
+        indices[j] = temp_idx
+
+
+def _py_radix_sort(radix_t[::1] values, intp_t[::1] indices, max_value=None):
+    """Python wrapper used for testing."""
+    cdef intp_t n = values.shape[0]
+    if n == 0:
+        return
+    cdef radix_t c_max_value = (
+        np.iinfo(np.asarray(values).dtype).max if max_value is None else max_value
+    )
+    cdef radix_t[::1] values_buffer = np.empty_like(np.asarray(values))
+    cdef intp_t[::1] indices_buffer = np.empty(n, dtype=np.intp)
+    cdef intp_t[::1] counts = np.empty(RADIX_SORT_COUNTS_SIZE, dtype=np.intp)
+    radix_sort(
+        &values[0], &indices[0], n, c_max_value,
+        &values_buffer[0], &indices_buffer[0], &counts[0],
+    )

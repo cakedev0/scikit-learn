@@ -51,7 +51,12 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.tree._classes import BaseDecisionTree
 from sklearn.tree._tree import TREE_LEAF
-from sklearn.utils import check_array, check_random_state, column_or_1d
+from sklearn.utils import (
+    _safe_indexing,
+    check_array,
+    check_random_state,
+    column_or_1d,
+)
 from sklearn.utils._param_validation import HasMethods, Hidden, Interval, StrOptions
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.stats import _weighted_percentile
@@ -671,21 +676,23 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
 
         if self.n_iter_no_change is not None:
             stratify = y if is_classifier(self) else None
-            (
-                X_train,
-                X_val,
-                y_train,
-                y_val,
-                sample_weight_train,
-                sample_weight_val,
-            ) = train_test_split(
-                X,
-                y,
-                sample_weight,
+            train_indices, val_indices = train_test_split(
+                np.arange(X.shape[0]),
                 random_state=self.random_state,
                 test_size=self.validation_fraction,
                 stratify=stratify,
             )
+            # Like train_test_split, index sparse matrices in CSR format.
+            X_rows = X.tocsr() if issparse(X) else X
+            X_train = _safe_indexing(X_rows, train_indices)
+            X_val = _safe_indexing(X_rows, val_indices)
+            y_train, y_val = y[train_indices], y[val_indices]
+            sample_weight_train = sample_weight[train_indices]
+            sample_weight_val = sample_weight[val_indices]
+            if fit_kwargs["rank_encoding"] is not None:
+                fit_kwargs["rank_encoding"] = fit_kwargs["rank_encoding"].take(
+                    train_indices
+                )
             if is_classifier(self):
                 if self.n_classes_ != np.unique(y_train).shape[0]:
                     # We choose to error here. The problem is that the init
@@ -948,6 +955,9 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
 
     # Reuse the tree implementation:
     _validate_and_preprocess_X = BaseDecisionTree._validate_and_preprocess_X
+
+    def _splitter_kind(self):
+        return "best"
 
     def _validate_X_predict(self, X):
         """Validate X and encode its categorical features for prediction."""
