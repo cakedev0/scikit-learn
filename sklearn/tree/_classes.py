@@ -260,16 +260,9 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         check_is_fitted(self)
         return self.tree_.n_leaves
 
-    # Set by `_preprocess_X` when `_fit` encodes categorical features. Ensembles
+    # Set by `_preprocess_X` when `fit` encodes categorical features. Ensembles
     # encode X themselves and call `_fit_validated`, leaving it to None.
     _preprocessor = None
-
-    def _fit(self, X, y, sample_weight=None, check_input=True):
-        """Validate and encode the training data, then build the tree."""
-        X, y, fit_kwargs = self._validate_and_preprocess_X(
-            X, y, reset=True, check_input=check_input
-        )
-        return self._fit_validated(X, y, sample_weight, **fit_kwargs)
 
     def _fit_validated(
         self, X, y, sample_weight, missing_values_in_feature_mask, categorical_counts
@@ -1222,14 +1215,10 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         self : DecisionTreeClassifier
             Fitted estimator.
         """
-
-        super()._fit(
-            X,
-            y,
-            sample_weight=sample_weight,
-            check_input=check_input,
+        X, y, fit_kwargs = self._validate_and_preprocess_X(
+            X, y, reset=True, check_input=check_input
         )
-        return self
+        return self._fit_validated(X, y, sample_weight, **fit_kwargs)
 
     def predict_proba(self, X, check_input=True):
         """Predict class probabilities of the input samples X.
@@ -1638,14 +1627,10 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         self : DecisionTreeRegressor
             Fitted estimator.
         """
-
-        super()._fit(
-            X,
-            y,
-            sample_weight=sample_weight,
-            check_input=check_input,
+        X, y, fit_kwargs = self._validate_and_preprocess_X(
+            X, y, reset=True, check_input=check_input
         )
-        return self
+        return self._fit_validated(X, y, sample_weight, **fit_kwargs)
 
     def _compute_partial_dependence_recursion(self, grid, target_features):
         """Fast partial dependence computation.
