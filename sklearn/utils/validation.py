@@ -2503,7 +2503,9 @@ def _check_categorical_features(X, categorical_features):
         Indicates whether a feature is categorical. If no feature is
         categorical, this is None.
     """
-    if nw.dependencies.is_into_dataframe(X):
+    # NumPy arrays aren't dataframes: skip narwhals, whose checks are costly
+    # when called from many threads (e.g. for each tree of a forest).
+    if not isinstance(X, np.ndarray) and nw.dependencies.is_into_dataframe(X):
         X = nw.from_native(X)
         dtypes = X.schema.dtypes()
         X_is_dataframe = True

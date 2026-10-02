@@ -1567,6 +1567,28 @@ def test_backend_respected():
     assert ba.count == 0
 
 
+def test_fit_does_not_use_joblib_by_default(monkeypatch):
+    """Forest fit uses a thread pool of lower overhead than joblib's by default,
+    and joblib when a backend is set."""
+    n_parallel_calls = 0
+
+    class CountingParallel(Parallel):
+        def __call__(self, iterable):
+            nonlocal n_parallel_calls
+            n_parallel_calls += 1
+            return super().__call__(iterable)
+
+    monkeypatch.setattr(sklearn.ensemble._forest, "Parallel", CountingParallel)
+    clf = RandomForestClassifier(n_estimators=4, n_jobs=2, random_state=0)
+    clf.fit(X, y)
+    assert n_parallel_calls == 0
+
+    with joblib.parallel_config(backend="threading"):
+        clf_joblib = clone(clf).fit(X, y)
+    assert n_parallel_calls == 1
+    assert_array_equal(clf.predict(X), clf_joblib.predict(X))
+
+
 def test_forest_feature_importances_sum():
     X, y = make_classification(
         n_samples=15, n_informative=3, random_state=1, n_classes=3

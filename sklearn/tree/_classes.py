@@ -335,7 +335,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         self.n_outputs_ = y.shape[1]
 
         if is_classification:
-            check_classification_targets(y)
+            if check_input:
+                check_classification_targets(y)
             y = np.copy(y)
 
             self.classes_ = []
@@ -402,7 +403,17 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             )
 
         if sample_weight is not None:
-            sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
+            if check_input:
+                sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
+            else:
+                # Already validated, e.g. by ensembles: skip check_array, which is
+                # costly when many trees are fitted in parallel threads.
+                sample_weight = np.ascontiguousarray(sample_weight, dtype=np.float64)
+                if sample_weight.shape != (n_samples,):
+                    raise ValueError(
+                        f"sample_weight.shape == {sample_weight.shape}, expected "
+                        f"{(n_samples,)}!"
+                    )
 
         if expanded_class_weight is not None:
             if sample_weight is not None:

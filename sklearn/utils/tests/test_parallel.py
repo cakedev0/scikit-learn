@@ -1,5 +1,6 @@
 import itertools
 import re
+import sys
 import time
 import warnings
 from threading import current_thread
@@ -21,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.fixes import _IS_WASM
 from sklearn.utils.parallel import (
     Parallel,
+    _joblib_backend_is_set,
     _parallel_thread_map,
     delayed,
 )
@@ -187,6 +189,24 @@ def test_check_warnings_threading():
             ) == normalize_main_module(main_warning_filters)
 
 
+@pytest.mark.skipif(
+    getattr(sys.flags, "context_aware_warnings", False)
+    and not getattr(sys.flags, "thread_inherit_context", False),
+    reason="Worker threads don't inherit the caller's warning filters",
+)
+def test_warning_filters_not_reset_in_threads():
+    """Tasks of the threading backend run with the caller's warning filters
+    themselves, not a copy: resetting them in each task is racy with
+    process-wide filters (and costly with many threads)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", category=ConvergenceWarning)
+        main_warning_filters = get_warning_filters()
+        worker_warning_filters = Parallel(n_jobs=2, backend="threading")(
+            delayed(get_warning_filters)() for _ in range(4)
+        )
+    assert all(filters is main_warning_filters for filters in worker_warning_filters)
+
+
 @pytest.mark.xfail(_IS_WASM, reason="Pyodide always use the sequential backend")
 def test_filter_warning_propagates_no_side_effect_with_loky_backend():
     with warnings.catch_warnings():
@@ -271,3 +291,17 @@ def test_parallel_thread_map_warnings_settings() -> None:
 
     with pytest.raises(ConvergenceWarning):
         list(_parallel_thread_map(-1, lambda _: raise_warning(), range(2)))
+
+
+def test_joblib_backend_is_set():
+    """Only a backend set in a `parallel_config` context counts as set."""
+    assert not _joblib_backend_is_set()
+    with joblib.parallel_config(n_jobs=2):
+        assert not _joblib_backend_is_set()
+    with joblib.parallel_config(backend="threading"):
+        assert _joblib_backend_is_set()
+        with joblib.parallel_config(n_jobs=2):
+            assert _joblib_backend_is_set()
+    with joblib.parallel_backend("loky"):
+        assert _joblib_backend_is_set()
+    assert not _joblib_backend_is_set()
