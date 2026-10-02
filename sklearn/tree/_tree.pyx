@@ -943,8 +943,11 @@ cdef class Tree:
             with gil:
                 raise MemoryError()
 
-    cdef int _resize_c(self, intp_t capacity=INTPTR_MAX) except -1 nogil:
+    cdef int _resize_c(self, intp_t capacity=INTPTR_MAX, bint zero_new=True) except -1 nogil:
         """Guts of _resize
+
+        With zero_new=False, the new memory isn't zeroed: _add_node zeroes
+        each node and its value when they're written.
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
         or 0 otherwise.
@@ -961,7 +964,7 @@ cdef class Tree:
         safe_realloc(&self.nodes, capacity)
         safe_realloc(&self.value, capacity * self.value_stride)
 
-        if capacity > self.capacity:
+        if capacity > self.capacity and zero_new:
             # value memory is initialised to 0 to enable classifier argmax
             memset(<void*>(self.value + self.capacity * self.value_stride), 0,
                    (capacity - self.capacity) * self.value_stride *
@@ -994,10 +997,17 @@ cdef class Tree:
         cdef intp_t node_id = self.node_count
 
         if node_id >= self.capacity:
-            if self._resize_c() != 0:
+            # NOMEMSET PROTOTYPE: grow without zeroing the new capacity,
+            # each node is zeroed below when written.
+            if self._resize_c(INTPTR_MAX, False) != 0:
                 return INTPTR_MAX
 
         cdef Node* node = &self.nodes[node_id]
+        # The capacity grown above isn't zeroed: zero the node (deterministic
+        # pickle of the padding) and its value (classifier argmax).
+        memset(<void*> node, 0, sizeof(Node))
+        memset(<void*> (self.value + node_id * self.value_stride), 0,
+               self.value_stride * sizeof(float64_t))
 
         node.impurity = impurity
         node.n_node_samples = n_node_samples
