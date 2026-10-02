@@ -210,6 +210,9 @@ _CODE_DTYPES = (np.uint8, np.uint16, np.uint32)
 # Below this number of values to encode, encoding features in parallel threads
 # is not worth its overhead.
 _MIN_VALUES_FOR_PARALLEL_ENCODING = 1_000_000
+# Encoding a feature is a short task (a few ms for 100k values): with more
+# threads, starting and dispatching to them costs more than it saves.
+_MAX_ENCODING_THREADS = 8
 
 
 def _rank_encode_feature(values):
@@ -249,7 +252,11 @@ def _rank_encode(X, n_categories):
     numerical_features = np.flatnonzero(np.asarray(n_categories) < 0)
     # np.unique sorts with the GIL released.
     n_threads = (
-        min(_openmp_effective_n_threads(), numerical_features.shape[0])
+        min(
+            _openmp_effective_n_threads(),
+            _MAX_ENCODING_THREADS,
+            numerical_features.shape[0],
+        )
         if n_samples * numerical_features.shape[0] >= _MIN_VALUES_FOR_PARALLEL_ENCODING
         else 1
     )
