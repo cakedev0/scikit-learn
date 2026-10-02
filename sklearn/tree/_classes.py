@@ -205,6 +205,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         missing_values_in_feature_mask,
         categorical_counts,
         rank_encoding,
+        sample_weight_is_validated=False,
     ):
         """Build the tree from validated X, with categorical features encoded.
 
@@ -321,7 +322,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 % (len(y), n_samples)
             )
 
-        if sample_weight is not None:
+        if sample_weight is not None and not sample_weight_is_validated:
             sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
 
         if expanded_class_weight is not None:

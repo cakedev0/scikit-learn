@@ -5,6 +5,7 @@ from libc.stdlib cimport free
 from libc.string cimport memset
 
 cimport numpy as cnp
+import numpy as np
 cnp.import_array()
 
 
@@ -246,3 +247,17 @@ cdef class PytestWeightedFenwickTree(WeightedFenwickTree):
         cdef intp_t prev_idx
         idx = self.search(t, &w, &wy, &prev_idx)
         return prev_idx, idx, w, wy
+
+
+def _bootstrap_sample_weight(const int32_t[::1] indices, intp_t n_samples):
+    """Number of occurrences of each sample in indices, as float64.
+
+    Like np.bincount(indices, minlength=n_samples), but computed without the
+    GIL, so that forests can draw bootstrap samples in parallel threads.
+    """
+    cdef float64_t[::1] counts = np.zeros(n_samples, dtype=np.float64)
+    cdef intp_t i
+    with nogil:
+        for i in range(indices.shape[0]):
+            counts[indices[i]] += 1
+    return np.asarray(counts)

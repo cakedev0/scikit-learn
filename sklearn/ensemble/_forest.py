@@ -69,6 +69,7 @@ from sklearn.utils import (
     compute_class_weight,
     compute_sample_weight,
 )
+from sklearn.tree._utils import _bootstrap_sample_weight
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
 from sklearn.utils._tags import get_tags
 from sklearn.utils.multiclass import check_classification_targets, type_of_target
@@ -152,14 +153,17 @@ def _parallel_build_trees(
             tree.random_state, n_samples, n_samples_bootstrap, sample_weight
         )
         # Simulate row-wise sampling by passing counts as sample_weight in trees.
-        sample_weight_tree = np.bincount(indices, minlength=n_samples)
+        # NOGIL-BOOTSTRAP PROTOTYPE: counted without the GIL, already float64.
+        sample_weight_tree = _bootstrap_sample_weight(indices, n_samples)
         if class_weight == "balanced_subsample":
             expanded_class_weight = compute_sample_weight(
                 "balanced", y, indices=indices
             )
             sample_weight_tree = sample_weight_tree * expanded_class_weight
 
-        tree._fit_validated(X, y, sample_weight_tree, **fit_kwargs)
+        tree._fit_validated(
+            X, y, sample_weight_tree, sample_weight_is_validated=True, **fit_kwargs
+        )
     else:
         tree._fit_validated(X, y, sample_weight, **fit_kwargs)
 
