@@ -173,15 +173,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         # check input
         X, y, sample_weight = self._check_input(X, y, sample_weight)
 
-        # Initial capacity
         cdef intp_t init_capacity
-
-        if tree.max_depth <= 10:
-            init_capacity = <intp_t> (2 ** (tree.max_depth + 1)) - 1
-        else:
-            init_capacity = 2047
-
-        tree._resize(init_capacity)
 
         # Parameters
         cdef Splitter splitter = self.splitter
@@ -200,6 +192,16 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
             X, y, sample_weight, missing_values_in_feature_mask, n_categories,
             rank_encoding,
         )
+
+        # PREALLOC PROTOTYPE: reserve the maximum number of nodes once (each
+        # leaf holds at least one sample), without zeroing it: _add_node
+        # zeroes each node when it's written, so untouched pages are never
+        # faulted in, and the node arrays are never reallocated nor copied.
+        init_capacity = 2 * splitter.n_samples - 1
+        if tree.max_depth < 40:
+            init_capacity = min(init_capacity, <intp_t> (2 ** (tree.max_depth + 1)) - 1)
+        if tree._resize_c(max(init_capacity, 3), zero_new=False) != 0:
+            raise MemoryError()
 
         cdef intp_t start
         cdef intp_t end
@@ -943,8 +945,11 @@ cdef class Tree:
             with gil:
                 raise MemoryError()
 
-    cdef int _resize_c(self, intp_t capacity=INTPTR_MAX) except -1 nogil:
+    cdef int _resize_c(self, intp_t capacity=INTPTR_MAX, bint zero_new=True) except -1 nogil:
         """Guts of _resize
+
+        With zero_new=False, the new memory isn't zeroed: _add_node zeroes
+        each node and its value when they're written.
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
         or 0 otherwise.
@@ -961,7 +966,7 @@ cdef class Tree:
         safe_realloc(&self.nodes, capacity)
         safe_realloc(&self.value, capacity * self.value_stride)
 
-        if capacity > self.capacity:
+        if capacity > self.capacity and zero_new:
             # value memory is initialised to 0 to enable classifier argmax
             memset(<void*>(self.value + self.capacity * self.value_stride), 0,
                    (capacity - self.capacity) * self.value_stride *
@@ -998,6 +1003,12 @@ cdef class Tree:
                 return INTPTR_MAX
 
         cdef Node* node = &self.nodes[node_id]
+        # The node arrays may not be zeroed (see _resize_c): zero the node
+        # (deterministic pickle of the padding) and its value (classifier
+        # argmax).
+        memset(<void*> node, 0, sizeof(Node))
+        memset(<void*> (self.value + node_id * self.value_stride), 0,
+               self.value_stride * sizeof(float64_t))
 
         node.impurity = impurity
         node.n_node_samples = n_node_samples

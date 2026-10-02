@@ -58,7 +58,7 @@ cdef class Tree:
                           float64_t weighted_n_node_samples,
                           uint8_t missing_go_to_left) except -1 nogil
     cdef int _resize(self, intp_t capacity) except -1 nogil
-    cdef int _resize_c(self, intp_t capacity=*) except -1 nogil
+    cdef int _resize_c(self, intp_t capacity=*, bint zero_new=*) except -1 nogil
 
     cdef cnp.ndarray _get_value_ndarray(self)
     cdef cnp.ndarray _get_node_ndarray(self)
