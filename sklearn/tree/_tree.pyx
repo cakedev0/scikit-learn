@@ -945,16 +945,12 @@ cdef class Tree:
             else:
                 capacity = 2 * self.capacity
 
+        # The new memory isn't zeroed: _add_node zeroes each node and its
+        # value when they're written. Zeroing the whole new capacity here
+        # would touch (page fault) memory that may never be used, which is
+        # costly when many trees are built in parallel threads.
         safe_realloc(&self.nodes, capacity)
         safe_realloc(&self.value, capacity * self.value_stride)
-
-        if capacity > self.capacity:
-            # value memory is initialised to 0 to enable classifier argmax
-            memset(<void*>(self.value + self.capacity * self.value_stride), 0,
-                   (capacity - self.capacity) * self.value_stride *
-                   sizeof(float64_t))
-            # node memory is initialised to 0 to ensure deterministic pickle (padding in Node struct)
-            memset(<void*>(self.nodes + self.capacity), 0, (capacity - self.capacity) * sizeof(Node))
 
         # if capacity smaller than node_count, adjust the counter
         if capacity < self.node_count:
@@ -985,6 +981,11 @@ cdef class Tree:
                 return INTPTR_MAX
 
         cdef Node* node = &self.nodes[node_id]
+        # Zero the node to ensure deterministic pickle (padding in Node struct)
+        # and its value to enable classifier argmax.
+        memset(<void*> node, 0, sizeof(Node))
+        memset(<void*> (self.value + node_id * self.value_stride), 0,
+               self.value_stride * sizeof(float64_t))
 
         node.impurity = impurity
         node.n_node_samples = n_node_samples
