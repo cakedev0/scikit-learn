@@ -6,6 +6,7 @@ usage.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import functools
+import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import update_wrapper
@@ -220,6 +221,21 @@ def _parallel_thread_map(n_jobs, func, *iterables):
     # Create pool here, so it copies contextvars:
     config = get_config()
     executor = ThreadPoolExecutor(n_jobs, initializer=lambda: set_config(**config))
+    # Local import: sklearn.utils.fixes imports this module.
+    from sklearn.utils.fixes import _is_gil_enabled
+
+    if _is_gil_enabled():
+        # ThreadPoolExecutor starts its threads lazily, one per submitted task:
+        # with the GIL, each start would wait for the GIL held by the threads
+        # already running tasks. Start them all first, keeping them busy until
+        # then so that none is reused instead of starting a new one.
+        # Not without the GIL: threads started lazily are each placed on an
+        # idle CPU, while idle threads all woken at once by the submitted
+        # tasks are crowded onto a few CPUs by the OS scheduler.
+        all_started = threading.Barrier(n_jobs + 1)
+        for _ in range(n_jobs):
+            executor.submit(all_started.wait)
+        all_started.wait()
 
     # Since we might return a generator above, we also want to return a
     # generator in this code path.
