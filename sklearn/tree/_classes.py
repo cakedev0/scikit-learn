@@ -8,7 +8,6 @@ randomized trees. Single and multi-output problems are both handled.
 
 import copy
 import numbers
-import time
 import warnings
 from abc import ABCMeta, abstractmethod
 from math import ceil
@@ -28,6 +27,7 @@ from sklearn.base import (
 )
 from sklearn.tree import _criterion, _splitter
 from sklearn.tree._criterion import Criterion
+from sklearn.tree._splitter import _py_timer_ticks  # PHASE TIMERS
 from sklearn.tree._preprocessing import _get_n_categories, _validate_X
 from sklearn.tree._tree import MAX_NUM_CATEGORIES_PY as MAX_NUM_CATEGORIES
 from sklearn.tree._tree import (
@@ -473,7 +473,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 self.min_impurity_decrease,
             )
 
-        build_tic = time.perf_counter()  # PHASE TIMERS
+        build_tic = _py_timer_ticks()  # PHASE TIMERS
         builder.build(
             self.tree_,
             X,
@@ -484,12 +484,14 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         # PHASE TIMERS (benchmarking only): wall time per phase of this tree.
         self._phase_times = {
-            "build": time.perf_counter() - build_tic,
+            "build": _py_timer_ticks() - build_tic,
             "sort": splitter.time_sort,
             "search": splitter.time_search,
             "final": splitter.time_final,
             "node_reset": splitter.time_node_reset,
             "n_sorts": splitter.n_sorts,
+            "bucket_times": np.array(splitter.bucket_times),
+            "bucket_counts": np.array(splitter.bucket_counts),
         }
 
         if self.n_outputs_ == 1 and is_classifier(self):

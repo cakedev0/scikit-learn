@@ -82,13 +82,22 @@ cdef class Splitter:
     # Per-feature number of categories; -1 means the feature is numerical.
     cdef const intp_t[:] n_categories
 
-    # PHASE TIMERS (benchmarking only): wall time in seconds spent in each
-    # phase of the tree construction, accumulated over all nodes.
+    # PHASE TIMERS (benchmarking only): time in timer ticks (see _now) spent
+    # in each phase of the tree construction, accumulated over all nodes.
     cdef public float64_t time_sort      # sort_samples_and_feature_values
     cdef public float64_t time_search    # split search loop over positions
     cdef public float64_t time_final     # partition_samples_final + children impurity
     cdef public float64_t time_node_reset  # node_reset (criterion.init)
     cdef public intp_t n_sorts
+
+    # PHASE TIMERS BY NODE SIZE: the same phase times, plus the time per node
+    # measured by the tree builder, by node size bucket b, for nodes with
+    # 2**b <= n_node_samples < 2**(b + 1). Columns of bucket_times: sort,
+    # search, final, node_reset, node_total. Columns of bucket_counts: number
+    # of nodes, number of split nodes (node_split called), sum of depths.
+    cdef public intp_t current_depth     # set by the tree builder
+    cdef public float64_t[:, ::1] bucket_times
+    cdef public intp_t[:, ::1] bucket_counts
 
     # The samples vector `samples` is maintained by the Splitter object such
     # that the samples contained in a node are contiguous. With this setting,
@@ -134,3 +143,51 @@ cdef class Splitter:
     cdef void clip_node_value(self, float64_t* dest, float64_t lower_bound, float64_t upper_bound) noexcept nogil
 
     cdef float64_t node_impurity(self) noexcept nogil
+
+
+# PHASE TIMERS (benchmarking only)
+cdef enum:
+    N_SIZE_BUCKETS = 48
+    BUCKET_SORT = 0
+    BUCKET_SEARCH = 1
+    BUCKET_FINAL = 2
+    BUCKET_NODE_RESET = 3
+    BUCKET_NODE_TOTAL = 4
+    BUCKET_N_NODES = 0
+    BUCKET_N_SPLIT = 1
+    BUCKET_DEPTH_SUM = 2
+
+
+cdef extern from *:
+    """
+    #if defined(__x86_64__) || defined(_M_X64)
+    #include <x86intrin.h>
+    static inline unsigned long long sklearn_timer_ticks(void) { return __rdtsc(); }
+    #else
+    #include <time.h>
+    static inline unsigned long long sklearn_timer_ticks(void) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (unsigned long long) ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    }
+    #endif
+    """
+    unsigned long long sklearn_timer_ticks() noexcept nogil
+
+
+cdef inline float64_t _now() noexcept nogil:
+    """Timer ticks: CPU timestamp counter on x86-64, ns elsewhere.
+
+    Cheaper than clock_gettime; see sklearn.tree._phase_timers for the
+    conversion to seconds.
+    """
+    return <float64_t> sklearn_timer_ticks()
+
+
+cdef inline intp_t _size_bucket(intp_t n_node_samples) noexcept nogil:
+    """b such that 2**b <= n_node_samples < 2**(b + 1)."""
+    cdef intp_t b = 0
+    while n_node_samples > 1:
+        n_node_samples >>= 1
+        b += 1
+    return b

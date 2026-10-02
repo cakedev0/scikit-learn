@@ -27,6 +27,7 @@ from sklearn.utils import _align_api_if_sparse
 from sklearn.utils._bitset cimport N_BITSETS, BITSET_DTYPE_C, BITSET_LENGTH
 
 from sklearn.tree._utils cimport goes_left, SPLIT_LEAF
+from sklearn.tree._splitter cimport _now, _size_bucket, BUCKET_NODE_TOTAL
 from sklearn.tree._utils cimport safe_realloc
 from sklearn.tree._utils cimport sizet_ptr_to_ndarray
 
@@ -204,6 +205,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef float64_t weighted_n_node_samples
         cdef SplitRecord split
         cdef intp_t node_id
+        cdef float64_t node_tic  # PHASE TIMERS
 
         cdef float64_t middle_value
         cdef float64_t left_child_min
@@ -250,6 +252,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 parent_record.upper_bound = stack_record.upper_bound
 
                 n_node_samples = end - start
+                splitter.current_depth = depth  # PHASE TIMERS
+                node_tic = _now()
                 splitter.node_reset(start, end, &weighted_n_node_samples)
 
                 is_leaf = (depth >= max_depth or
@@ -351,6 +355,10 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                         "lower_bound": left_child_min,
                         "upper_bound": left_child_max,
                     })
+
+                splitter.bucket_times[  # PHASE TIMERS
+                    _size_bucket(n_node_samples), BUCKET_NODE_TOTAL
+                ] += _now() - node_tic
 
                 if depth > max_depth_seen:
                     max_depth_seen = depth
@@ -611,6 +619,8 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef float64_t weighted_n_node_samples
         cdef bint is_leaf
 
+        splitter.current_depth = depth  # PHASE TIMERS
+        cdef float64_t node_tic = _now()
         splitter.node_reset(start, end, &weighted_n_node_samples)
 
         # reset n_constant_features for this specific split before beginning split search
@@ -681,6 +691,9 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
             res.impurity_left = parent_record.impurity
             res.impurity_right = parent_record.impurity
 
+        splitter.bucket_times[  # PHASE TIMERS
+            _size_bucket(end - start), BUCKET_NODE_TOTAL
+        ] += _now() - node_tic
         return 0
 
 
