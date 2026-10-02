@@ -22,7 +22,6 @@ of splitting strategies:
 
 from libc.math cimport INFINITY
 from libc.string cimport memcpy
-from posix.time cimport clock_gettime, timespec, CLOCK_MONOTONIC
 
 from sklearn.tree._criterion cimport Criterion
 from sklearn.tree._partitioner cimport (
@@ -211,6 +210,8 @@ cdef class Splitter:
 
         self.feature_values = np.empty(n_samples, dtype=np.float32)
         self.constant_features = np.empty(n_features, dtype=np.intp)
+        self.bucket_times = np.zeros((N_SIZE_BUCKETS, 5), dtype=np.float64)
+        self.bucket_counts = np.zeros((N_SIZE_BUCKETS, 3), dtype=np.intp)
 
         self.y = y
 
@@ -256,7 +257,12 @@ cdef class Splitter:
             start,
             end
         )
-        self.time_node_reset += _now() - tic
+        cdef float64_t dt = _now() - tic
+        cdef intp_t bucket = _size_bucket(end - start)
+        self.time_node_reset += dt
+        self.bucket_times[bucket, BUCKET_NODE_RESET] += dt
+        self.bucket_counts[bucket, BUCKET_N_NODES] += 1
+        self.bucket_counts[bucket, BUCKET_DEPTH_SUM] += self.current_depth
 
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
         return 0
@@ -291,13 +297,6 @@ cdef class Splitter:
         """Return the impurity of the current node."""
 
         return self.criterion.node_impurity()
-
-
-cdef inline float64_t _now() noexcept nogil:
-    """Monotonic wall time in seconds (PHASE TIMERS)."""
-    cdef timespec ts
-    clock_gettime(CLOCK_MONOTONIC, &ts)
-    return ts.tv_sec + 1e-9 * ts.tv_nsec
 
 
 cdef inline int node_split_best(
@@ -358,7 +357,9 @@ cdef inline int node_split_best(
     cdef intp_t n_total_constants = n_known_constants
 
     cdef int i
-    cdef float64_t tic
+    cdef float64_t tic, dt
+    cdef intp_t bucket = _size_bucket(end - start)
+    splitter.bucket_counts[bucket, BUCKET_N_SPLIT] += 1
 
     # With dense data, the samples are ordered such that the best split found so
     # far sends samples[start:best_split.pos] to the left child, as long as the
@@ -422,7 +423,9 @@ cdef inline int node_split_best(
         is_constant = partitioner.sort_samples_and_feature_values(
             current_split.feature
         )
-        splitter.time_sort += _now() - tic
+        dt = _now() - tic
+        splitter.time_sort += dt
+        splitter.bucket_times[bucket, BUCKET_SORT] += dt
         splitter.n_sorts += 1
         n_missing = partitioner.n_missing
 
@@ -529,7 +532,9 @@ cdef inline int node_split_best(
 
                     best_split = current_split  # copy
                     best_order_is_current = True
-        splitter.time_search += _now() - tic
+        dt = _now() - tic
+        splitter.time_search += dt
+        splitter.bucket_times[bucket, BUCKET_SEARCH] += dt
 
     # Reorganize into samples[start:best_split.pos] + samples[best_split.pos:end]
     if best_split.pos < end:
@@ -553,7 +558,9 @@ cdef inline int node_split_best(
             best_split.impurity_left,
             best_split.impurity_right
         )
-        splitter.time_final += _now() - tic
+        dt = _now() - tic
+        splitter.time_final += dt
+        splitter.bucket_times[bucket, BUCKET_FINAL] += dt
 
     # Respect invariant for constant features: the original order of
     # element in features[:n_known_constants] must be preserved for sibling
@@ -982,3 +989,8 @@ cdef class RandomSparseSplitter(Splitter):
             split,
             parent_record,
         )
+
+
+def _py_timer_ticks():
+    """Current timer ticks (PHASE TIMERS), to calibrate them in Python."""
+    return _now()
