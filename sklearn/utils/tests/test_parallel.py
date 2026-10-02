@@ -21,6 +21,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.fixes import _IS_WASM
 from sklearn.utils.parallel import (
     Parallel,
+    _joblib_backend_is_set,
     _parallel_thread_map,
     delayed,
 )
@@ -271,3 +272,17 @@ def test_parallel_thread_map_warnings_settings() -> None:
 
     with pytest.raises(ConvergenceWarning):
         list(_parallel_thread_map(-1, lambda _: raise_warning(), range(2)))
+
+
+def test_joblib_backend_is_set():
+    """Only a backend set in a `parallel_config` context counts as set."""
+    assert not _joblib_backend_is_set()
+    with joblib.parallel_config(n_jobs=2):
+        assert not _joblib_backend_is_set()
+    with joblib.parallel_config(backend="threading"):
+        assert _joblib_backend_is_set()
+        with joblib.parallel_config(n_jobs=2):
+            assert _joblib_backend_is_set()
+    with joblib.parallel_backend("loky"):
+        assert _joblib_backend_is_set()
+    assert not _joblib_backend_is_set()

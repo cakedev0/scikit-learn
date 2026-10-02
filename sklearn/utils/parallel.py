@@ -230,6 +230,19 @@ def _parallel_thread_map(n_jobs, func, *iterables):
     return gen()
 
 
+def _joblib_backend_is_set():
+    """Whether a joblib backend is set by the active `parallel_config` context.
+
+    Used to respect a backend explicitly chosen by the user (e.g. to run on a
+    cluster) when :func:`_parallel_thread_map` would otherwise be used.
+    """
+    # joblib has no public API for this: read the config of the active
+    # `parallel_config` / `parallel_backend` context.
+    default_config = joblib.parallel.default_parallel_config
+    config = getattr(joblib.parallel._backend, "config", default_config)
+    return config["backend"] is not default_config["backend"]
+
+
 def _get_threadpool_controller():
     """Return the global threadpool controller instance."""
     global _threadpool_controller
