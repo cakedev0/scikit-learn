@@ -971,10 +971,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_methods_sample_order_invariance": "fails for the predict method",
     },
     FeatureUnion: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
         # Fails because StandardScaler, which gets wrapped by FeatureUnion, supports
         # array API but FeatureUnion itself does not
         "check_estimators_overwrite_params": "FIXME",
@@ -1334,12 +1330,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_methods_subset_invariance": "empty array passed inside",
         "check_dont_overwrite_parameters": "empty array passed inside",
         "check_fit2d_predict1d": "empty array passed inside",
-    },
-    StandardScaler: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
     },
     SVC: {
         # TODO: fix sample_weight handling of this estimator when probability=False

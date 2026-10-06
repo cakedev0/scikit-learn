@@ -9,7 +9,7 @@ from numpy.testing import assert_allclose
 from scipy.special import expit, logit
 
 from sklearn._config import config_context
-from sklearn.base import BaseEstimator, is_classifier
+from sklearn.base import BaseEstimator, _fit_context, clone, is_classifier
 from sklearn.datasets import make_classification, make_regression
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import Ridge, RidgeClassifier
@@ -58,6 +58,7 @@ from sklearn.utils._testing import (
     skip_if_array_api_compat_not_configured,
 )
 from sklearn.utils.fixes import _IS_32BIT, CSR_CONTAINERS, np_version, parse_version
+from sklearn.utils.parallel import Parallel, delayed
 
 
 @pytest.mark.parametrize("X", [numpy.asarray([1, 2, 3]), [1, 2, 3], (1, 2, 3)])
@@ -1099,12 +1100,10 @@ def test_fitted_attrs_as_numpy(namespace, device_name, dtype_name, opt_in_numpy_
 
 
 @skip_if_array_api_compat_not_configured
-def test_fitted_attrs_as_numpy_leaves_nested_estimators_alone(opt_in_numpy_attrs):
-    """Nested estimators convert themselves when their own fit returns.
-
-    Descending into them would re-walk every sub-estimator of an ensemble on top
-    of the walks they already did, so the walk stops at the estimator boundary.
-    """
+def test_fitted_attrs_as_numpy_follows_sub_estimator_opt_in(
+    opt_in_numpy_attrs, monkeypatch
+):
+    """Sub-estimators are visited and converted according to their own opt-in."""
     xp = pytest.importorskip("array_api_strict")
     X = xp.asarray([[1.3, 4.5]])
 
@@ -1114,6 +1113,96 @@ def test_fitted_attrs_as_numpy_leaves_nested_estimators_alone(opt_in_numpy_attrs
 
         assert isinstance(est.array_, numpy.ndarray)
         assert get_namespace(est.nested_.X_)[0] == xp
+
+    monkeypatch.setattr(
+        _array_api,
+        "_NUMPY_FITTED_ATTRS",
+        _array_api._NUMPY_FITTED_ATTRS | {"SimpleEstimator"},
+    )
+    with config_context(array_api_dispatch=True):
+        est = MixedAttributesEstimator().fit(X)
+        _fitted_attrs_as_numpy(est)
+
+    assert isinstance(est.nested_.X_, numpy.ndarray)
+
+
+class EstimatorWithArrayParam(BaseEstimator):
+    def __init__(self, weights=None):
+        self.weights = weights
+
+    def fit(self, X, y=None):
+        self.X_ = X
+        return self
+
+
+@skip_if_array_api_compat_not_configured
+def test_fitted_attrs_as_numpy_leaves_parameters_alone(monkeypatch):
+    """Constructor parameters are user input, fit must not modify them."""
+    xp = pytest.importorskip("array_api_strict")
+    monkeypatch.setattr(
+        _array_api,
+        "_NUMPY_FITTED_ATTRS",
+        _array_api._NUMPY_FITTED_ATTRS | {"EstimatorWithArrayParam"},
+    )
+    weights = xp.asarray([1.0, 2.0])
+
+    with config_context(array_api_dispatch=True):
+        est = EstimatorWithArrayParam(weights=weights).fit(xp.asarray([[1.3, 4.5]]))
+        _fitted_attrs_as_numpy(est)
+
+    assert est.weights is weights
+    assert isinstance(est.X_, numpy.ndarray)
+
+
+class FitContextEstimator(BaseEstimator):
+    _parameter_constraints: dict = {}
+
+    @_fit_context(prefer_skip_nested_validation=True)
+    def fit(self, X, y=None):
+        self.X_ = X
+        return self
+
+
+class FitContextMetaEstimator(BaseEstimator):
+    _parameter_constraints: dict = {}
+
+    def __init__(self, estimator, n_jobs=None):
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+
+    @_fit_context(prefer_skip_nested_validation=False)
+    def fit(self, X, y=None):
+        self.estimators_ = Parallel(n_jobs=self.n_jobs, backend="threading")(
+            delayed(clone(self.estimator).fit)(X) for _ in range(2)
+        )
+        # Raises if a sub-estimator was converted when its own fit returned.
+        get_namespace(X, *(est.X_ for est in self.estimators_))
+        return self
+
+
+@skip_if_array_api_compat_not_configured
+@pytest.mark.parametrize("n_jobs", [None, 2])
+def test_fitted_attrs_converted_when_outermost_fit_returns(monkeypatch, n_jobs):
+    """Nested fits keep the namespace of `X` until the outermost fit returns.
+
+    The enclosing fit may still compute with the fitted arrays of its
+    sub-estimators. With `n_jobs=2` the sub-estimators are fitted in other threads,
+    which must know that they run inside a fit.
+    """
+    xp = pytest.importorskip("array_api_strict")
+    monkeypatch.setattr(
+        _array_api,
+        "_NUMPY_FITTED_ATTRS",
+        _array_api._NUMPY_FITTED_ATTRS
+        | {"FitContextEstimator", "FitContextMetaEstimator"},
+    )
+
+    with config_context(array_api_dispatch=True):
+        meta = FitContextMetaEstimator(FitContextEstimator(), n_jobs=n_jobs)
+        meta.fit(xp.asarray([[1.3, 4.5]]))
+
+    for est in meta.estimators_:
+        assert isinstance(est.X_, numpy.ndarray)
 
 
 @skip_if_array_api_compat_not_configured

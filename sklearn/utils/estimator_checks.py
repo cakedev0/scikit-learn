@@ -406,6 +406,16 @@ def _yield_array_api_checks(estimator, only_numpy=False):
             check_array_api_cross_namespace_inference,
             array_namespace="array_api_strict",
         )
+        # 5. Fitting on top of a previous fit reads back the fitted state. Use a
+        # non-default device so that reading NumPy state straight off `self`
+        # raises instead of silently mixing namespaces.
+        if hasattr(estimator, "partial_fit") or "warm_start" in estimator.get_params():
+            yield partial(
+                check_array_api_incremental_fit,
+                array_namespace="array_api_strict",
+                device_name="device1",
+                dtype_name="float32",
+            )
 
 
 def _yield_all_checks(estimator, legacy: bool):
@@ -1633,6 +1643,55 @@ def check_array_api_cross_namespace_inference(
             f"a {result_ns.__name__} array, the output should follow the input"
         )
         assert_allclose(result, expected, atol=atol, err_msg=method_name)
+
+
+def check_array_api_incremental_fit(
+    name, estimator_orig, array_namespace, device_name=None, dtype_name=None
+):
+    """Check that fitting on top of a previous fit works with array API inputs.
+
+    `partial_fit` and `fit` with `warm_start=True` read back the state left by the
+    previous fit, which is stored as NumPy arrays. That state has to be moved to the
+    namespace and device of `X` before being combined with it.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X, y = make_classification(n_samples=30, n_features=10, random_state=42)
+    X = X.astype(dtype_name, copy=False)
+
+    X = _enforce_estimator_tags_X(estimator_orig, X)
+    y = _enforce_estimator_tags_y(estimator_orig, y)
+
+    est = clone(estimator_orig)
+    set_random_state(est)
+
+    with config_context(array_api_dispatch=True):
+        X_xp = xp.asarray(X, device=device)
+        y_xp = xp.asarray(y, device=device)
+
+        if hasattr(est, "partial_fit"):
+            kwargs = {}
+            if is_classifier(est):
+                kwargs["classes"] = xp.asarray(np.unique(y), device=device)
+            est.partial_fit(X_xp, y_xp, **kwargs)
+            est.partial_fit(X_xp, y_xp)
+        else:
+            est.fit(X_xp, y_xp)
+            est.set_params(warm_start=True)
+            est.fit(X_xp, y_xp)
+
+        for method_name in (
+            "decision_function",
+            "predict",
+            "predict_proba",
+            "transform",
+        ):
+            method = getattr(est, method_name, None)
+            if method is None:
+                continue
+            result = method(X_xp)
+            assert get_namespace(result)[0].__name__ == xp.__name__, method_name
+            assert array_device(result) == array_device(X_xp), method_name
 
 
 def check_estimator_sparse_tag(name, estimator_orig):

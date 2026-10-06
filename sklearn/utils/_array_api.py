@@ -1050,10 +1050,9 @@ def _convert_arrays(obj, converter, recurse_estimators=True):
         Callable that takes an array and returns the converted array.
 
     recurse_estimators : bool, default=True
-        Whether to descend into nested estimators. Callers that run after every
-        fit pass False, because each nested estimator converts itself when its
-        own fit returns and descending would repeat that work once per
-        sub-estimator.
+        Whether to descend into nested estimators. `_fitted_attrs_as_numpy` passes
+        False because it visits sub-estimators itself, in place and according to
+        their own opt-in, instead of cloning them.
 
     Returns
     -------
@@ -1116,40 +1115,71 @@ def _estimator_with_converted_arrays(estimator, converter):
 # estimator's inference methods have been moved onto `_fitted_attrs_like`. Until
 # then converting unconditionally would break the estimators whose inference
 # still reads fitted attributes straight off `self`.
-_NUMPY_FITTED_ATTRS = frozenset({"LogisticRegression", "LogisticRegressionCV"})
+_NUMPY_FITTED_ATTRS = frozenset(
+    {"LogisticRegression", "LogisticRegressionCV", "StandardScaler"}
+)
 
 
 def _fitted_attrs_as_numpy(estimator):
-    """Convert `estimator`'s fitted arrays to NumPy arrays, in place.
+    """Convert the fitted arrays of `estimator` and its sub-estimators to NumPy.
 
-    Called at the end of every fit method so that the arrays an estimator exposes
+    Called when the outermost fit returns so that the arrays an estimator exposes
     do not depend on the namespace and device of the data it was fitted on.
     Inference still happens in the namespace and device of `X`, see
     `_fitted_attrs_like`.
 
-    Nested estimators are left alone: each one converts itself when its own fit
-    returns, so descending into them would re-walk every sub-estimator of an
-    ensemble on top of the walks they already did.
+    Nested fits do not convert anything, see `_fit_context`, so this walks the
+    whole tree of sub-estimators, each of them exactly once.
 
     Parameters
     ----------
     estimator : estimator object
         The estimator to convert. Modified in place.
     """
-    if type(estimator).__name__ not in _NUMPY_FITTED_ATTRS:
-        return
-
     if not get_config()["array_api_dispatch"]:
         # Without dispatch every input has already been converted to NumPy by
         # `check_array`, so there is nothing to do and no reason to pay for a walk.
         return
 
     converter = partial(move_to, xp=np_compat, device="cpu")
+    _fitted_attrs_as_numpy_in_place(estimator, converter, visited=set())
+
+
+def _fitted_attrs_as_numpy_in_place(estimator, converter, visited):
+    if id(estimator) in visited:
+        return
+    visited.add(id(estimator))
+
     # `vars()` is a live view, so materialise it before assigning back into it.
-    for name, value in list(vars(estimator).items()):
-        converted = _convert_arrays(value, converter, recurse_estimators=False)
-        if converted is not value:
-            setattr(estimator, name, converted)
+    attributes = list(vars(estimator).items())
+
+    if type(estimator).__name__ in _NUMPY_FITTED_ATTRS:
+        # Constructor parameters are user input that fit must not modify.
+        params = estimator.get_params(deep=False)
+        for name, value in attributes:
+            if name in params:
+                continue
+            converted = _convert_arrays(value, converter, recurse_estimators=False)
+            if converted is not value:
+                setattr(estimator, name, converted)
+
+    # Sub-estimators are converted according to their own opt-in, whether they are
+    # stored in a fitted attribute (`estimators_`) or in a parameter (`steps`).
+    for _, value in attributes:
+        for sub_estimator in _iter_estimators(value):
+            _fitted_attrs_as_numpy_in_place(sub_estimator, converter, visited)
+
+
+def _iter_estimators(obj):
+    """Yield the estimators in `obj`, looking inside containers."""
+    if isinstance(obj, dict):
+        for value in obj.values():
+            yield from _iter_estimators(value)
+    elif type(obj) in (list, tuple, set, frozenset):
+        for value in obj:
+            yield from _iter_estimators(value)
+    elif hasattr(obj, "get_params") and not isinstance(obj, type):
+        yield obj
 
 
 def move_estimator_to(estimator, xp, device):

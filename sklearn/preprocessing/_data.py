@@ -21,6 +21,7 @@ from sklearn.preprocessing._encoders import OneHotEncoder
 from sklearn.utils import _array_api, check_array, metadata_routing, resample
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
+    _fitted_attrs_like,
     _max_precision_float_dtype,
     _modify_in_place_if_numpy,
     array_device,
@@ -974,6 +975,13 @@ class StandardScaler(
         )
         n_features = X.shape[1]
 
+        if not first_call:
+            # The running statistics of previous calls are stored as NumPy arrays,
+            # the incremental update needs them in the namespace and device of `X`.
+            state = _fitted_attrs_like(self, xp=xp, device=X_device)
+            self.mean_, self.var_ = state.mean_, state.var_
+            self.n_samples_seen_ = state.n_samples_seen_
+
         callback_ctx = self._init_callback_context()
         callback_ctx.call_on_fit_task_begin(
             estimator=self, X=X, y=y, metadata={"sample_weight": sample_weight}
@@ -1130,10 +1138,11 @@ class StandardScaler(
             if self.scale_ is not None:
                 inplace_column_scale(X, 1 / self.scale_)
         else:
+            fitted = _fitted_attrs_like(self, xp=xp, device=X_device)
             if self.with_mean:
-                X -= xp.astype(self.mean_, X.dtype)
+                X -= xp.astype(fitted.mean_, X.dtype)
             if self.with_std:
-                X /= xp.astype(self.scale_, X.dtype)
+                X /= xp.astype(fitted.scale_, X.dtype)
         return X
 
     def inverse_transform(self, X, copy=None):
@@ -1174,10 +1183,11 @@ class StandardScaler(
             if self.scale_ is not None:
                 inplace_column_scale(X, self.scale_)
         else:
+            fitted = _fitted_attrs_like(self, xp=xp, device=X_device)
             if self.with_std:
-                X *= xp.astype(self.scale_, X.dtype)
+                X *= xp.astype(fitted.scale_, X.dtype)
             if self.with_mean:
-                X += xp.astype(self.mean_, X.dtype)
+                X += xp.astype(fitted.mean_, X.dtype)
         return X
 
     def __sklearn_tags__(self):

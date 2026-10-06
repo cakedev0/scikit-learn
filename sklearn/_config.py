@@ -34,6 +34,26 @@ def _get_threadlocal_config():
     return _threadlocal.global_config
 
 
+def _get_inside_fit():
+    """Whether a `_fit_context`-decorated fit is running in this thread."""
+    return getattr(_threadlocal, "inside_fit", False)
+
+
+@contextmanager
+def _inside_fit_context(inside_fit=True):
+    """Mark the code in the with statement as running inside a fit.
+
+    Kept out of the configuration because it is internal state, not a user
+    setting. `sklearn.utils.parallel` propagates it to joblib workers.
+    """
+    old_inside_fit = _get_inside_fit()
+    _threadlocal.inside_fit = inside_fit
+    try:
+        yield
+    finally:
+        _threadlocal.inside_fit = old_inside_fit
+
+
 def get_config():
     """Retrieve the current scikit-learn configuration.
 

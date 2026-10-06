@@ -12,7 +12,12 @@ from functools import update_wrapper
 import joblib
 from threadpoolctl import ThreadpoolController
 
-from sklearn._config import config_context, get_config
+from sklearn._config import (
+    _get_inside_fit,
+    _inside_fit_context,
+    config_context,
+    get_config,
+)
 
 # Global threadpool controller instance that can be used to locally limit the number of
 # threads without looping through all shared libraries every time.
@@ -21,10 +26,14 @@ from sklearn._config import config_context, get_config
 _threadpool_controller = None
 
 
-def _with_config_and_warning_filters(delayed_func, config, warning_filters):
+def _with_config_and_warning_filters(
+    delayed_func, config, warning_filters, inside_fit=False
+):
     """Helper function that intends to attach a config to a delayed function."""
     if hasattr(delayed_func, "with_config_and_warning_filters"):
-        return delayed_func.with_config_and_warning_filters(config, warning_filters)
+        return delayed_func.with_config_and_warning_filters(
+            config, warning_filters, inside_fit
+        )
     else:
         warnings.warn(
             (
@@ -70,6 +79,7 @@ class Parallel(joblib.Parallel):
         # in a different thread depending on the backend and on the value of
         # pre_dispatch and n_jobs.
         config = get_config()
+        inside_fit = _get_inside_fit()
         # In free-threading Python >= 3.14, warnings filters are managed through a
         # ContextVar and warnings.filters is not modified inside a
         # warnings.catch_warnings context. You need to use warnings._get_filters().
@@ -82,7 +92,9 @@ class Parallel(joblib.Parallel):
 
         iterable_with_config_and_warning_filters = (
             (
-                _with_config_and_warning_filters(delayed_func, config, warning_filters),
+                _with_config_and_warning_filters(
+                    delayed_func, config, warning_filters, inside_fit
+                ),
                 args,
                 kwargs,
             )
@@ -132,9 +144,10 @@ class _FuncWrapper:
         self.function = function
         update_wrapper(self, self.function)
 
-    def with_config_and_warning_filters(self, config, warning_filters):
+    def with_config_and_warning_filters(self, config, warning_filters, inside_fit):
         self.config = config
         self.warning_filters = warning_filters
+        self.inside_fit = inside_fit
         return self
 
     def __call__(self, *args, **kwargs):
@@ -151,7 +164,12 @@ class _FuncWrapper:
                 UserWarning,
             )
 
-        with config_context(**config), warnings.catch_warnings():
+        inside_fit = getattr(self, "inside_fit", False)
+        with (
+            config_context(**config),
+            _inside_fit_context(inside_fit),
+            warnings.catch_warnings(),
+        ):
             # TODO is there a simpler way that resetwarnings+ filterwarnings?
             warnings.resetwarnings()
             warning_filter_keys = ["action", "message", "category", "module", "lineno"]

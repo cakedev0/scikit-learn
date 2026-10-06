@@ -15,7 +15,12 @@ from collections import defaultdict
 import numpy as np
 
 from sklearn import __version__
-from sklearn._config import config_context, get_config
+from sklearn._config import (
+    _get_inside_fit,
+    _inside_fit_context,
+    config_context,
+    get_config,
+)
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.utils._array_api import _fitted_attrs_as_numpy
 from sklearn.utils._metadata_requests import _MetadataRequester, _routing_enabled
@@ -1384,6 +1389,7 @@ def _fit_context(*, prefer_skip_nested_validation):
             from sklearn.callback._callback_support import callback_management_context
 
             global_skip_validation = get_config()["skip_parameter_validation"]
+            outermost_fit = not _get_inside_fit()
 
             # we don't want to validate again for each call to partial_fit
             partial_fit_and_fitted = (
@@ -1399,11 +1405,18 @@ def _fit_context(*, prefer_skip_nested_validation):
                         prefer_skip_nested_validation or global_skip_validation
                     )
                 ),
+                _inside_fit_context(),
                 callback_management_context(estimator),
             ):
                 fitted = fit_method(estimator, *args, **kwargs)
+
+            if outermost_fit:
+                # Nested fits (sub-estimators of a meta-estimator, `fit` calling
+                # `partial_fit`, ...) keep their arrays in the namespace and device
+                # of `X` so that the enclosing fit can keep computing with them.
+                # Everything is converted at once when the outermost fit returns.
                 _fitted_attrs_as_numpy(estimator)
-                return fitted
+            return fitted
 
         return wrapper
 
