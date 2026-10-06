@@ -1,7 +1,10 @@
 import itertools
 import re
+import sys
 import time
 import warnings
+from threading import current_thread
+from typing import Callable, Iterable
 
 import joblib
 import numpy as np
@@ -17,7 +20,12 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.fixes import _IS_WASM
-from sklearn.utils.parallel import Parallel, delayed
+from sklearn.utils.parallel import (
+    Parallel,
+    _joblib_backend_is_set,
+    _parallel_thread_map,
+    delayed,
+)
 
 
 def get_working_memory():
@@ -181,6 +189,24 @@ def test_check_warnings_threading():
             ) == normalize_main_module(main_warning_filters)
 
 
+@pytest.mark.skipif(
+    getattr(sys.flags, "context_aware_warnings", False)
+    and not getattr(sys.flags, "thread_inherit_context", False),
+    reason="Worker threads don't inherit the caller's warning filters",
+)
+def test_warning_filters_not_reset_in_threads():
+    """Tasks of the threading backend run with the caller's warning filters
+    themselves, not a copy: resetting them in each task is racy with
+    process-wide filters (and costly with many threads)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", category=ConvergenceWarning)
+        main_warning_filters = get_warning_filters()
+        worker_warning_filters = Parallel(n_jobs=2, backend="threading")(
+            delayed(get_warning_filters)() for _ in range(4)
+        )
+    assert all(filters is main_warning_filters for filters in worker_warning_filters)
+
+
 @pytest.mark.xfail(_IS_WASM, reason="Pyodide always use the sequential backend")
 def test_filter_warning_propagates_no_side_effect_with_loky_backend():
     with warnings.catch_warnings():
@@ -195,3 +221,87 @@ def test_filter_warning_propagates_no_side_effect_with_loky_backend():
             joblib.delayed(warnings.warn)("Convergence warning", ConvergenceWarning)
             for _ in range(10)
         )
+
+
+@pytest.mark.parametrize(
+    "func,arguments",
+    [
+        (lambda x: x + 1, [range(1000)]),
+        (lambda a, b: a + b, [range(1, 1001), range(2, 1002)]),
+    ],
+)
+@pytest.mark.parametrize("n_jobs", [None, 1, 2, -1])
+def test_parallel_thread_map_results(
+    func: Callable, arguments: list[Iterable], n_jobs: int | None
+) -> None:
+    """Test that `_parallel_thread_map()` gives the same results as `map()`."""
+    expected = list(map(func, *arguments))
+    actual = _parallel_thread_map(n_jobs, func, *arguments)
+    assert not isinstance(actual, list)
+    assert expected == list(actual)
+
+
+@pytest.mark.skipif(joblib.effective_n_jobs(-1) > 1, reason="Single core test")
+def test_parallel_thread_map_parallelism_single_core() -> None:
+    """Test that `_parallel_thread_map()` does not use parallelism when n_jobs == 1."""
+    idents = set()
+
+    def add_ident(_):
+        idents.add(current_thread().ident)
+
+    list(_parallel_thread_map(-1, add_ident, range(20)))
+
+    assert idents == {current_thread().ident}
+
+
+@pytest.mark.skipif(joblib.effective_n_jobs(-1) == 1, reason="Requires multiple cores")
+def test_parallel_thread_map_parallelism_multiple_cores() -> None:
+    """Test that `_parallel_thread_map()` uses parallelism when n_jobs > 1."""
+    idents = set()
+
+    def add_ident(_):
+        # Small delay to ensure jobs get spread across multiple threads:
+        time.sleep(0.001)
+        idents.add(current_thread().ident)
+
+    list(_parallel_thread_map(-1, add_ident, range(500)))
+
+    assert current_thread().ident not in idents
+    assert joblib.effective_n_jobs(-1) >= len(idents) > 1
+
+
+def test_parallel_thread_map_preserves_config() -> None:
+    """
+    The scikit-learn config is passed on to threads by
+    ``_parallel_thread_map()``.
+    """
+    with config_context(working_memory=123):
+        results = set(
+            _parallel_thread_map(-1, lambda _: get_working_memory(), range(100))
+        )
+
+    assert_array_equal(results, {123})
+
+
+def test_parallel_thread_map_warnings_settings() -> None:
+    """
+    Warning settings are propagated on to threads by ``_parallel_thread_map()``.
+    """
+    warnings.simplefilter("error", category=ConvergenceWarning)
+
+    with pytest.raises(ConvergenceWarning):
+        list(_parallel_thread_map(-1, lambda _: raise_warning(), range(2)))
+
+
+def test_joblib_backend_is_set():
+    """Only a backend set in a `parallel_config` context counts as set."""
+    assert not _joblib_backend_is_set()
+    with joblib.parallel_config(n_jobs=2):
+        assert not _joblib_backend_is_set()
+    with joblib.parallel_config(backend="threading"):
+        assert _joblib_backend_is_set()
+        with joblib.parallel_config(n_jobs=2):
+            assert _joblib_backend_is_set()
+    with joblib.parallel_backend("loky"):
+        assert _joblib_backend_is_set()
+    assert not _joblib_backend_is_set()

@@ -6,13 +6,17 @@ usage.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import functools
+import os
+import sys
+import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from functools import update_wrapper
 
 import joblib
 from threadpoolctl import ThreadpoolController
 
-from sklearn._config import config_context, get_config
+from sklearn._config import config_context, get_config, set_config
 
 # Global threadpool controller instance that can be used to locally limit the number of
 # threads without looping through all shared libraries every time.
@@ -135,6 +139,7 @@ class _FuncWrapper:
     def with_config_and_warning_filters(self, config, warning_filters):
         self.config = config
         self.warning_filters = warning_filters
+        self.process_id = os.getpid()
         return self
 
     def __call__(self, *args, **kwargs):
@@ -150,6 +155,23 @@ class _FuncWrapper:
                 ),
                 UserWarning,
             )
+
+        if getattr(sys.flags, "context_aware_warnings", False):
+            # Each context has its own filters (free-threaded Python >= 3.14 by
+            # default): a worker thread inheriting the caller's context already
+            # has the caller's filters.
+            filters_already_set = warnings._get_filters() is warning_filters
+        else:
+            # The filters are process-wide: a thread of the caller's process
+            # already has them.
+            filters_already_set = getattr(self, "process_id", None) == os.getpid()
+        if filters_already_set:
+            # Setting the filters again is useless and, with many threads,
+            # costly (warnings module lock) or racy: catch_warnings swaps
+            # process-wide filters, so threads leaving it out of order can leave
+            # stale or partially reset filters behind.
+            with config_context(**config):
+                return self.function(*args, **kwargs)
 
         with config_context(**config), warnings.catch_warnings():
             # TODO is there a simpler way that resetwarnings+ filterwarnings?
@@ -182,6 +204,79 @@ class _FuncWrapper:
                     warnings.filterwarnings(**this_warning_filter_dict, append=True)
 
             return self.function(*args, **kwargs)
+
+
+def _parallel_thread_map(n_jobs, func, *iterables):
+    """
+    Like `map(..)`, but uses threads to run in parallel.
+
+    Aims for minimal overhead, to maximize the cases where it improves performance.
+
+    Parameters
+    ----------
+    n_jobs : int or None
+        The maximum number of concurrently running jobs, i.e. the number of worker
+        threads. ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
+        for more details.
+
+    func : callable function
+        Called with each value in the iterable as arguments.
+
+    *iterables : iterables of values
+        Each value will be passed to func.
+
+    Returns
+    -------
+    results : Iterable
+        Results of calling `func(*values)` for each set of values from the input
+        iterables. You must iterate over all values to ensure the scheduled tasks
+        all ran.
+    """
+    n_jobs = joblib.effective_n_jobs(n_jobs)
+    if n_jobs == 1:
+        # Run sequentially:
+        return map(func, *iterables)
+
+    # Create pool here, so it copies contextvars:
+    config = get_config()
+    executor = ThreadPoolExecutor(n_jobs, initializer=lambda: set_config(**config))
+    # Local import: sklearn.utils.fixes imports this module.
+    from sklearn.utils.fixes import _is_gil_enabled
+
+    if _is_gil_enabled():
+        # ThreadPoolExecutor starts its threads lazily, one per submitted task:
+        # with the GIL, each start would wait for the GIL held by the threads
+        # already running tasks. Start them all first, keeping them busy until
+        # then so that none is reused instead of starting a new one.
+        # Not without the GIL: threads started lazily are each placed on an
+        # idle CPU, while idle threads all woken at once by the submitted
+        # tasks are crowded onto a few CPUs by the OS scheduler.
+        all_started = threading.Barrier(n_jobs + 1)
+        for _ in range(n_jobs):
+            executor.submit(all_started.wait)
+        all_started.wait()
+
+    # Since we might return a generator above, we also want to return a
+    # generator in this code path.
+    def gen():
+        with executor:
+            yield from executor.map(func, *iterables)
+
+    return gen()
+
+
+def _joblib_backend_is_set():
+    """Whether a joblib backend is set by the active `parallel_config` context.
+
+    Used to respect a backend explicitly chosen by the user (e.g. to run on a
+    cluster) when :func:`_parallel_thread_map` would otherwise be used.
+    """
+    # joblib has no public API for this: read the config of the active
+    # `parallel_config` / `parallel_backend` context.
+    default_config = joblib.parallel.default_parallel_config
+    config = getattr(joblib.parallel._backend, "config", default_config)
+    return config["backend"] is not default_config["backend"]
 
 
 def _get_threadpool_controller():

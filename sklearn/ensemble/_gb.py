@@ -483,7 +483,9 @@ class BaseGradientBoosting(BaseEnsemble, metaclass=ABCMeta):
                 sample_weight = sample_weight * sample_mask.astype(np.float64)
 
             X = X_csc if X_csc is not None else X
-            tree._fit_validated(X, neg_g_view[:, k], sample_weight, **fit_kwargs)
+            tree._fit_validated(
+                X, neg_g_view[:, k], sample_weight, check_input=False, **fit_kwargs
+            )
 
             # update tree leaves
             X_for_tree_update = X_csr if X_csr is not None else X

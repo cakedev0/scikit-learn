@@ -37,6 +37,7 @@ Single and multi-output problems are both handled.
 
 import threading
 from abc import ABCMeta, abstractmethod
+from functools import partial
 from numbers import Integral
 from warnings import warn
 
@@ -72,7 +73,12 @@ from sklearn.utils import (
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
 from sklearn.utils._tags import get_tags
 from sklearn.utils.multiclass import check_classification_targets, type_of_target
-from sklearn.utils.parallel import Parallel, delayed
+from sklearn.utils.parallel import (
+    Parallel,
+    _joblib_backend_is_set,
+    _parallel_thread_map,
+    delayed,
+)
 from sklearn.utils.validation import (
     _check_feature_names_in,
     _check_sample_weight,
@@ -159,9 +165,9 @@ def _parallel_build_trees(
             )
             sample_weight_tree = sample_weight_tree * expanded_class_weight
 
-        tree._fit_validated(X, y, sample_weight_tree, **fit_kwargs)
+        tree._fit_validated(X, y, sample_weight_tree, check_input=False, **fit_kwargs)
     else:
-        tree._fit_validated(X, y, sample_weight, **fit_kwargs)
+        tree._fit_validated(X, y, sample_weight, check_input=False, **fit_kwargs)
 
     return tree
 
@@ -419,32 +425,39 @@ class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
                 for i in range(n_more_estimators)
             ]
 
-            # Parallel loop: we prefer the threading backend as the Cython code
-            # for fitting the trees is internally releasing the Python GIL
-            # making threading more efficient than multiprocessing in
-            # that case. However, for joblib 0.12+ we respect any
-            # parallel_backend contexts set at a higher level,
-            # since correctness does not rely on using threads.
-            trees = Parallel(
-                n_jobs=self.n_jobs,
+            build_tree = partial(
+                _parallel_build_trees,
+                bootstrap=self.bootstrap,
+                X=X,
+                y=y,
+                sample_weight=_sample_weight,
+                n_trees=len(trees),
                 verbose=self.verbose,
-                prefer="threads",
-            )(
-                delayed(_parallel_build_trees)(
-                    t,
-                    self.bootstrap,
-                    X,
-                    y,
-                    _sample_weight,
-                    fit_kwargs,
-                    i,
-                    len(trees),
-                    verbose=self.verbose,
-                    class_weight=self.class_weight,
-                    n_samples_bootstrap=n_samples_bootstrap,
-                )
-                for i, t in enumerate(trees)
+                fit_kwargs=fit_kwargs,
+                class_weight=self.class_weight,
+                n_samples_bootstrap=n_samples_bootstrap,
             )
+            if _joblib_backend_is_set():
+                # Respect a joblib backend set by the user, since correctness
+                # does not rely on using threads.
+                trees = Parallel(
+                    n_jobs=self.n_jobs,
+                    verbose=self.verbose,
+                    prefer="threads",
+                )(delayed(build_tree)(tree=t, tree_idx=i) for i, t in enumerate(trees))
+            else:
+                # Threads, since the Cython code for fitting the trees releases
+                # the GIL, with a thread pool of lower overhead than joblib's:
+                # its per-tree overhead dominates with many threads, especially
+                # on free-threaded Python.
+                trees = list(
+                    _parallel_thread_map(
+                        self.n_jobs,
+                        lambda i, t: build_tree(tree=t, tree_idx=i),
+                        range(len(trees)),
+                        trees,
+                    )
+                )
 
             # Collect newly grown trees
             self.estimators_.extend(trees)

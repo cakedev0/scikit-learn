@@ -204,6 +204,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         missing_values_in_feature_mask,
         categorical_counts,
         rank_encoding,
+        check_input=True,
     ):
         """Build the tree from validated X, with categorical features encoded.
 
@@ -233,6 +234,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             Rank encoding of the numerical features of dense X, used to sort
             samples by radix sort with `splitter="best"`. If None, samples are
             sorted by comparison sort.
+
+        check_input : bool, default=True
+            Whether to check the target and the sample weights. Ensembles, which
+            check them once for all trees, pass False.
         """
         random_state = check_random_state(self.random_state)
         is_categorical = categorical_counts >= 0
@@ -254,7 +259,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
         self.n_outputs_ = y.shape[1]
 
         if is_classification:
-            check_classification_targets(y)
+            if check_input:
+                check_classification_targets(y)
             y = np.copy(y)
 
             self.classes_ = []
@@ -321,7 +327,17 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
             )
 
         if sample_weight is not None:
-            sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
+            if check_input:
+                sample_weight = _check_sample_weight(sample_weight, X, dtype=np.float64)
+            else:
+                # Already validated, e.g. by ensembles: skip check_array, which is
+                # costly when many trees are fitted in parallel threads.
+                sample_weight = np.ascontiguousarray(sample_weight, dtype=np.float64)
+                if sample_weight.shape != (n_samples,):
+                    raise ValueError(
+                        f"sample_weight.shape == {sample_weight.shape}, expected "
+                        f"{(n_samples,)}!"
+                    )
 
         if expanded_class_weight is not None:
             if sample_weight is not None:
@@ -1144,7 +1160,9 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         X, y, fit_kwargs = self._validate_and_preprocess_X(
             X, y, reset=True, check_input=check_input
         )
-        return self._fit_validated(X, y, sample_weight, **fit_kwargs)
+        return self._fit_validated(
+            X, y, sample_weight, check_input=check_input, **fit_kwargs
+        )
 
     def predict_proba(self, X, check_input=True):
         """Predict class probabilities of the input samples X.
@@ -1556,7 +1574,9 @@ class DecisionTreeRegressor(RegressorMixin, BaseDecisionTree):
         X, y, fit_kwargs = self._validate_and_preprocess_X(
             X, y, reset=True, check_input=check_input
         )
-        return self._fit_validated(X, y, sample_weight, **fit_kwargs)
+        return self._fit_validated(
+            X, y, sample_weight, check_input=check_input, **fit_kwargs
+        )
 
     def _compute_partial_dependence_recursion(self, grid, target_features):
         """Fast partial dependence computation.
