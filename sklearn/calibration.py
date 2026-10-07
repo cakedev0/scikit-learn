@@ -869,7 +869,7 @@ def _fit_calibrator(clf, predictions, y, classes, method, xp, sample_weight=None
     return pipeline
 
 
-class _CalibratedClassifier:
+class _CalibratedClassifier(BaseEstimator):
     """Pipeline-like chaining a fitted classifier and its fitted calibrators.
 
     Parameters

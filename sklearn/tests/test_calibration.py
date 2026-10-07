@@ -1420,6 +1420,37 @@ def test_temperature_scaling_array_api_compliance(
 
 
 @pytest.mark.parametrize("ensemble", [False, True])
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_temperature_scaling_array_api_fitted_classifiers_as_numpy(
+    ensemble, array_namespace, device_name, dtype_name
+):
+    """Check that the classifiers fitted by `CalibratedClassifierCV` store NumPy
+    fitted arrays, like any `LogisticRegression` fitted on array API inputs."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X, y = make_classification(
+        n_samples=200, n_classes=3, n_informative=3, random_state=42
+    )
+    X_xp = xp.asarray(X.astype(dtype_name), device=device)
+    y_xp = xp.asarray(y, device=device)
+
+    with config_context(array_api_dispatch=True):
+        cal_clf = CalibratedClassifierCV(
+            LogisticRegression(), cv=3, method="temperature", ensemble=ensemble
+        ).fit(X_xp, y_xp)
+        proba = cal_clf.predict_proba(X_xp)
+        assert get_namespace(proba)[0].__name__ == xp.__name__
+        assert array_device(proba) == array_device(X_xp)
+
+    for calibrated_classifier in cal_clf.calibrated_classifiers_:
+        clf = calibrated_classifier.estimator
+        assert isinstance(clf.coef_, np.ndarray)
+        assert isinstance(clf.intercept_, np.ndarray)
+
+
+@pytest.mark.parametrize("ensemble", [False, True])
 @pytest.mark.parametrize("use_sample_weight", [False, True])
 @pytest.mark.parametrize(
     "array_namespace, device_name, dtype_name",
