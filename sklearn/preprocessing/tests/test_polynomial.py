@@ -39,16 +39,17 @@ from sklearn.utils.fixes import (
 
 
 @pytest.mark.parametrize("est", (PolynomialFeatures, SplineTransformer))
-def test_polynomial_and_spline_array_order(est):
+@pytest.mark.parametrize("include_bias", [True, False])
+def test_polynomial_and_spline_array_order(est, include_bias):
     """Test that output array has the given order."""
     X = np.arange(10).reshape(5, 2)
 
     def is_c_contiguous(a):
         return np.isfortran(a.T)
 
-    assert is_c_contiguous(est().fit_transform(X))
-    assert is_c_contiguous(est(order="C").fit_transform(X))
-    assert np.isfortran(est(order="F").fit_transform(X))
+    assert is_c_contiguous(est(include_bias=include_bias).fit_transform(X))
+    assert is_c_contiguous(est(order="C", include_bias=include_bias).fit_transform(X))
+    assert np.isfortran(est(order="F", include_bias=include_bias).fit_transform(X))
 
 
 @pytest.mark.parametrize(
@@ -475,13 +476,85 @@ def test_spline_transformer_sparse_output(
         msg = "X contains values beyond the limits of the knots"
         with pytest.raises(ValueError, match=msg):
             splt_dense.transform(X_extra)
-        msg = "Out of bounds"
         with pytest.raises(ValueError, match=msg):
             splt_sparse.transform(X_extra)
     else:
         assert_allclose(
             splt_dense.transform(X_extra), splt_sparse.transform(X_extra).toarray()
         )
+
+
+@pytest.mark.parametrize("degree", range(5))
+@pytest.mark.parametrize("knots", ["uniform", "quantile"])
+@pytest.mark.parametrize("sparse_output", [False, True])
+def test_spline_transformer_matches_scipy_design_matrix(
+    degree, knots, sparse_output, global_random_seed
+):
+    """Check the B-splines against scipy's, also when extrapolating."""
+    rng = np.random.RandomState(global_random_seed)
+    X = rng.randn(50, 3)
+    X_test = 2 * rng.randn(100, 3)
+
+    splt = SplineTransformer(
+        degree=degree,
+        knots=knots,
+        extrapolation="continue",
+        sparse_output=sparse_output,
+    ).fit(X)
+    X_trans = splt.transform(X_test)
+    if sparse_output:
+        X_trans = X_trans.toarray()
+
+    expected = np.hstack(
+        [
+            BSpline.design_matrix(
+                X_test[:, i], spl.t, spl.k, extrapolate=True
+            ).toarray()
+            for i, spl in enumerate(splt.bsplines_)
+        ]
+    )
+    assert_allclose(X_trans, expected, atol=1e-12)
+
+
+@pytest.mark.parametrize("degree", range(4))
+@pytest.mark.parametrize(
+    "extrapolation", ["constant", "linear", "continue", "periodic"]
+)
+@pytest.mark.parametrize("include_bias", [True, False])
+@pytest.mark.parametrize("sparse_output", [False, True])
+def test_spline_transformer_features_encoded_independently(
+    degree, extrapolation, include_bias, sparse_output, global_random_seed
+):
+    """Check that each feature is encoded as if it was the only one."""
+    rng = np.random.RandomState(global_random_seed)
+    scales = [1, 10, 100]
+    X = rng.randn(50, 3) * scales
+    X_test = 2 * rng.randn(100, 3) * scales
+
+    params = dict(
+        degree=degree,
+        extrapolation=extrapolation,
+        include_bias=include_bias,
+        sparse_output=sparse_output,
+    )
+    X_trans = SplineTransformer(**params).fit(X).transform(X_test)
+    X_trans_per_feature = [
+        SplineTransformer(**params).fit(X[:, [i]]).transform(X_test[:, [i]])
+        for i in range(X.shape[1])
+    ]
+    if sparse_output:
+        expected = sparse.hstack(X_trans_per_feature)
+    else:
+        expected = np.hstack(X_trans_per_feature)
+    assert_allclose_dense_sparse(X_trans, expected, atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("sparse_output", [False, True])
+def test_spline_transformer_preserves_dtype(dtype, sparse_output):
+    X = np.linspace(0, 1, 20, dtype=dtype).reshape(10, 2)
+    X_trans = SplineTransformer(sparse_output=sparse_output).fit_transform(X)
+    assert X_trans.dtype == dtype
 
 
 @pytest.mark.parametrize("n_knots", [5, 10])
