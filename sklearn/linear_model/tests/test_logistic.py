@@ -3253,7 +3253,7 @@ def test_logistic_regression_callback_support_warning():
 
 @pytest.mark.parametrize("n_classes", [2, 3])
 def test_lbfgs_same_fit_for_c_and_f_ordered_X(n_classes, global_random_seed):
-    """lbfgs keeps F-ordered X for binary problems: the fit must not change."""
+    """lbfgs keeps F-ordered X: the fit must not change."""
     X, y = make_classification(
         n_samples=200,
         n_features=10,
