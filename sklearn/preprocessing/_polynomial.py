@@ -27,7 +27,6 @@ from sklearn.utils._array_api import (
     get_namespace_and_device,
     supported_float_dtypes,
 )
-from sklearn.utils._mask import _get_mask
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.stats import _weighted_percentile
 from sklearn.utils.validation import (
@@ -778,15 +777,13 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
             # `else` is therefore safe.
             # Disregard observations with zero weight.
             mask = slice(None, None, 1) if sample_weight is None else sample_weight > 0
-            x_min = np.zeros(X.shape[1], dtype=np.float64)
-            x_max = np.zeros(X.shape[1], dtype=np.float64)
-            for feature_idx in range(X.shape[1]):
-                x = X[mask, feature_idx]
-                if np.all(np.isnan(x)):
-                    continue
-                else:
-                    x_min[feature_idx] = np.nanmin(x)
-                    x_max[feature_idx] = np.nanmax(x)
+            # fmin and fmax ignore NaN values, unless a feature only has missing
+            # values, in which case it gets a [0, 0] base interval.
+            x_min = np.fmin.reduce(X[mask], axis=0, dtype=np.float64)
+            x_max = np.fmax.reduce(X[mask], axis=0, dtype=np.float64)
+            all_nan = np.isnan(x_min)
+            x_min[all_nan] = 0
+            x_max[all_nan] = 0
 
             knots = np.linspace(
                 start=x_min,
@@ -1005,240 +1002,58 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
 
         n_samples, n_features = X.shape
         n_splines = self.bsplines_[0].c.shape[1]
+        # The last spline of each feature is dropped when include_bias=False.
+        n_cols = n_splines - 1 + self.include_bias
         degree = self.degree
+        dtype = X.dtype if X.dtype in FLOAT_DTYPES else np.float64
+        # scipy's BSpline evaluates contiguous float64 arrays: convert all the
+        # columns at once.
+        X = np.asarray(X, dtype=np.float64, order="F")
 
-        # Note that scipy BSpline returns float64 arrays and converts input
-        # x=X[:, i] to c-contiguous float64.
-        n_out = self.n_features_out_ + n_features * (1 - self.include_bias)
-        if X.dtype in FLOAT_DTYPES:
-            dtype = X.dtype
-        else:
-            dtype = np.float64
         if self.sparse_output:
             output_list = []
         else:
-            XBS = np.zeros((n_samples, n_out), dtype=dtype, order=self.order)
+            XBS = np.zeros(
+                (n_samples, n_features * n_cols), dtype=dtype, order=self.order
+            )
 
-        for feature_idx in range(n_features):
+        for feature_idx, spl in enumerate(self.bsplines_):
             if self._unique_knot_mask[feature_idx]:
-                # Return all zeros. Dense case: XBS is already set to zero.
+                # Constant features are encoded as zeros.
                 if self.sparse_output:
-                    output_list.append(sparse.csr_array((n_samples, n_splines)))
+                    output_list.append(
+                        sparse.csr_array((n_samples, n_cols), dtype=dtype)
+                    )
                 continue
 
             x = X[:, feature_idx]
-            spl = self.bsplines_[feature_idx]
-            # Get indicator for nan values in the current column.
-            nan_row_indices = np.flatnonzero(_get_mask(x, np.nan))
+            xmin, xmax = spl.t[degree], spl.t[-degree - 1]
+            if self.extrapolation == "error" and np.any((x < xmin) | (x > xmax)):
+                raise ValueError("X contains values beyond the limits of the knots.")
+            if self.extrapolation in ("constant", "linear"):
+                # Clipped values get the splines' values at the boundaries.
+                XBS_feature = spl(np.clip(x, xmin, xmax))
+            else:
+                XBS_feature = spl(x)
 
-            # 1. Calculate spline basis functions.
-            if self.extrapolation in ("continue", "error", "periodic"):
-                # Note that BSpline(.., extrapolate="periodic") maps x to the
-                # segment [spl.t[k], spl.t[n]] with n = spl.t.size - spl.k - 1.
+            if self.extrapolation == "linear":
+                # Continue the splines linearly beyond the boundaries, with the
+                # slopes at the boundaries.
+                below, above = x < xmin, x > xmax
+                XBS_feature[below] += np.outer(x[below] - xmin, spl(xmin, nu=1))
+                XBS_feature[above] += np.outer(x[above] - xmax, spl(xmax, nu=1))
 
-                if self.sparse_output:
-                    # We replace the nan values in the input column by some arbitrary,
-                    # in-range, numerical value since BSpline.design_matrix() would
-                    # otherwise raise on any nan value in its input. The spline encoded
-                    # values in the output of that function that correspond to missing
-                    # values in the original input will be replaced by 0.0 afterwards.
-                    #
-                    # Note that in the following we use spl.t[spl.k] as the input
-                    # replacement to make sure that this code works even when
-                    # `extrapolation == "error"`. Any other choice of in-range value
-                    # would have worked since the corresponding values in the array are
-                    # replaced by zeros.
-                    if nan_row_indices.size == x.size:
-                        # The column is all np.nan valued. Replace it by a
-                        # constant column with an arbitrary non-nan value
-                        # inside so that it is encoded as constant column.
-                        x = np.full_like(
-                            x, fill_value=spl.t[spl.k]
-                        )  # avoid mutation of input data
-                    elif nan_row_indices.shape[0] > 0:
-                        x = x.copy()  # avoid mutation of input data
-                        x[nan_row_indices] = spl.t[spl.k]
-
-                    # Note: spl.extrapolate is True for extrapolation = "continue". It
-                    # is "periodic" for extrapolation = "periodic".
-                    XBS_sparse = BSpline.design_matrix(x, spl.t, spl.k, spl.extrapolate)
-
-                    if self.extrapolation == "periodic":
-                        # See the construction of coef in fit. We need to add the last
-                        # degree spline basis function to the first degree ones and
-                        # then drop the last ones.
-                        # Note: Without converting to lil_matrix we would get:
-                        # scipy.sparse._base.SparseEfficiencyWarning: Changing the
-                        # sparsity structure of CSC is expensive. LIL is more efficient.
-                        XBS_sparse = XBS_sparse.tolil()
-                        XBS_sparse[:, :degree] += XBS_sparse[:, -degree:]
-                        XBS_sparse = XBS_sparse[:, :-degree]
-
-                else:
-                    XBS[
-                        :, (feature_idx * n_splines) : ((feature_idx + 1) * n_splines)
-                    ] = spl(x)
-
-            else:  # extrapolation in ("constant", "linear")
-                xmin, xmax = spl.t[degree], spl.t[-degree - 1]
-                # spline values at boundaries
-                f_min, f_max = spl(xmin), spl(xmax)
-                # Values outside of the feature range during fit and nan values get
-                # filtered out:
-                inside_range_mask = (xmin <= x) & (x <= xmax)
-
-                if self.sparse_output:
-                    outside_range_mask = ~inside_range_mask
-                    x = x.copy()
-                    # Set to some arbitrary value within the range of values
-                    # observed on the training set before calling
-                    # BSpline.design_matrix. Those transformed will be
-                    # reassigned later when handling with extrapolation.
-                    x[outside_range_mask] = xmin
-                    XBS_sparse = BSpline.design_matrix(x, spl.t, spl.k)
-                    # Note: See comment about SparseEfficiencyWarning above.
-                    if np.any(outside_range_mask):
-                        XBS_sparse = XBS_sparse.tolil()
-                        XBS_sparse[outside_range_mask, :] = 0
-
-                else:
-                    XBS[
-                        inside_range_mask,
-                        (feature_idx * n_splines) : ((feature_idx + 1) * n_splines),
-                    ] = spl(x[inside_range_mask])
-
-            # 2. Set nan input to 0.
-            if nan_row_indices.shape[0] > 0:
-                if self.sparse_output:
-                    # Note: See comment about SparseEfficiencyWarning above.
-                    XBS_sparse = XBS_sparse.tolil()
-                    XBS_sparse[nan_row_indices, :] = 0
-                else:
-                    output_feature_idx = n_splines * feature_idx
-                    XBS[
-                        nan_row_indices,
-                        output_feature_idx : output_feature_idx + n_splines,
-                    ] = 0
-
-            # 3. Deal with extrapolation.
-            # Note that "continue" is already returned as is by scipy BSplines.
-            if self.extrapolation == "error":
-                has_nan_output_values = False
-                if self.sparse_output:
-                    # Early convert to CSR as the sparsity structure of this
-                    # block should not change anymore. This is needed to be able
-                    # to safely assume that `.data` is a 1D array.
-                    XBS_sparse = XBS_sparse.tocsr()
-                    has_nan_output_values = np.any(np.isnan(XBS_sparse.data))
-                else:
-                    output_features = slice(
-                        feature_idx * n_splines, (feature_idx + 1) * n_splines
-                    )
-                    has_nan_output_values = np.any(np.isnan(XBS[:, output_features]))
-
-                if has_nan_output_values:
-                    raise ValueError(
-                        "X contains values beyond the limits of the knots."
-                    )
-
-            elif self.extrapolation == "constant":
-                # Set all values beyond xmin and xmax to the value of the
-                # spline basis functions at those two positions.
-                # Only the first degree and last degree number of splines
-                # have non-zero values at the boundaries.
-
-                below_xmin_mask = X[:, feature_idx] < xmin
-                if np.any(below_xmin_mask):
-                    if self.sparse_output:
-                        # Note: See comment about SparseEfficiencyWarning above.
-                        XBS_sparse = XBS_sparse.tolil()
-                        XBS_sparse[below_xmin_mask, :degree] = f_min[:degree]
-
-                    else:
-                        XBS[
-                            below_xmin_mask,
-                            (feature_idx * n_splines) : (
-                                feature_idx * n_splines + degree
-                            ),
-                        ] = f_min[:degree]
-
-                above_xmax_mask = X[:, feature_idx] > xmax
-                if np.any(above_xmax_mask):
-                    if self.sparse_output:
-                        # Note: See comment about SparseEfficiencyWarning above.
-                        XBS_sparse = XBS_sparse.tolil()
-                        XBS_sparse[above_xmax_mask, -degree:] = f_max[-degree:]
-                    else:
-                        XBS[
-                            above_xmax_mask,
-                            ((feature_idx + 1) * n_splines - degree) : (
-                                (feature_idx + 1) * n_splines
-                            ),
-                        ] = f_max[-degree:]
-
-            elif self.extrapolation == "linear":
-                # Continue the degree first and degree last spline bases linearly
-                # beyond the boundaries, with slope = derivative at the boundary.
-                # Note that all others have derivative = value = 0 at the boundaries.
-
-                # spline derivatives = slopes at boundaries
-                fp_min, fp_max = spl(xmin, nu=1), spl(xmax, nu=1)
-                # Compute the linear continuation.
-                if degree <= 1:
-                    # For degree=1, the derivative of 2nd spline is not zero at
-                    # boundary. For degree=0 it is the same as 'constant'.
-                    degree += 1
-                for j in range(degree):
-                    below_xmin_mask = X[:, feature_idx] < xmin
-                    if np.any(below_xmin_mask):
-                        linear_extr = (
-                            f_min[j]
-                            + (X[below_xmin_mask, feature_idx] - xmin) * fp_min[j]
-                        )
-                        if self.sparse_output:
-                            # Note: See comment about SparseEfficiencyWarning above.
-                            XBS_sparse = XBS_sparse.tolil()
-                            XBS_sparse[below_xmin_mask, j] = linear_extr
-                        else:
-                            XBS[below_xmin_mask, feature_idx * n_splines + j] = (
-                                linear_extr
-                            )
-
-                    above_xmax_mask = X[:, feature_idx] > xmax
-                    if np.any(above_xmax_mask):
-                        k = n_splines - 1 - j
-                        linear_extr = (
-                            f_max[k]
-                            + (X[above_xmax_mask, feature_idx] - xmax) * fp_max[k]
-                        )
-                        if self.sparse_output:
-                            # Note: See comment about SparseEfficiencyWarning above.
-                            XBS_sparse = XBS_sparse.tolil()
-                            XBS_sparse[above_xmax_mask, k : k + 1] = linear_extr[
-                                :, None
-                            ]
-                        else:
-                            XBS[above_xmax_mask, feature_idx * n_splines + k] = (
-                                linear_extr
-                            )
-
-            # 4. Collect output.
+            XBS_feature[np.isnan(x)] = 0
+            XBS_feature = XBS_feature[:, :n_cols]
             if self.sparse_output:
-                XBS_sparse = XBS_sparse.tocsr()
-                output_list.append(XBS_sparse)
+                output_list.append(sparse.csr_array(XBS_feature.astype(dtype)))
+            else:
+                XBS[:, feature_idx * n_cols : (feature_idx + 1) * n_cols] = XBS_feature
 
         if self.sparse_output:
             XBS = sparse.hstack(output_list, format="csr")
 
-        XBS = _align_api_if_sparse(XBS)
-
-        if self.include_bias:
-            return XBS
-        else:
-            # We throw away one spline basis per feature.
-            # We chose the last one.
-            indices = [j for j in range(XBS.shape[1]) if (j + 1) % n_splines != 0]
-            return XBS[:, indices]
+        return _align_api_if_sparse(XBS)
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
