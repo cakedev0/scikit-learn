@@ -1231,11 +1231,11 @@ def test_kmeans_plusplus_dataorder(global_random_seed):
 @pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
 def test_kmeans_plusplus_dense_sparse(csr_container, global_random_seed):
     # Check that dense and sparse inputs give the same centers. Use enough samples
-    # to have several chunks of samples when sampling the candidates.
+    # to have several chunks of samples and several threads (if available).
     X, _ = make_blobs(
-        n_samples=2000, n_features=10, centers=20, random_state=global_random_seed
+        n_samples=20_000, n_features=10, centers=20, random_state=global_random_seed
     )
-    sample_weight = np.random.RandomState(global_random_seed).uniform(size=2000)
+    sample_weight = np.random.RandomState(global_random_seed).uniform(size=20_000)
 
     centers_dense, indices_dense = kmeans_plusplus(
         X, 20, sample_weight=sample_weight, random_state=global_random_seed

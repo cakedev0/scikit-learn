@@ -223,7 +223,10 @@ def _kmeans_plusplus(
     """
     n_samples = X.shape[0]
     n_chunks = -(-n_samples // CHUNK_SIZE)
-    n_threads = _openmp_effective_n_threads()
+    # Each k-means++ step is a parallel region with little work for small
+    # datasets, where starting and synchronizing many threads would dominate:
+    # use at most one thread per 2**16 elements of X (or non-zero values).
+    n_threads = min(_openmp_effective_n_threads(), max(1, X.size // 2**16))
 
     # Set the number of local seeding trials if none is given
     if n_local_trials is None:
