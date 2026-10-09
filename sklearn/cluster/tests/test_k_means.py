@@ -1228,6 +1228,41 @@ def test_kmeans_plusplus_dataorder(global_random_seed):
     assert_allclose(centers_c, centers_fortran)
 
 
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_kmeans_plusplus_dense_sparse(csr_container, global_random_seed):
+    # Check that dense and sparse inputs give the same centers. Use enough samples
+    # to have several chunks of samples and several threads (if available).
+    X, _ = make_blobs(
+        n_samples=20_000, n_features=10, centers=20, random_state=global_random_seed
+    )
+    sample_weight = np.random.RandomState(global_random_seed).uniform(size=20_000)
+
+    centers_dense, indices_dense = kmeans_plusplus(
+        X, 20, sample_weight=sample_weight, random_state=global_random_seed
+    )
+    centers_sparse, indices_sparse = kmeans_plusplus(
+        csr_container(X),
+        20,
+        sample_weight=sample_weight,
+        random_state=global_random_seed,
+    )
+
+    assert_array_equal(indices_dense, indices_sparse)
+    assert_allclose(centers_dense, centers_sparse)
+
+
+def test_kmeans_plusplus_float32_far_from_origin(global_random_seed):
+    # Check that a sample identical to a chosen center is never chosen again, in
+    # float32 and far from the origin, where ||x||² - 2 x.c + ||c||² is dominated
+    # by rounding errors for the distances between samples.
+    rng = np.random.RandomState(global_random_seed)
+    X = np.repeat(rng.uniform(size=(10, 2)) + 1e3, 50, axis=0).astype(np.float32)
+
+    centers, _ = kmeans_plusplus(X, 10, random_state=global_random_seed)
+
+    assert np.unique(centers, axis=0).shape[0] == 10
+
+
 def test_is_same_clustering():
     # Sanity check for the _is_same_clustering utility function
     labels1 = np.array([1, 0, 0, 1, 2, 0, 2, 1], dtype=np.int32)

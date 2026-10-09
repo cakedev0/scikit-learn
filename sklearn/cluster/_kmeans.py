@@ -22,6 +22,8 @@ from sklearn.cluster._k_means_common import (
     _inertia_dense,
     _inertia_sparse,
     _is_same_clustering,
+    _kmeans_plusplus_trials_dense,
+    _kmeans_plusplus_trials_sparse,
 )
 from sklearn.cluster._k_means_elkan import (
     elkan_iter_chunked_dense,
@@ -38,7 +40,7 @@ from sklearn.cluster._k_means_minibatch import (
     _minibatch_update_sparse,
 )
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.metrics.pairwise import _euclidean_distances, euclidean_distances
+from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.utils import check_array, check_random_state
 from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
@@ -139,13 +141,13 @@ def kmeans_plusplus(
     ...               [10, 2], [10, 4], [10, 0]])
     >>> centers, indices = kmeans_plusplus(X, n_clusters=2, random_state=0)
     >>> centers
-    array([[10,  2],
-           [ 1,  0]])
+    array([[10.,  2.],
+           [ 1.,  0.]])
     >>> indices
     array([3, 2])
     """
     # Check data
-    check_array(X, accept_sparse="csr", dtype=[np.float64, np.float32])
+    X = check_array(X, accept_sparse="csr", dtype=[np.float64, np.float32], order="C")
     sample_weight = _check_sample_weight(sample_weight, X, dtype=X.dtype)
 
     if X.shape[0] < n_clusters:
@@ -157,7 +159,9 @@ def kmeans_plusplus(
     if x_squared_norms is None:
         x_squared_norms = row_norms(X, squared=True)
     else:
-        x_squared_norms = check_array(x_squared_norms, dtype=X.dtype, ensure_2d=False)
+        x_squared_norms = check_array(
+            x_squared_norms, dtype=X.dtype, ensure_2d=False, order="C"
+        )
 
     if x_squared_norms.shape[0] != X.shape[0]:
         raise ValueError(
@@ -175,6 +179,9 @@ def kmeans_plusplus(
     return centers, indices
 
 
+# Threadpoolctl context to limit the number of threads in second level of
+# nested parallelism (i.e. BLAS) to avoid oversubscription.
+@_threadpool_controller_decorator(limits=1, user_api="blas")
 def _kmeans_plusplus(
     X, n_clusters, x_squared_norms, sample_weight, random_state, n_local_trials=None
 ):
@@ -214,9 +221,12 @@ def _kmeans_plusplus(
         The index location of the chosen centers in the data array X. For a
         given index and center, X[index] = center.
     """
-    n_samples, n_features = X.shape
-
-    centers = np.empty((n_clusters, n_features), dtype=X.dtype)
+    n_samples = X.shape[0]
+    n_chunks = -(-n_samples // CHUNK_SIZE)
+    # Each k-means++ step is a parallel region with little work for small
+    # datasets, where starting and synchronizing many threads would dominate:
+    # use at most one thread per 2**16 elements of X (or non-zero values).
+    n_threads = min(_openmp_effective_n_threads(), max(1, X.size // 2**16))
 
     # Set the number of local seeding trials if none is given
     if n_local_trials is None:
@@ -225,55 +235,136 @@ def _kmeans_plusplus(
         # that it helped.
         n_local_trials = 2 + int(np.log(n_clusters))
 
+    # Squared distances from each sample to its closest center for each
+    # candidate, and their weighted sums per chunk of samples. Steps write
+    # alternately in the 2 buffers: the distances of the best candidate of a
+    # step are read as the closest distances by the next step.
+    trials_dist_sq = np.empty((2, n_local_trials, n_samples), dtype=X.dtype)
+    trials_chunk_pot = np.empty((n_local_trials, n_chunks), dtype=np.float64)
+
     # Pick first center randomly and track index of point
     center_id = random_state.choice(n_samples, p=sample_weight / sample_weight.sum())
     indices = np.full(n_clusters, -1, dtype=int)
-    if sp.issparse(X):
-        centers[0] = X[[center_id]].toarray()
-    else:
-        centers[0] = X[center_id]
     indices[0] = center_id
 
-    # Initialize list of closest distances and calculate current potential
-    closest_dist_sq = _euclidean_distances(
-        centers[0, np.newaxis], X, Y_norm_squared=x_squared_norms, squared=True
+    # Initialize list of closest distances and potential per chunk
+    _kmeans_plusplus_trials(
+        X,
+        x_squared_norms,
+        sample_weight,
+        np.array([center_id]),
+        np.full(n_samples, np.inf, dtype=X.dtype),
+        trials_dist_sq[0, :1],
+        trials_chunk_pot[:1],
+        n_threads,
     )
-    current_pot = closest_dist_sq @ sample_weight
+    closest_dist_sq = trials_dist_sq[0, 0]
+    chunk_pot = trials_chunk_pot[0].copy()
 
     # Pick the remaining n_clusters-1 points
     for c in range(1, n_clusters):
         # Choose center candidates by sampling with probability proportional
         # to the squared distance to the closest existing center
-        rand_vals = random_state.uniform(size=n_local_trials) * current_pot
-        candidate_ids = np.searchsorted(
-            np.cumsum(sample_weight * closest_dist_sq), rand_vals
-        )
-        # XXX: numerical imprecision can result in a candidate_id out of range
-        np.clip(candidate_ids, None, closest_dist_sq.size - 1, out=candidate_ids)
-
-        # Compute distances to center candidates
-        distance_to_candidates = _euclidean_distances(
-            X[candidate_ids], X, Y_norm_squared=x_squared_norms, squared=True
+        candidate_ids = _sample_candidates(
+            random_state, n_local_trials, chunk_pot, closest_dist_sq, sample_weight
         )
 
-        # update closest distances squared and potential for each candidate
-        np.minimum(closest_dist_sq, distance_to_candidates, out=distance_to_candidates)
-        candidates_pot = distance_to_candidates @ sample_weight.reshape(-1, 1)
+        # Compute closest distances and potential for each candidate
+        trials_dist_sq_c = trials_dist_sq[c % 2]
+        _kmeans_plusplus_trials(
+            X,
+            x_squared_norms,
+            sample_weight,
+            candidate_ids,
+            closest_dist_sq,
+            trials_dist_sq_c,
+            trials_chunk_pot,
+            n_threads,
+        )
 
         # Decide which candidate is the best
-        best_candidate = np.argmin(candidates_pot)
-        current_pot = candidates_pot[best_candidate]
-        closest_dist_sq = distance_to_candidates[best_candidate]
-        best_candidate = candidate_ids[best_candidate]
+        best_candidate = np.argmin(trials_chunk_pot.sum(axis=1))
+        closest_dist_sq = trials_dist_sq_c[best_candidate]
+        chunk_pot = trials_chunk_pot[best_candidate].copy()
 
         # Permanently add best center candidate found in local tries
-        if sp.issparse(X):
-            centers[c] = X[[best_candidate]].toarray()
-        else:
-            centers[c] = X[best_candidate]
-        indices[c] = best_candidate
+        indices[c] = candidate_ids[best_candidate]
+
+    centers = X[indices]
+    if sp.issparse(X):
+        centers = centers.toarray()
 
     return centers, indices
+
+
+def _kmeans_plusplus_trials(
+    X,
+    x_squared_norms,
+    sample_weight,
+    candidate_ids,
+    closest_dist_sq,
+    trials_dist_sq,
+    trials_chunk_pot,
+    n_threads,
+):
+    """Evaluate k-means++ candidate centers, see `_kmeans_plusplus_trials_dense`."""
+    candidates = X[candidate_ids]
+    candidates_squared_norms = x_squared_norms[candidate_ids]
+    if sp.issparse(X):
+        _kmeans_plusplus_trials_sparse(
+            X,
+            sample_weight,
+            candidates.toarray(),
+            candidates_squared_norms,
+            closest_dist_sq,
+            trials_dist_sq,
+            trials_chunk_pot,
+            n_threads,
+        )
+    else:
+        _kmeans_plusplus_trials_dense(
+            X,
+            x_squared_norms,
+            sample_weight,
+            candidates,
+            candidates_squared_norms,
+            closest_dist_sq,
+            trials_dist_sq,
+            trials_chunk_pot,
+            n_threads,
+        )
+
+
+def _sample_candidates(
+    random_state, n_candidates, chunk_pot, closest_dist_sq, sample_weight
+):
+    """Sample candidate centers for k-means++.
+
+    The probability of a sample is proportional to its weighted squared
+    distance to the closest center. A chunk of `CHUNK_SIZE` samples is first
+    sampled from the potentials per chunk, then a sample within that chunk.
+    """
+    n_samples = closest_dist_sq.shape[0]
+    chunk_pot_cumsum = np.cumsum(chunk_pot)
+    rand_vals = random_state.uniform(size=n_candidates) * chunk_pot_cumsum[-1]
+    chunk_ids = np.searchsorted(chunk_pot_cumsum, rand_vals)
+    # Numerical imprecision can result in a chunk_id out of range
+    np.clip(chunk_ids, None, chunk_pot.shape[0] - 1, out=chunk_ids)
+
+    candidate_ids = np.empty(n_candidates, dtype=np.intp)
+    for i, (chunk_id, rand_val) in enumerate(zip(chunk_ids, rand_vals)):
+        start = chunk_id * CHUNK_SIZE
+        end = min(start + CHUNK_SIZE, n_samples)
+        if chunk_id > 0:
+            rand_val -= chunk_pot_cumsum[chunk_id - 1]
+        chunk_cumsum = np.cumsum(
+            sample_weight[start:end] * closest_dist_sq[start:end], dtype=np.float64
+        )
+        candidate_ids[i] = start + min(
+            np.searchsorted(chunk_cumsum, rand_val), end - start - 1
+        )
+
+    return candidate_ids
 
 
 ###############################################################################

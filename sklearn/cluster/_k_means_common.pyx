@@ -6,6 +6,8 @@ from cython cimport floating
 from cython.parallel cimport prange
 from libc.math cimport sqrt
 
+from sklearn.utils._cython_blas cimport _gemm
+from sklearn.utils._cython_blas cimport RowMajor, Trans, NoTrans
 from sklearn.utils.extmath import row_norms
 
 
@@ -162,6 +164,122 @@ cpdef floating _inertia_sparse(
             inertia += sq_dist * sample_weight[i]
 
     return inertia
+
+
+def _kmeans_plusplus_trials_dense(
+        const floating[:, ::1] X,                       # IN
+        const floating[::1] x_squared_norms,            # IN
+        const floating[::1] sample_weight,              # IN
+        const floating[:, ::1] candidates,              # IN
+        const floating[::1] candidates_squared_norms,   # IN
+        const floating[::1] closest_dist_sq,            # IN
+        floating[:, ::1] trials_dist_sq,                # OUT
+        double[:, ::1] trials_chunk_pot,                # OUT
+        int n_threads):
+    """Evaluate k-means++ candidate centers for dense input data.
+
+    For each candidate `j` and sample `i`, compute the squared distance from
+    sample `i` to its closest center if candidate `j` was added, i.e.
+    `trials_dist_sq[j, i] = min(closest_dist_sq[i], ||X[i] - candidates[j]||²)`.
+
+    `trials_chunk_pot[j, chunk_idx]` is the sum of these distances weighted by
+    `sample_weight` over the chunk of `CHUNK_SIZE` samples `chunk_idx`. Summing
+    over the chunks gives the potential of each candidate, and the per-chunk
+    sums allow sampling the next candidates without a cumulative sum over all
+    the samples.
+    """
+    cdef:
+        int n_samples = X.shape[0]
+        int n_features = X.shape[1]
+        int n_trials = candidates.shape[0]
+        int n_chunks = trials_chunk_pot.shape[1]
+        int chunk_size = CHUNK_SIZE
+        int ld_trials = trials_dist_sq.strides[0] // sizeof(floating)
+        # Each thread processes a contiguous block of chunks with a single BLAS
+        # call: many small concurrent BLAS calls scale badly with the number of
+        # threads (at least with OpenBLAS).
+        int n_blocks = min(n_threads, n_chunks)
+        int block_idx, first_chunk, last_chunk, chunk_idx, start, end, i, j
+        floating dist, norms
+        double pot
+
+    for block_idx in prange(n_blocks, nogil=True, num_threads=n_blocks,
+                            schedule='static'):
+        first_chunk = block_idx * n_chunks // n_blocks
+        last_chunk = (block_idx + 1) * n_chunks // n_blocks
+        start = first_chunk * chunk_size
+        end = min(last_chunk * chunk_size, n_samples)
+
+        # trials_dist_sq[:, start:end] = -2 candidates.X[start:end].T
+        _gemm(RowMajor, NoTrans, Trans, n_trials, end - start, n_features,
+              -2.0, &candidates[0, 0], n_features, &X[start, 0], n_features,
+              0.0, &trials_dist_sq[0, start], ld_trials)
+
+        for chunk_idx in range(first_chunk, last_chunk):
+            start = chunk_idx * chunk_size
+            end = min(start + chunk_size, n_samples)
+            for j in range(n_trials):
+                pot = 0.0
+                for i in range(start, end):
+                    norms = x_squared_norms[i] + candidates_squared_norms[j]
+                    dist = trials_dist_sq[j, i] + norms
+                    # ||x||² - 2 x.c + ||c||² suffers from catastrophic
+                    # cancellation when x is close to c (especially in float32),
+                    # so small distances are recomputed directly. In particular,
+                    # a sample identical to an existing center must get a zero
+                    # distance to never be sampled again.
+                    if dist < 1e-2 * norms:
+                        dist = _euclidean_dense_dense(
+                            &X[i, 0], &candidates[j, 0], n_features, True)
+                    if closest_dist_sq[i] < dist:
+                        dist = closest_dist_sq[i]
+                    trials_dist_sq[j, i] = dist
+                    pot = pot + sample_weight[i] * dist
+                trials_chunk_pot[j, chunk_idx] = pot
+
+
+def _kmeans_plusplus_trials_sparse(
+        X,                                              # IN
+        const floating[::1] sample_weight,              # IN
+        const floating[:, ::1] candidates,              # IN
+        const floating[::1] candidates_squared_norms,   # IN
+        const floating[::1] closest_dist_sq,            # IN
+        floating[:, ::1] trials_dist_sq,                # OUT
+        double[:, ::1] trials_chunk_pot,                # OUT
+        int n_threads):
+    """Evaluate k-means++ candidate centers for sparse input data.
+
+    See `_kmeans_plusplus_trials_dense` for details.
+    """
+    cdef:
+        floating[::1] X_data = X.data
+        int[::1] X_indices = X.indices
+        int[::1] X_indptr = X.indptr
+
+        int n_samples = X.shape[0]
+        int n_trials = candidates.shape[0]
+        int n_chunks = trials_chunk_pot.shape[1]
+        int chunk_size = CHUNK_SIZE
+        int chunk_idx, start, end, i, j
+        floating dist
+        double pot
+
+    for chunk_idx in prange(n_chunks, nogil=True, num_threads=n_threads,
+                            schedule='static'):
+        start = chunk_idx * chunk_size
+        end = min(start + chunk_size, n_samples)
+        for j in range(n_trials):
+            pot = 0.0
+            for i in range(start, end):
+                dist = _euclidean_sparse_dense(
+                    X_data[X_indptr[i]: X_indptr[i + 1]],
+                    X_indices[X_indptr[i]: X_indptr[i + 1]],
+                    candidates[j], candidates_squared_norms[j], True)
+                if closest_dist_sq[i] < dist:
+                    dist = closest_dist_sq[i]
+                trials_dist_sq[j, i] = dist
+                pot = pot + sample_weight[i] * dist
+            trials_chunk_pot[j, chunk_idx] = pot
 
 
 cpdef void _relocate_empty_clusters_dense(
