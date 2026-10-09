@@ -1,16 +1,10 @@
 # Licence: BSD 3 clause
 
 from cython cimport floating
-from cython.parallel import prange, parallel
+from cython.parallel import prange, parallel, threadid
 from libc.stdlib cimport malloc, calloc, free
-from libc.string cimport memset
 from libc.float cimport DBL_MAX, FLT_MAX
 
-from sklearn.utils._openmp_helpers cimport omp_lock_t
-from sklearn.utils._openmp_helpers cimport omp_init_lock
-from sklearn.utils._openmp_helpers cimport omp_destroy_lock
-from sklearn.utils._openmp_helpers cimport omp_set_lock
-from sklearn.utils._openmp_helpers cimport omp_unset_lock
 from sklearn.utils.extmath import row_norms
 from sklearn.utils._cython_blas cimport _gemm
 from sklearn.utils._cython_blas cimport RowMajor, Trans, NoTrans
@@ -18,6 +12,32 @@ from sklearn.cluster._k_means_common import CHUNK_SIZE
 from sklearn.cluster._k_means_common cimport _relocate_empty_clusters_dense
 from sklearn.cluster._k_means_common cimport _relocate_empty_clusters_sparse
 from sklearn.cluster._k_means_common cimport _average_centers, _center_shift
+
+
+cdef void _reduce_thread_buffers(
+        floating **centers_new_chunks,         # IN
+        floating **weight_in_clusters_chunks,  # IN
+        int n_threads,
+        floating[:, ::1] centers_new,          # INOUT
+        floating[::1] weight_in_clusters,      # INOUT
+        bint update_centers) noexcept nogil:
+    """Add the buffers of each thread to the result and free them."""
+    cdef int thread_idx, j, k
+    cdef int n_clusters, n_features
+    for thread_idx in range(n_threads):
+        # A thread of the team may not have run, e.g. if the OpenMP runtime gave
+        # fewer threads than requested.
+        if centers_new_chunks[thread_idx] != NULL and update_centers:
+            n_clusters = centers_new.shape[0]
+            n_features = centers_new.shape[1]
+            for j in range(n_clusters):
+                weight_in_clusters[j] += weight_in_clusters_chunks[thread_idx][j]
+                for k in range(n_features):
+                    centers_new[j, k] += centers_new_chunks[thread_idx][j * n_features + k]
+        free(centers_new_chunks[thread_idx])
+        free(weight_in_clusters_chunks[thread_idx])
+    free(centers_new_chunks)
+    free(weight_in_clusters_chunks)
 
 
 def lloyd_iter_chunked_dense(
@@ -94,15 +114,14 @@ def lloyd_iter_chunked_dense(
         int chunk_idx
         int start, end
 
-        int j, k
-
         floating[::1] centers_squared_norms = row_norms(centers_old, squared=True)
 
+        int thread_idx
         floating *centers_new_chunk
         floating *weight_in_clusters_chunk
         floating *pairwise_distances_chunk
-
-        omp_lock_t lock
+        floating **centers_new_chunks
+        floating **weight_in_clusters_chunks
 
     # count remainder chunk in total number of chunks
     n_chunks += n_samples != n_chunks * n_samples_chunk
@@ -110,16 +129,19 @@ def lloyd_iter_chunked_dense(
     # number of threads should not be bigger than number of chunks
     n_threads = min(n_threads, n_chunks)
 
-    if update_centers:
-        memset(&centers_new[0, 0], 0, n_clusters * n_features * sizeof(floating))
-        memset(&weight_in_clusters[0], 0, n_clusters * sizeof(floating))
-        omp_init_lock(&lock)
+    # Each thread allocates its own buffers, and they are reduced after the
+    # parallel region instead of under a lock inside it: threads waiting for each
+    # other inside the parallel region scale badly with the number of threads.
+    centers_new_chunks = <floating **> calloc(n_threads, sizeof(floating *))
+    weight_in_clusters_chunks = <floating **> calloc(n_threads, sizeof(floating *))
 
     with nogil, parallel(num_threads=n_threads):
-        # thread local buffers
+        thread_idx = threadid()
         centers_new_chunk = <floating*> calloc(n_clusters * n_features, sizeof(floating))
         weight_in_clusters_chunk = <floating*> calloc(n_clusters, sizeof(floating))
         pairwise_distances_chunk = <floating*> malloc(n_samples_chunk * n_clusters * sizeof(floating))
+        centers_new_chunks[thread_idx] = centers_new_chunk
+        weight_in_clusters_chunks[thread_idx] = weight_in_clusters_chunk
 
         for chunk_idx in prange(n_chunks, schedule='static'):
             start = chunk_idx * n_samples_chunk
@@ -128,35 +150,30 @@ def lloyd_iter_chunked_dense(
             else:
                 end = start + n_samples_chunk
 
+            # Pass the chunk as indices: slicing memoryviews here would make
+            # Cython take the GIL in every thread of the parallel region.
             _update_chunk_dense(
-                X[start: end],
-                sample_weight[start: end],
+                X,
+                sample_weight,
                 centers_old,
                 centers_squared_norms,
-                labels[start: end],
+                labels,
+                start,
+                end,
                 centers_new_chunk,
                 weight_in_clusters_chunk,
                 pairwise_distances_chunk,
                 update_centers)
 
-        # reduction from local buffers.
-        if update_centers:
-            # The lock is necessary to avoid race conditions when aggregating
-            # info from different thread-local buffers.
-            omp_set_lock(&lock)
-            for j in range(n_clusters):
-                weight_in_clusters[j] += weight_in_clusters_chunk[j]
-                for k in range(n_features):
-                    centers_new[j, k] += centers_new_chunk[j * n_features + k]
-
-            omp_unset_lock(&lock)
-
-        free(centers_new_chunk)
-        free(weight_in_clusters_chunk)
         free(pairwise_distances_chunk)
 
     if update_centers:
-        omp_destroy_lock(&lock)
+        centers_new[...] = 0
+        weight_in_clusters[...] = 0
+    _reduce_thread_buffers(centers_new_chunks, weight_in_clusters_chunks, n_threads,
+                           centers_new, weight_in_clusters, update_centers)
+
+    if update_centers:
         _relocate_empty_clusters_dense(
             X, sample_weight, centers_old, centers_new, weight_in_clusters, labels
         )
@@ -171,17 +188,19 @@ cdef void _update_chunk_dense(
         const floating[:, ::1] centers_old,         # IN
         const floating[::1] centers_squared_norms,  # IN
         int[::1] labels,                            # OUT
+        int start,
+        int end,
         floating *centers_new,                      # OUT
         floating *weight_in_clusters,               # OUT
         floating *pairwise_distances,               # OUT
         bint update_centers) noexcept nogil:
     """K-means combined EM step for one dense data chunk.
 
-    Compute the partial contribution of a single data chunk to the labels and
-    centers.
+    Compute the partial contribution of the data chunk X[start:end] to the
+    labels and centers.
     """
     cdef:
-        int n_samples = labels.shape[0]
+        int n_samples = end - start
         int n_clusters = centers_old.shape[0]
         int n_features = centers_old.shape[1]
 
@@ -199,7 +218,7 @@ cdef void _update_chunk_dense(
 
     # pairwise_distances += -2 * X.dot(C.T)
     _gemm(RowMajor, NoTrans, Trans, n_samples, n_clusters, n_features,
-          -2.0, &X[0, 0], n_features, &centers_old[0, 0], n_features,
+          -2.0, &X[start, 0], n_features, &centers_old[0, 0], n_features,
           1.0, pairwise_distances, n_clusters)
 
     for i in range(n_samples):
@@ -210,12 +229,14 @@ cdef void _update_chunk_dense(
             if sq_dist < min_sq_dist:
                 min_sq_dist = sq_dist
                 label = j
-        labels[i] = label
+        labels[start + i] = label
 
         if update_centers:
-            weight_in_clusters[label] += sample_weight[i]
+            weight_in_clusters[label] += sample_weight[start + i]
             for k in range(n_features):
-                centers_new[label * n_features + k] += X[i, k] * sample_weight[i]
+                centers_new[label * n_features + k] += (
+                    X[start + i, k] * sample_weight[start + i]
+                )
 
 
 def lloyd_iter_chunked_sparse(
@@ -293,18 +314,17 @@ def lloyd_iter_chunked_sparse(
         int chunk_idx
         int start = 0, end = 0
 
-        int j, k
-
         floating[::1] X_data = X.data
         int[::1] X_indices = X.indices
         int[::1] X_indptr = X.indptr
 
         floating[::1] centers_squared_norms = row_norms(centers_old, squared=True)
 
+        int thread_idx
         floating *centers_new_chunk
         floating *weight_in_clusters_chunk
-
-        omp_lock_t lock
+        floating **centers_new_chunks
+        floating **weight_in_clusters_chunks
 
     # count remainder chunk in total number of chunks
     n_chunks += n_samples != n_chunks * n_samples_chunk
@@ -312,15 +332,16 @@ def lloyd_iter_chunked_sparse(
     # number of threads should not be bigger than number of chunks
     n_threads = min(n_threads, n_chunks)
 
-    if update_centers:
-        memset(&centers_new[0, 0], 0, n_clusters * n_features * sizeof(floating))
-        memset(&weight_in_clusters[0], 0, n_clusters * sizeof(floating))
-        omp_init_lock(&lock)
+    # Thread local buffers, see lloyd_iter_chunked_dense.
+    centers_new_chunks = <floating **> calloc(n_threads, sizeof(floating *))
+    weight_in_clusters_chunks = <floating **> calloc(n_threads, sizeof(floating *))
 
     with nogil, parallel(num_threads=n_threads):
-        # thread local buffers
+        thread_idx = threadid()
         centers_new_chunk = <floating*> calloc(n_clusters * n_features, sizeof(floating))
         weight_in_clusters_chunk = <floating*> calloc(n_clusters, sizeof(floating))
+        centers_new_chunks[thread_idx] = centers_new_chunk
+        weight_in_clusters_chunks[thread_idx] = weight_in_clusters_chunk
 
         for chunk_idx in prange(n_chunks, schedule='static'):
             start = chunk_idx * n_samples_chunk
@@ -330,33 +351,26 @@ def lloyd_iter_chunked_sparse(
                 end = start + n_samples_chunk
 
             _update_chunk_sparse(
-                X_data[X_indptr[start]: X_indptr[end]],
-                X_indices[X_indptr[start]: X_indptr[end]],
-                X_indptr[start: end+1],
-                sample_weight[start: end],
+                X_data,
+                X_indices,
+                X_indptr,
+                sample_weight,
                 centers_old,
                 centers_squared_norms,
-                labels[start: end],
+                labels,
+                start,
+                end,
                 centers_new_chunk,
                 weight_in_clusters_chunk,
                 update_centers)
 
-        # reduction from local buffers.
-        if update_centers:
-            # The lock is necessary to avoid race conditions when aggregating
-            # info from different thread-local buffers.
-            omp_set_lock(&lock)
-            for j in range(n_clusters):
-                weight_in_clusters[j] += weight_in_clusters_chunk[j]
-                for k in range(n_features):
-                    centers_new[j, k] += centers_new_chunk[j * n_features + k]
-            omp_unset_lock(&lock)
-
-        free(centers_new_chunk)
-        free(weight_in_clusters_chunk)
+    if update_centers:
+        centers_new[...] = 0
+        weight_in_clusters[...] = 0
+    _reduce_thread_buffers(centers_new_chunks, weight_in_clusters_chunks, n_threads,
+                           centers_new, weight_in_clusters, update_centers)
 
     if update_centers:
-        omp_destroy_lock(&lock)
         _relocate_empty_clusters_sparse(
             X_data, X_indices, X_indptr, sample_weight,
             centers_old, centers_new, weight_in_clusters, labels)
@@ -373,34 +387,34 @@ cdef void _update_chunk_sparse(
         const floating[:, ::1] centers_old,         # IN
         const floating[::1] centers_squared_norms,  # IN
         int[::1] labels,                            # OUT
+        int start,
+        int end,
         floating *centers_new,                      # OUT
         floating *weight_in_clusters,               # OUT
         bint update_centers) noexcept nogil:
     """K-means combined EM step for one sparse data chunk.
 
-    Compute the partial contribution of a single data chunk to the labels and
-    centers.
+    Compute the partial contribution of the data chunk X[start:end] to the
+    labels and centers.
     """
     cdef:
-        int n_samples = labels.shape[0]
         int n_clusters = centers_old.shape[0]
         int n_features = centers_old.shape[1]
 
         floating sq_dist, min_sq_dist
         int i, j, k, label
         floating max_floating = FLT_MAX if floating is float else DBL_MAX
-        int s = X_indptr[0]
 
     # XXX Precompute the pairwise distances matrix is not worth for sparse
     # currently. Should be tested when BLAS (sparse x dense) matrix
     # multiplication is available.
-    for i in range(n_samples):
+    for i in range(start, end):
         min_sq_dist = max_floating
         label = 0
 
         for j in range(n_clusters):
             sq_dist = 0.0
-            for k in range(X_indptr[i] - s, X_indptr[i + 1] - s):
+            for k in range(X_indptr[i], X_indptr[i + 1]):
                 sq_dist += centers_old[j, X_indices[k]] * X_data[k]
 
             # Instead of computing the full squared distance with each cluster,
@@ -416,5 +430,5 @@ cdef void _update_chunk_sparse(
 
         if update_centers:
             weight_in_clusters[label] += sample_weight[i]
-            for k in range(X_indptr[i] - s, X_indptr[i + 1] - s):
+            for k in range(X_indptr[i], X_indptr[i + 1]):
                 centers_new[label * n_features + X_indices[k]] += X_data[k] * sample_weight[i]
