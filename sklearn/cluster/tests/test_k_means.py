@@ -19,6 +19,10 @@ from sklearn.cluster._k_means_common import (
     _relocate_empty_clusters_dense,
     _relocate_empty_clusters_sparse,
 )
+from sklearn.cluster._k_means_lloyd import (
+    lloyd_iter_chunked_dense,
+    lloyd_iter_chunked_sparse,
+)
 from sklearn.cluster._kmeans import _labels_inertia, _mini_batch_step
 from sklearn.datasets import make_blobs
 from sklearn.exceptions import ConvergenceWarning
@@ -109,6 +113,50 @@ def test_kmeans_relocated_clusters(array_constr, algo):
         expected_centers = [[0.75, 1.0], [0.25, 0.0]]
         assert_array_equal(kmeans.labels_, expected_labels)
         assert_allclose(kmeans.cluster_centers_, expected_centers)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("n_clusters", [2, 200])
+# The chunk size for dense input depends on the number of threads: 256 samples
+# with 2 threads and 1024 with 64 threads.
+@pytest.mark.parametrize("n_threads, chunk_size", [(2, 256), (64, 1024)])
+def test_lloyd_iter_dense_sparse_several_chunks(
+    csr_container, n_clusters, n_threads, chunk_size, global_random_seed
+):
+    # Check that a Lloyd iteration gives the same result for dense and sparse
+    # input when there are several chunks of samples and a remainder.
+    rng = np.random.RandomState(global_random_seed)
+    n_samples = 3 * chunk_size * n_threads + 7
+    X = rng.uniform(size=(n_samples, 5))
+    sample_weight = rng.uniform(size=n_samples)
+    centers = X[rng.choice(n_samples, n_clusters, replace=False)]
+
+    results = []
+    for X_input, lloyd_iter in [
+        (X, lloyd_iter_chunked_dense),
+        (csr_container(X), lloyd_iter_chunked_sparse),
+    ]:
+        centers_new = np.zeros_like(centers)
+        weight_in_clusters = np.zeros(n_clusters)
+        labels = np.full(n_samples, -1, dtype=np.int32)
+        center_shift = np.zeros(n_clusters)
+        lloyd_iter(
+            X_input,
+            sample_weight,
+            centers,
+            centers_new,
+            weight_in_clusters,
+            labels,
+            center_shift,
+            n_threads=n_threads,
+        )
+        results.append((labels, centers_new, weight_in_clusters))
+
+    (labels_dense, centers_dense, weights_dense) = results[0]
+    (labels_sparse, centers_sparse, weights_sparse) = results[1]
+    assert_array_equal(labels_dense, labels_sparse)
+    assert_allclose(centers_dense, centers_sparse)
+    assert_allclose(weights_dense, weights_sparse)
 
 
 @pytest.mark.parametrize("array_constr", data_containers, ids=data_containers_ids)

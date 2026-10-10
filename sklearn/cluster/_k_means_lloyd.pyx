@@ -14,6 +14,23 @@ from sklearn.cluster._k_means_common cimport _relocate_empty_clusters_sparse
 from sklearn.cluster._k_means_common cimport _average_centers, _center_shift
 
 
+cdef int _chunk_size_dense(int n_samples, int n_clusters, int n_threads):
+    """Number of samples per data chunk for dense input.
+
+    Each chunk does a BLAS call. With many threads, use bigger chunks to make
+    fewer concurrent BLAS calls: they scale badly with the number of threads (at
+    least with OpenBLAS, which takes a global lock in each call). With few threads,
+    small chunks balance the work better. The buffer of pairwise distances of
+    shape (chunk_size, n_clusters) of each thread should fit in cache, and there
+    should be at least one chunk per thread.
+    """
+    cdef int chunk_size = CHUNK_SIZE * max(1, n_threads // 16)
+    chunk_size = min(chunk_size, max(CHUNK_SIZE, (1 << 18) // n_clusters))
+    chunk_size = min(
+        chunk_size, max(CHUNK_SIZE, (n_samples + n_threads - 1) // n_threads))
+    return min(chunk_size, n_samples)
+
+
 cdef void _reduce_thread_buffers(
         floating **centers_new_chunks,         # IN
         floating **weight_in_clusters_chunks,  # IN
@@ -106,9 +123,7 @@ def lloyd_iter_chunked_dense(
         return
 
     cdef:
-        # hard-coded number of samples per chunk. Appeared to be close to
-        # optimal in all situations.
-        int n_samples_chunk = CHUNK_SIZE if n_samples > CHUNK_SIZE else n_samples
+        int n_samples_chunk = _chunk_size_dense(n_samples, n_clusters, n_threads)
         int n_chunks = n_samples // n_samples_chunk
         int n_samples_rem = n_samples % n_samples_chunk
         int chunk_idx
