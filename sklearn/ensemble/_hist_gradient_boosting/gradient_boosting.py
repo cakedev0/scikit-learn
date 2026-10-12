@@ -5,6 +5,7 @@
 
 import itertools
 import math
+import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext, suppress
 from functools import partial
@@ -142,6 +143,25 @@ def _patch_raw_predict(estimator, raw_predictions):
     estimator._raw_predict = _patched_raw_predicts
     yield estimator
     estimator._raw_predict = orig_raw_predict
+
+
+def _sparse_rows(X_binned, n_bins):
+    """Rows of X_binned without each feature's most frequent bin, in CSR form.
+
+    Codes are feature_idx * n_bins + bin, so that they index the flattened
+    histograms directly.
+    """
+    n_samples, n_features = X_binned.shape
+    most_freq_bins = np.array(
+        [np.bincount(X_binned[:, f], minlength=n_bins).argmax() for f in range(n_features)],
+        dtype=X_binned.dtype,
+    )
+    mask = X_binned != most_freq_bins
+    rows, cols = np.nonzero(mask)
+    codes = (cols * n_bins + X_binned[rows, cols]).astype(np.uint32)
+    row_ptr = np.zeros(n_samples + 1, dtype=np.int64)
+    np.cumsum(mask.sum(axis=1), out=row_ptr[1:])
+    return codes, row_ptr, most_freq_bins
 
 
 class BaseHistGradientBoosting(BaseEstimator, ABC):
@@ -794,6 +814,18 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
             n_samples=n_samples, dtype=G_H_DTYPE, order="F"
         )
 
+        # Prototype switch for row-wise histograms (one pass over each node's
+        # rows for all features), with a row-major copy of the binned data.
+        X_binned_rowmajor = (
+            np.ascontiguousarray(X_binned_train)
+            if os.environ.get("SKLEARN_HGB_ROWWISE") == "1"
+            else None
+        )
+        sparse_rows = (
+            _sparse_rows(X_binned_train, n_bins)
+            if os.environ.get("SKLEARN_HGB_ROWWISE") == "sparse"
+            else None
+        )
         for iteration in range(begin_at_stage, self.max_iter):
             if self.verbose >= 2:
                 iteration_start_time = time()
@@ -855,6 +887,8 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
                     shrinkage=self.learning_rate,
                     n_threads=n_threads,
                     active_wait=active_wait,
+                    X_binned_rowmajor=X_binned_rowmajor,
+                    sparse_rows=sparse_rows,
                 )
                 grower.grow()
 

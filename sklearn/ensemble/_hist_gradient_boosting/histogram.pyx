@@ -13,7 +13,7 @@ from sklearn.ensemble._hist_gradient_boosting.common import HISTOGRAM_DTYPE
 from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport G_H_DTYPE_C
-from sklearn.utils._typedefs cimport uint8_t
+from sklearn.utils._typedefs cimport uint8_t, uint32_t, int64_t
 
 
 # Notes:
@@ -83,12 +83,21 @@ cdef class HistogramBuilder:
         G_H_DTYPE_C [::1] ordered_hessians
         uint8_t hessians_are_constant
         int n_threads
+        const X_BINNED_DTYPE_C [:, ::1] X_binned_rowmajor
+        bint rowwise
+        const uint32_t [::1] sparse_codes
+        const int64_t [::1] sparse_row_ptr
+        const X_BINNED_DTYPE_C [::1] most_freq_bins
+        bint sparse_rowwise
+        const uint32_t [::1] n_used_bins
+        bint used_bins_only
 
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
                  G_H_DTYPE_C [::1] hessians,
                  uint8_t hessians_are_constant,
-                 int n_threads):
+                 int n_threads, X_binned_rowmajor=None, sparse_rows=None,
+                 n_bins_non_missing=None):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -102,6 +111,17 @@ cdef class HistogramBuilder:
         self.ordered_hessians = hessians.copy()
         self.hessians_are_constant = hessians_are_constant
         self.n_threads = n_threads
+        self.rowwise = X_binned_rowmajor is not None
+        if self.rowwise:
+            self.X_binned_rowmajor = X_binned_rowmajor
+        self.sparse_rowwise = sparse_rows is not None
+        # Bins at or above n_bins_non_missing (except the missing-values bin)
+        # are never read by the splitter, so non-root histograms can skip them.
+        self.used_bins_only = n_bins_non_missing is not None
+        if self.used_bins_only:
+            self.n_used_bins = n_bins_non_missing
+        if self.sparse_rowwise:
+            self.sparse_codes, self.sparse_row_ptr, self.most_freq_bins = sparse_rows
 
     def compute_histograms_brute(
         HistogramBuilder self,
@@ -145,6 +165,15 @@ cdef class HistogramBuilder:
             )
             bint has_interaction_cst = allowed_features is not None
             int n_threads = self.n_threads
+            bint rowwise = self.rowwise and not has_interaction_cst
+            bint sparse_rowwise = self.sparse_rowwise and not has_interaction_cst
+            bint partial_zero
+            int n_blocks, block
+            unsigned int f_start, f_end
+            unsigned int f_zero
+            const uint32_t [::1] n_used_bins = (
+                self.n_used_bins if self.used_bins_only else None
+            )
 
         if has_interaction_cst:
             n_allowed_features = allowed_features.shape[0]
@@ -166,18 +195,56 @@ cdef class HistogramBuilder:
                         ordered_gradients[i] = gradients[sample_indices[i]]
                         ordered_hessians[i] = hessians[sample_indices[i]]
 
-            # Compute histogram of each feature
-            for f_idx in prange(
-                n_allowed_features, schedule='static', num_threads=n_threads
-            ):
-                if has_interaction_cst:
-                    feature_idx = allowed_features[f_idx]
+            partial_zero = (
+                self.used_bins_only and sample_indices.shape[0] != gradients.shape[0]
+            )
+            if sparse_rowwise:
+                if partial_zero:
+                    for f_zero in range(self.n_features):
+                        _zero_used_bins(histograms, f_zero, self.n_bins,
+                                        n_used_bins[f_zero])
                 else:
-                    feature_idx = f_idx
+                    memset(&histograms[0, 0], 0,
+                           self.n_features * self.n_bins * sizeof(hist_struct))
+            if sparse_rowwise:
+                _build_histogram_rowwise_sparse(
+                    sample_indices, self.sparse_codes, self.sparse_row_ptr,
+                    self.most_freq_bins, ordered_gradients, ordered_hessians,
+                    hessians_are_constant, self.n_bins, self.n_features,
+                    gradients.shape[0], n_used_bins, histograms)
+            elif rowwise:
+                # One contiguous block of features per thread, each built
+                # row-wise over the node's samples: no reduction needed.
+                n_blocks = min(n_threads, self.n_features)
+                for block in prange(n_blocks, schedule='static',
+                                    num_threads=n_threads):
+                    f_start = block * self.n_features // n_blocks
+                    f_end = (block + 1) * self.n_features // n_blocks
+                    for f_zero in range(f_start, f_end):
+                        if partial_zero:
+                            _zero_used_bins(histograms, f_zero, self.n_bins,
+                                            n_used_bins[f_zero])
+                        else:
+                            memset(&histograms[f_zero, 0], 0,
+                                   self.n_bins * sizeof(hist_struct))
+                    _build_histogram_rowwise(
+                        sample_indices, self.X_binned_rowmajor,
+                        ordered_gradients, ordered_hessians,
+                        hessians_are_constant, self.n_bins, f_start, f_end,
+                        histograms)
+            else:
+                # Compute histogram of each feature
+                for f_idx in prange(
+                    n_allowed_features, schedule='static', num_threads=n_threads
+                ):
+                    if has_interaction_cst:
+                        feature_idx = allowed_features[f_idx]
+                    else:
+                        feature_idx = f_idx
 
-                self._compute_histogram_brute_single_feature(
-                    feature_idx, sample_indices, histograms
-                )
+                    self._compute_histogram_brute_single_feature(
+                        feature_idx, sample_indices, histograms
+                    )
 
         return histograms
 
@@ -201,7 +268,11 @@ cdef class HistogramBuilder:
                 self.hessians_are_constant
 
         # Set histograms to zero.
-        memset(&histograms[feature_idx, 0], 0, self.n_bins * sizeof(hist_struct))
+        if self.used_bins_only and not root_node:
+            _zero_used_bins(histograms, feature_idx, self.n_bins,
+                            self.n_used_bins[feature_idx])
+        else:
+            memset(&histograms[feature_idx, 0], 0, self.n_bins * sizeof(hist_struct))
 
         if root_node:
             if hessians_are_constant:
@@ -274,13 +345,157 @@ cdef class HistogramBuilder:
             else:
                 feature_idx = f_idx
 
-            _subtract_histograms(
-                feature_idx,
-                self.n_bins,
-                parent_histograms,
-                sibling_histograms,
-            )
+            if self.used_bins_only:
+                _subtract_histograms(
+                    feature_idx,
+                    self.n_used_bins[feature_idx],
+                    parent_histograms,
+                    sibling_histograms,
+                )
+                _subtract_bin(self.n_bins - 1, feature_idx, parent_histograms,
+                              sibling_histograms)
+            else:
+                _subtract_histograms(
+                    feature_idx,
+                    self.n_bins,
+                    parent_histograms,
+                    sibling_histograms,
+                )
         return parent_histograms
+
+
+cdef inline void _zero_used_bins(
+        hist_struct [:, ::1] histograms,
+        unsigned int feature_idx,
+        unsigned int n_bins,
+        unsigned int n_used) noexcept nogil:
+    """Zero bins [0, n_used) and the missing-values bin (the last one)."""
+    memset(&histograms[feature_idx, 0], 0, n_used * sizeof(hist_struct))
+    memset(&histograms[feature_idx, n_bins - 1], 0, sizeof(hist_struct))
+
+
+cdef inline void _subtract_bin(
+        unsigned int bin_idx,
+        int feature_idx,
+        hist_struct [:, ::1] hist_a,  # IN and OUT
+        hist_struct [:, ::1] hist_b,  # IN
+) noexcept nogil:
+    hist_a[feature_idx, bin_idx].sum_gradients -= hist_b[feature_idx, bin_idx].sum_gradients
+    hist_a[feature_idx, bin_idx].sum_hessians -= hist_b[feature_idx, bin_idx].sum_hessians
+    hist_a[feature_idx, bin_idx].count -= hist_b[feature_idx, bin_idx].count
+
+
+cdef void _build_histogram_rowwise(
+        const unsigned int [::1] sample_indices,  # IN
+        const X_BINNED_DTYPE_C [:, ::1] X_binned_rowmajor,  # IN
+        const G_H_DTYPE_C [::1] ordered_gradients,  # IN
+        const G_H_DTYPE_C [::1] ordered_hessians,  # IN
+        uint8_t hessians_are_constant,
+        unsigned int n_bins,
+        unsigned int f_start,
+        unsigned int f_end,
+        hist_struct [:, ::1] out) noexcept nogil:  # OUT
+    """Histograms of features [f_start, f_end) in one pass over the node's rows.
+
+    Each row's bins are contiguous, and its gradient and hessian are read
+    once instead of once per feature."""
+    cdef:
+        unsigned int n_samples = sample_indices.shape[0]
+        bint root_node = n_samples == X_binned_rowmajor.shape[0]
+        unsigned int i, f, sample_idx
+        const X_BINNED_DTYPE_C* row
+        hist_struct* hist = &out[0, 0]
+        hist_struct* h
+        G_H_DTYPE_C gradient, hessian
+
+    for i in range(n_samples):
+        sample_idx = i if root_node else sample_indices[i]
+        row = &X_binned_rowmajor[sample_idx, 0]
+        gradient = ordered_gradients[i]
+        if hessians_are_constant:
+            for f in range(f_start, f_end):
+                h = hist + f * n_bins + row[f]
+                h.sum_gradients += gradient
+                h.count += 1
+        else:
+            hessian = ordered_hessians[i]
+            for f in range(f_start, f_end):
+                h = hist + f * n_bins + row[f]
+                h.sum_gradients += gradient
+                h.sum_hessians += hessian
+                h.count += 1
+
+
+cdef void _build_histogram_rowwise_sparse(
+        const unsigned int [::1] sample_indices,  # IN
+        const uint32_t [::1] codes,  # IN
+        const int64_t [::1] row_ptr,  # IN
+        const X_BINNED_DTYPE_C [::1] most_freq_bins,  # IN
+        const G_H_DTYPE_C [::1] ordered_gradients,  # IN
+        const G_H_DTYPE_C [::1] ordered_hessians,  # IN
+        uint8_t hessians_are_constant,
+        unsigned int n_bins,
+        unsigned int n_features,
+        unsigned int n_total_samples,
+        const uint32_t [::1] n_used_bins,  # IN, None for all bins
+        hist_struct [:, ::1] out) noexcept nogil:  # OUT
+    """Row-wise histograms from rows that only store the bins that differ
+    from their feature's most frequent bin (as feature_idx * n_bins + bin).
+
+    The most frequent bin of each feature is filled in last, as the node's
+    totals minus the feature's other bins."""
+    cdef:
+        unsigned int n_samples = sample_indices.shape[0]
+        bint root_node = n_samples == n_total_samples
+        unsigned int i, f, b, sample_idx, m
+        int64_t k
+        hist_struct* hist = &out[0, 0]
+        hist_struct* h
+        G_H_DTYPE_C gradient, hessian
+        double sum_gradients = 0., sum_hessians = 0.
+        double rest_gradients, rest_hessians
+        unsigned int rest_count
+        unsigned int n_scan
+        bint all_bins = n_used_bins is None
+
+    for i in range(n_samples):
+        sample_idx = i if root_node else sample_indices[i]
+        gradient = ordered_gradients[i]
+        sum_gradients += gradient
+        if hessians_are_constant:
+            for k in range(row_ptr[sample_idx], row_ptr[sample_idx + 1]):
+                h = hist + codes[k]
+                h.sum_gradients += gradient
+                h.count += 1
+        else:
+            hessian = ordered_hessians[i]
+            sum_hessians += hessian
+            for k in range(row_ptr[sample_idx], row_ptr[sample_idx + 1]):
+                h = hist + codes[k]
+                h.sum_gradients += gradient
+                h.sum_hessians += hessian
+                h.count += 1
+
+    for f in range(n_features):
+        m = most_freq_bins[f]
+        rest_gradients = sum_gradients
+        rest_hessians = sum_hessians
+        rest_count = n_samples
+        n_scan = n_bins if all_bins else n_used_bins[f]
+        for b in range(n_scan):
+            h = hist + f * n_bins + b
+            rest_gradients -= h.sum_gradients
+            rest_hessians -= h.sum_hessians
+            rest_count -= h.count
+        if not all_bins and m != n_bins - 1:
+            h = hist + f * n_bins + n_bins - 1
+            rest_gradients -= h.sum_gradients
+            rest_hessians -= h.sum_hessians
+            rest_count -= h.count
+        h = hist + f * n_bins + m
+        h.sum_gradients = rest_gradients
+        h.sum_hessians = rest_hessians
+        h.count = rest_count
 
 
 cpdef void _build_histogram_naive(

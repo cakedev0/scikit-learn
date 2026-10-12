@@ -9,6 +9,7 @@ the gradients and hessians of the training data.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numbers
+import os
 from heapq import heappop, heappush
 from timeit import default_timer as time
 
@@ -268,6 +269,8 @@ class TreeGrower:
         *,
         n_threads,
         active_wait,
+        X_binned_rowmajor=None,
+        sparse_rows=None,
     ):
         self._validate_parameters(
             X_binned,
@@ -316,7 +319,19 @@ class TreeGrower:
 
         hessians_are_constant = hessians.shape[0] == 1
         self.histogram_builder = HistogramBuilder(
-            X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
+            X_binned,
+            n_bins,
+            gradients,
+            hessians,
+            hessians_are_constant,
+            n_threads,
+            X_binned_rowmajor=X_binned_rowmajor,
+            sparse_rows=sparse_rows,
+            n_bins_non_missing=(
+                n_bins_non_missing
+                if os.environ.get("SKLEARN_HGB_USED_BINS") == "1"
+                else None
+            ),
         )
         missing_values_bin_idx = n_bins - 1
         self.splitter = Splitter(
