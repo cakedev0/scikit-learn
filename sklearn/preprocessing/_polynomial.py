@@ -855,7 +855,9 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
                 accept_sparse=False,
                 ensure_min_samples=2,
                 ensure_2d=True,
-                ensure_all_finite=(self.handle_missing != "zeros"),
+                ensure_all_finite="allow-nan"
+                if self.handle_missing == "zeros"
+                else True,
             )
         except ValueError as e:
             if "Input X contains NaN." in str(e) and self.handle_missing == "error":
@@ -997,7 +999,7 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
             reset=False,
             accept_sparse=False,
             ensure_2d=True,
-            ensure_all_finite=(self.handle_missing != "zeros"),
+            ensure_all_finite="allow-nan" if self.handle_missing == "zeros" else True,
         )
 
         n_samples, n_features = X.shape
@@ -1006,9 +1008,6 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
         n_cols = n_splines - 1 + self.include_bias
         degree = self.degree
         dtype = X.dtype if X.dtype in FLOAT_DTYPES else np.float64
-        # scipy's BSpline evaluates contiguous float64 arrays: convert all the
-        # columns at once.
-        X = np.asarray(X, dtype=np.float64, order="F")
 
         if self.sparse_output:
             output_list = []
@@ -1026,27 +1025,43 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
                     )
                 continue
 
-            x = X[:, feature_idx]
+            # scipy's BSpline evaluates contiguous float64 arrays. Working on a
+            # contiguous copy of the column is also faster for the masks below.
+            x = np.ascontiguousarray(X[:, feature_idx], dtype=np.float64)
             xmin, xmax = spl.t[degree], spl.t[-degree - 1]
             if self.extrapolation == "error" and np.any((x < xmin) | (x > xmax)):
                 raise ValueError("X contains values beyond the limits of the knots.")
             if self.extrapolation in ("constant", "linear"):
                 # Clipped values get the splines' values at the boundaries.
                 XBS_feature = spl(np.clip(x, xmin, xmax))
+                # Only the first and last n_ends splines are continued beyond the
+                # boundaries. With distinct knots, they are the only ones with a
+                # non-zero value or slope there. With knots repeated at a boundary
+                # (e.g. quantile knots), other splines can be non-zero with very
+                # steep slopes: they are set to zero.
+                if self.extrapolation == "constant":
+                    n_ends = max(degree, 1)
+                else:
+                    n_ends = degree + 1 if degree <= 1 else degree
+                below, above = x < xmin, x > xmax
+                XBS_feature[below, n_ends:] = 0
+                XBS_feature[above, :-n_ends] = 0
+                if self.extrapolation == "linear":
+                    XBS_feature[below, :n_ends] += np.outer(
+                        x[below] - xmin, spl(xmin, nu=1)[:n_ends]
+                    )
+                    XBS_feature[above, -n_ends:] += np.outer(
+                        x[above] - xmax, spl(xmax, nu=1)[-n_ends:]
+                    )
             else:
                 XBS_feature = spl(x)
-
-            if self.extrapolation == "linear":
-                # Continue the splines linearly beyond the boundaries, with the
-                # slopes at the boundaries.
-                below, above = x < xmin, x > xmax
-                XBS_feature[below] += np.outer(x[below] - xmin, spl(xmin, nu=1))
-                XBS_feature[above] += np.outer(x[above] - xmax, spl(xmax, nu=1))
 
             XBS_feature[np.isnan(x)] = 0
             XBS_feature = XBS_feature[:, :n_cols]
             if self.sparse_output:
-                output_list.append(sparse.csr_array(XBS_feature.astype(dtype)))
+                output_list.append(
+                    sparse.csr_array(XBS_feature.astype(dtype, copy=False))
+                )
             else:
                 XBS[:, feature_idx * n_cols : (feature_idx + 1) * n_cols] = XBS_feature
 

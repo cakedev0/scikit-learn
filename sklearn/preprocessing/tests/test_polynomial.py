@@ -557,6 +557,39 @@ def test_spline_transformer_preserves_dtype(dtype, sparse_output):
     assert X_trans.dtype == dtype
 
 
+@pytest.mark.parametrize("degree", [2, 3])
+@pytest.mark.parametrize("extrapolation", ["constant", "linear"])
+def test_spline_transformer_repeated_boundary_knots(degree, extrapolation):
+    """Check the extrapolation below knots repeated at the lower boundary.
+
+    Only the first `degree` splines are extrapolated, as with distinct knots,
+    although the next ones can be non-zero at the boundary, with steep slopes.
+    """
+    X = np.r_[np.zeros(60), np.linspace(0.1, 1, 40)].reshape(-1, 1)
+    splt = SplineTransformer(
+        degree=degree, knots="quantile", n_knots=6, extrapolation=extrapolation
+    ).fit(X)
+    knots = splt.bsplines_[0].t
+    assert knots[degree] == knots[degree + 1]
+
+    X_trans = splt.transform([[-1.0], [-100.0]])
+    assert_allclose(X_trans[:, degree:], 0)
+
+
+@pytest.mark.parametrize("handle_missing", ["error", "zeros"])
+def test_spline_transformer_rejects_infinite_values(handle_missing):
+    X = np.linspace(0, 1, 20).reshape(10, 2)
+    X_inf = X.copy()
+    X_inf[0, 0] = np.inf
+
+    splt = SplineTransformer(handle_missing=handle_missing)
+    msg = "Input X contains infinity"
+    with pytest.raises(ValueError, match=msg):
+        splt.fit(X_inf)
+    with pytest.raises(ValueError, match=msg):
+        splt.fit(X).transform(X_inf)
+
+
 @pytest.mark.parametrize("n_knots", [5, 10])
 @pytest.mark.parametrize("include_bias", [True, False])
 @pytest.mark.parametrize("degree", [3, 4])
