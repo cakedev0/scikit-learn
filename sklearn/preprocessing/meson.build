@@ -11,3 +11,11 @@ py.extension_module(
   subdir: 'sklearn/preprocessing',
   install: true
 )
+
+py.extension_module(
+  '_spline_fast',
+  [cython_gen.process('_spline_fast.pyx'), utils_cython_tree],
+  subdir: 'sklearn/preprocessing',
+  dependencies: [openmp_dep],
+  install: true
+)
