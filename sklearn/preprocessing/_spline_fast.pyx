@@ -43,6 +43,7 @@ cdef inline intp_t _nonzero_basis(
     intp_t n_basis,
     float64_t x,
     bint clamp,
+    intp_t n_ends,
     const float64_t* slopes_lo,
     const float64_t* slopes_hi,
     float64_t* values,
@@ -51,9 +52,12 @@ cdef inline intp_t _nonzero_basis(
 
     They are stored in `values` and the index of the first one is returned.
 
-    If `clamp` is True, x is clipped to [t[k], t[n_basis]] and the B-splines are
-    continued linearly beyond with the slopes `slopes_lo` and `slopes_hi`, which
-    are the derivatives of all B-splines at t[k] and t[n_basis].
+    If `clamp` is True, x is clipped to [t[k], t[n_basis]] and the first or last
+    `n_ends` B-splines are continued linearly beyond with the slopes `slopes_lo`
+    and `slopes_hi`, which are the derivatives of all B-splines at t[k] and
+    t[n_basis]. The other ones are set to zero: with distinct knots, they are
+    already zero there, but with knots repeated at a boundary they can be non-zero
+    with very steep slopes.
     """
     cdef:
         intp_t i, j, r
@@ -84,9 +88,18 @@ cdef inline intp_t _nonzero_basis(
             saved = (x - t_left) * tmp
         values[j] = saved
 
-    if dx != 0.0:
+    if dx < 0.0:
         for r in range(k + 1):
-            values[r] += dx * slopes[i - k + r]
+            if i - k + r < n_ends:
+                values[r] += dx * slopes[i - k + r]
+            else:
+                values[r] = 0.0
+    elif dx > 0.0:
+        for r in range(k + 1):
+            if i - k + r >= n_basis - n_ends:
+                values[r] += dx * slopes[i - k + r]
+            else:
+                values[r] = 0.0
     return i - k
 
 
@@ -99,6 +112,7 @@ def _spline_transform_dense(
     intp_t n_splines,
     bint include_bias,
     bint clamp,
+    intp_t n_ends,
     floating[:, :] out,
     int n_threads,
 ):
@@ -125,7 +139,7 @@ def _spline_transform_dense(
                 if isnan(x):
                     continue
                 first = _nonzero_basis(
-                    &knots[feature_idx, 0], degree, n_basis, x, clamp,
+                    &knots[feature_idx, 0], degree, n_basis, x, clamp, n_ends,
                     &slopes_lo[feature_idx, 0], &slopes_hi[feature_idx, 0], values,
                 )
                 for r in range(degree + 1):
@@ -147,6 +161,7 @@ def _spline_transform_sparse(
     intp_t n_splines,
     bint include_bias,
     bint clamp,
+    intp_t n_ends,
     floating[:, ::1] data,
     int32_t[:, ::1] indices,
     int n_threads,
@@ -178,7 +193,7 @@ def _spline_transform_sparse(
                         indices[sample_idx, pos + r] = feature_idx * n_cols
                     continue
                 first = _nonzero_basis(
-                    &knots[feature_idx, 0], degree, n_basis, x, clamp,
+                    &knots[feature_idx, 0], degree, n_basis, x, clamp, n_ends,
                     &slopes_lo[feature_idx, 0], &slopes_hi[feature_idx, 0], values,
                 )
                 for r in range(degree + 1):

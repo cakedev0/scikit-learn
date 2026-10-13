@@ -859,7 +859,9 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
                 accept_sparse=False,
                 ensure_min_samples=2,
                 ensure_2d=True,
-                ensure_all_finite=(self.handle_missing != "zeros"),
+                ensure_all_finite="allow-nan"
+                if self.handle_missing == "zeros"
+                else True,
             )
         except ValueError as e:
             if "Input X contains NaN." in str(e) and self.handle_missing == "error":
@@ -997,7 +999,7 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
             accept_sparse=False,
             ensure_2d=True,
             dtype=[np.float64, np.float32],
-            ensure_all_finite=(self.handle_missing != "zeros"),
+            ensure_all_finite="allow-nan" if self.handle_missing == "zeros" else True,
         )
 
         n_samples, n_features = X.shape
@@ -1021,7 +1023,12 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
                 X %= xmax - xmin
             X += xmin
 
-        # Splines are continued linearly beyond the boundaries with these slopes.
+        # Only the first and last n_ends splines are continued beyond the
+        # boundaries, with these slopes. See `_nonzero_basis` for details.
+        if self.extrapolation == "linear":
+            n_ends = degree + 1 if degree <= 1 else degree
+        else:
+            n_ends = max(degree, 1)
         slopes_lo = np.zeros((n_features, n_basis))
         slopes_hi = np.zeros((n_features, n_basis))
         if self.extrapolation == "linear":
@@ -1038,6 +1045,7 @@ class SplineTransformer(TransformerMixin, BaseEstimator):
             n_splines=n_splines,
             include_bias=self.include_bias,
             clamp=self.extrapolation in ("constant", "linear"),
+            n_ends=n_ends,
             n_threads=_openmp_effective_n_threads(),
         )
         if self.sparse_output:
