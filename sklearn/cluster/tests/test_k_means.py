@@ -700,6 +700,44 @@ def test_predict_dense_sparse(Estimator, init, X_csr):
     assert_array_equal(km.predict(X_csr), km.labels_)
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("Estimator", [KMeans, MiniBatchKMeans])
+def test_sparse_duplicate_entries(
+    Estimator, csr_container, read_only, global_random_seed
+):
+    # Check that duplicate entries of sparse input are summed, as in scipy.
+    X_csr = csr_container(X)
+
+    def make_X_dup():
+        # Store each value as 2 halves in the same column
+        X_dup = csr_container(
+            (
+                np.repeat(X_csr.data / 2, 2),
+                np.repeat(X_csr.indices, 2),
+                2 * X_csr.indptr,
+            ),
+            shape=X_csr.shape,
+        )
+        if read_only:
+            for array in (X_dup.data, X_dup.indices, X_dup.indptr):
+                array.flags.writeable = False
+        return X_dup
+
+    _, indices = kmeans_plusplus(X, n_clusters, random_state=global_random_seed)
+    _, indices_dup = kmeans_plusplus(
+        make_X_dup(), n_clusters, random_state=global_random_seed
+    )
+    assert_array_equal(indices, indices_dup)
+
+    km = Estimator(n_clusters=n_clusters, n_init=1, random_state=global_random_seed)
+    km_dup = clone(km).fit(make_X_dup())
+    km.fit(X)
+    assert_array_equal(km.labels_, km_dup.labels_)
+    assert_allclose(km.cluster_centers_, km_dup.cluster_centers_)
+    assert_array_equal(km.predict(make_X_dup()), km.labels_)
+
+
 @pytest.mark.parametrize("array_constr", data_containers, ids=data_containers_ids)
 @pytest.mark.parametrize("dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("init", ["k-means++", "ndarray"])
