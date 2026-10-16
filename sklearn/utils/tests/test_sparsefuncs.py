@@ -28,6 +28,7 @@ from sklearn.utils.sparsefuncs import (
     sparse_matmul_to_dense,
 )
 from sklearn.utils.sparsefuncs_fast import (
+    _csr_to_csc,
     assign_rows_csr,
     csr_row_norms,
     inplace_csr_row_normalize_l1,
@@ -1078,3 +1079,34 @@ def test_sparse_matmul_to_dense(
     assert_allclose(result, a_dense @ b_dense, atol=1e-7)
     if not out_is_None:
         assert_allclose(out, result, atol=1e-7)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("n_threads", [1, 3, 8])
+@pytest.mark.parametrize("shape, density", [((200, 30), 0.3), ((50, 1000), 0.01)])
+def test_csr_to_csc(csr_container, dtype, index_dtype, n_threads, shape, density):
+    """Check that _csr_to_csc gives the same matrix as tocsc, with sorted indices."""
+    rng = np.random.RandomState(0)
+    n_rows, n_cols = shape
+    nnz = int(n_rows * n_cols * density)
+    # Random columns: unsorted indices in each row, and duplicate entries
+    rows = np.sort(rng.randint(0, n_rows, nnz))
+    indices = rng.randint(0, n_cols, nnz)
+    indptr = np.r_[0, np.cumsum(np.bincount(rows, minlength=n_rows))]
+    data = rng.uniform(size=nnz).astype(dtype)
+    X = csr_container((data, indices, indptr), shape=shape)
+    X.indices = X.indices.astype(index_dtype)
+    X.indptr = X.indptr.astype(index_dtype)
+
+    X_csc = _csr_to_csc(X, n_threads)
+
+    assert X_csc.format == "csc"
+    assert isinstance(X_csc, sp.spmatrix) == isinstance(X, sp.spmatrix)
+    assert X_csc.dtype == dtype
+    assert X_csc.nnz == X.nnz
+    for j in range(n_cols):
+        col_indices = X_csc.indices[X_csc.indptr[j] : X_csc.indptr[j + 1]]
+        assert np.all(np.diff(col_indices) >= 0)
+    assert_allclose(X_csc.toarray(), X.toarray())
