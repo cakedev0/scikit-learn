@@ -26,6 +26,13 @@ ctypedef fused integral2:
 # _csr_to_csc_parallel
 cdef int COL_CHUNK_SIZE = 4096
 
+# Below _PARALLEL_MIN_NNZ non-zeros, _csr_to_csc and _csc_to_csr fall back to
+# the single-threaded scipy conversion: starting the threads costs more than
+# they save. Above, they use at most one thread per _MIN_NNZ_PER_THREAD
+# non-zeros.
+_PARALLEL_MIN_NNZ = 300_000
+_MIN_NNZ_PER_THREAD = 10_000
+
 
 def csr_row_norms(X):
     """Squared L2 norm of each row in CSR matrix X."""
@@ -698,19 +705,43 @@ def _csr_to_csc(X, int n_threads):
     indices of each column are sorted, even if the column indices of X are not.
     Duplicate entries are kept.
     """
-    csc_container = sp.csc_matrix if isinstance(X, sp.spmatrix) else sp.csc_array
+    return _swap_compressed_format(X, "csc", n_threads)
+
+
+def _csc_to_csr(X, int n_threads):
+    """Convert the CSC matrix or array X to CSR format, using n_threads threads.
+
+    Same result as `X.tocsr()`, whose conversion is single-threaded. The column
+    indices of each row are sorted, even if the row indices of X are not.
+    Duplicate entries are kept.
+    """
+    return _swap_compressed_format(X, "csr", n_threads)
+
+
+def _swap_compressed_format(X, out_format, int n_threads):
+    # The CSC arrays of X are the CSR arrays of X.T: the same kernel converts
+    # both ways, the "rows" of the kernel being the columns of X for CSC to CSR.
+    if out_format == "csc":
+        n_rows, n_cols = X.shape
+        out_container = sp.csc_matrix if isinstance(X, sp.spmatrix) else sp.csc_array
+    else:
+        n_cols, n_rows = X.shape
+        out_container = sp.csr_matrix if isinstance(X, sp.spmatrix) else sp.csr_array
+
+    nnz = X.indptr[n_rows]
+    n_threads = min(n_threads, nnz // _MIN_NNZ_PER_THREAD)
+    # The counts of non-zeros per column and per block of rows take
+    # n_blocks * n_cols values: bound them by the number of non-zeros of X.
+    n_blocks = min(n_threads, nnz // max(n_cols, 1))
     if (
-        X.dtype not in (np.float32, np.float64)
+        nnz < _PARALLEL_MIN_NNZ
+        or n_blocks < 2
+        or X.dtype not in (np.float32, np.float64)
         or X.indices.dtype != X.indptr.dtype
         or X.indices.dtype not in (np.int32, np.int64)
     ):
-        return X.tocsc()
+        return X.asformat(out_format)
 
-    n_rows, n_cols = X.shape
-    nnz = X.indptr[n_rows]
-    # The counts of non-zeros per column and per block of rows take
-    # n_blocks * n_cols values: bound them by the number of non-zeros of X.
-    n_blocks = max(1, min(n_threads, nnz // max(n_cols, 1)))
     # Blocks of rows with about the same number of non-zeros
     block_rows = np.searchsorted(
         X.indptr, np.arange(n_blocks + 1) * nnz // n_blocks
@@ -724,9 +755,9 @@ def _csr_to_csc(X, int n_threads):
         X.data, X.indices, X.indptr, block_rows, n_cols, data, indices, indptr,
         n_threads,
     )
-    X_csc = csc_container((data, indices, indptr), shape=X.shape)
-    X_csc.has_sorted_indices = True
-    return X_csc
+    X_out = out_container((data, indices, indptr), shape=X.shape)
+    X_out.has_sorted_indices = True
+    return X_out
 
 
 def _csr_to_csc_parallel(
@@ -749,6 +780,9 @@ def _csr_to_csc_parallel(
     cdef:
         intp_t n_blocks = block_rows.shape[0] - 1
         intp_t n_col_chunks = (n_cols + COL_CHUNK_SIZE - 1) // COL_CHUNK_SIZE
+        # No idle threads to wake up in the loops with few iterations
+        int n_threads_blocks = min(n_threads, n_blocks)
+        int n_threads_chunks = min(n_threads, n_col_chunks)
         # pos[b, col]: number of non-zeros of col in block b, then position in
         # the output of the next non-zero of col in block b
         integral[:, ::1] pos = np.zeros(
@@ -763,14 +797,15 @@ def _csr_to_csc_parallel(
         integral row, p, q, col, col_start, col_end, count
 
     # pos[b, col] = number of non-zeros of col in the rows of block b
-    for b in prange(n_blocks, nogil=True, num_threads=n_threads, schedule='static'):
+    for b in prange(n_blocks, nogil=True, num_threads=n_threads_blocks,
+                    schedule='static'):
         for row in range(block_rows[b], block_rows[b + 1]):
             for p in range(X_indptr[row], X_indptr[row + 1]):
                 pos[b, X_indices[p]] = pos[b, X_indices[p]] + 1
 
     # col_pos[col] = sum over the blocks of pos[b, col], by chunks of columns to
     # read pos contiguously
-    for chunk_idx in prange(n_col_chunks, nogil=True, num_threads=n_threads,
+    for chunk_idx in prange(n_col_chunks, nogil=True, num_threads=n_threads_chunks,
                             schedule='static'):
         col_start = chunk_idx * COL_CHUNK_SIZE
         col_end = min(col_start + COL_CHUNK_SIZE, n_cols)
@@ -785,7 +820,7 @@ def _csr_to_csc_parallel(
         col_pos[col] = indptr[col]
 
     # pos[b, col] = position in the output of the first non-zero of col in block b
-    for chunk_idx in prange(n_col_chunks, nogil=True, num_threads=n_threads,
+    for chunk_idx in prange(n_col_chunks, nogil=True, num_threads=n_threads_chunks,
                             schedule='static'):
         col_start = chunk_idx * COL_CHUNK_SIZE
         col_end = min(col_start + COL_CHUNK_SIZE, n_cols)
@@ -796,7 +831,8 @@ def _csr_to_csc_parallel(
                 col_pos[col] = col_pos[col] + count
 
     # Each block writes its non-zeros at its positions, in increasing row order
-    for b in prange(n_blocks, nogil=True, num_threads=n_threads, schedule='static'):
+    for b in prange(n_blocks, nogil=True, num_threads=n_threads_blocks,
+                    schedule='static'):
         for row in range(block_rows[b], block_rows[b + 1]):
             for p in range(X_indptr[row], X_indptr[row + 1]):
                 col = X_indices[p]

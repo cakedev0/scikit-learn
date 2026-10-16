@@ -6,6 +6,7 @@ from numpy.testing import assert_array_almost_equal, assert_array_equal
 from scipy import linalg
 
 from sklearn.datasets import make_classification
+from sklearn.utils import sparsefuncs_fast
 from sklearn.utils._testing import assert_allclose
 from sklearn.utils.fixes import (
     CSC_CONTAINERS,
@@ -28,6 +29,7 @@ from sklearn.utils.sparsefuncs import (
     sparse_matmul_to_dense,
 )
 from sklearn.utils.sparsefuncs_fast import (
+    _csc_to_csr,
     _csr_to_csc,
     assign_rows_csr,
     csr_row_norms,
@@ -1081,32 +1083,87 @@ def test_sparse_matmul_to_dense(
         assert_allclose(out, result, atol=1e-7)
 
 
-@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def _random_compressed(container, shape, density, dtype, index_dtype, rng):
+    """Random CSR or CSC matrix with unsorted indices and duplicate entries."""
+    is_csr = container.__name__.startswith("csr")
+    n_major, n_minor = shape if is_csr else shape[::-1]
+    nnz = int(n_major * n_minor * density)
+    major = np.sort(rng.randint(0, n_major, nnz))
+    indices = rng.randint(0, n_minor, nnz).astype(index_dtype)
+    indptr = np.r_[0, np.cumsum(np.bincount(major, minlength=n_major))]
+    data = rng.uniform(size=nnz).astype(dtype)
+    X = container((data, indices, indptr), shape=shape)
+    # The containers may downcast the indices
+    X.indices = X.indices.astype(index_dtype)
+    X.indptr = X.indptr.astype(index_dtype)
+    return X
+
+
+@pytest.mark.parametrize(
+    "convert, container",
+    [(_csr_to_csc, c) for c in CSR_CONTAINERS]
+    + [(_csc_to_csr, c) for c in CSC_CONTAINERS],
+)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("n_threads", [1, 3, 8])
 @pytest.mark.parametrize("shape, density", [((200, 30), 0.3), ((50, 1000), 0.01)])
-def test_csr_to_csc(csr_container, dtype, index_dtype, n_threads, shape, density):
-    """Check that _csr_to_csc gives the same matrix as tocsc, with sorted indices."""
+def test_swap_compressed_format(
+    monkeypatch, convert, container, dtype, index_dtype, n_threads, shape, density
+):
+    """Check that _csr_to_csc and _csc_to_csr match tocsc and tocsr.
+
+    The output must have sorted indices, even when the input doesn't.
+    """
+    # Parallel conversion even for these small inputs
+    monkeypatch.setattr(sparsefuncs_fast, "_PARALLEL_MIN_NNZ", 0)
+    monkeypatch.setattr(sparsefuncs_fast, "_MIN_NNZ_PER_THREAD", 1)
+    X = _random_compressed(
+        container, shape, density, dtype, index_dtype, np.random.RandomState(0)
+    )
+
+    X_out = convert(X, n_threads)
+
+    assert X_out.format == ("csc" if X.format == "csr" else "csr")
+    assert isinstance(X_out, sp.spmatrix) == isinstance(X, sp.spmatrix)
+    assert X_out.dtype == dtype
+    assert X_out.nnz == X.nnz
+    # Same index dtype as scipy: some estimators only accept int32 indices
+    assert X_out.indices.dtype == X.asformat(X_out.format).indices.dtype
+    assert X_out.indptr.dtype == X.asformat(X_out.format).indptr.dtype
+    for i in range(len(X_out.indptr) - 1):
+        segment = X_out.indices[X_out.indptr[i] : X_out.indptr[i + 1]]
+        assert np.all(np.diff(segment) >= 0)
+    assert_allclose(X_out.toarray(), X.toarray())
+
+
+# Few columns of the output, as the number of threads is also bounded by
+# nnz // n_out_columns
+@pytest.mark.parametrize(
+    "convert, container, shape",
+    [(_csr_to_csc, sp.csr_array, (1000, 10)), (_csc_to_csr, sp.csc_array, (10, 1000))],
+)
+def test_swap_compressed_format_small_input(monkeypatch, convert, container, shape):
+    """Check that small inputs are converted by scipy, and use fewer threads."""
+    monkeypatch.setattr(sparsefuncs_fast, "_PARALLEL_MIN_NNZ", 200)
+    monkeypatch.setattr(sparsefuncs_fast, "_MIN_NNZ_PER_THREAD", 50)
+    calls = []
+    kernel = sparsefuncs_fast._csr_to_csc_parallel
+
+    def spy_kernel(*args):
+        calls.append(args[-1])
+        kernel(*args)
+
+    monkeypatch.setattr(sparsefuncs_fast, "_csr_to_csc_parallel", spy_kernel)
     rng = np.random.RandomState(0)
-    n_rows, n_cols = shape
-    nnz = int(n_rows * n_cols * density)
-    # Random columns: unsorted indices in each row, and duplicate entries
-    rows = np.sort(rng.randint(0, n_rows, nnz))
-    indices = rng.randint(0, n_cols, nnz)
-    indptr = np.r_[0, np.cumsum(np.bincount(rows, minlength=n_rows))]
-    data = rng.uniform(size=nnz).astype(dtype)
-    X = csr_container((data, indices, indptr), shape=shape)
-    X.indices = X.indices.astype(index_dtype)
-    X.indptr = X.indptr.astype(index_dtype)
 
-    X_csc = _csr_to_csc(X, n_threads)
+    # 199 non-zeros: below _PARALLEL_MIN_NNZ, even with 3 threads of 50 non-zeros
+    X = container(sp.random(*shape, density=0.0199, random_state=rng))
+    assert X.nnz == 199
+    assert_allclose(convert(X, 8).toarray(), X.toarray())
+    assert calls == []
 
-    assert X_csc.format == "csc"
-    assert isinstance(X_csc, sp.spmatrix) == isinstance(X, sp.spmatrix)
-    assert X_csc.dtype == dtype
-    assert X_csc.nnz == X.nnz
-    for j in range(n_cols):
-        col_indices = X_csc.indices[X_csc.indptr[j] : X_csc.indptr[j + 1]]
-        assert np.all(np.diff(col_indices) >= 0)
-    assert_allclose(X_csc.toarray(), X.toarray())
+    # 250 non-zeros: 5 threads of 50 non-zeros
+    X = container(sp.random(*shape, density=0.025, random_state=rng))
+    assert_allclose(convert(X, 8).toarray(), X.toarray())
+    assert calls == [5]

@@ -38,7 +38,7 @@ utils_extension_metadata = {
   'sparsefuncs_fast':
     {'sources': [cython_gen.process('sparsefuncs_fast.pyx')], 'dependencies': [openmp_dep]},
   '_cython_blas': {'sources': [cython_gen.process('_cython_blas.pyx'), _blas_int_pxi]},
-  'arrayfuncs': {'sources': [cython_gen.process('arrayfuncs.pyx')]},
+  'arrayfuncs': {'sources': [cython_gen.process('arrayfuncs.pyx')], 'dependencies': [openmp_dep]},
   '_bitset': {'sources': [cython_gen.process('_bitset.pyx')]},
   'murmurhash': {
       'sources': [cython_gen.process('murmurhash.pyx'), 'src' / 'MurmurHash3.cpp'],
