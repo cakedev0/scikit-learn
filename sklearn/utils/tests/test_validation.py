@@ -27,12 +27,15 @@ from sklearn.random_projection import _sparse_random_matrix
 from sklearn.svm import SVR
 from sklearn.utils import (
     _safe_indexing,
+    arrayfuncs,
     as_float_array,
     check_array,
     check_symmetric,
     check_X_y,
     deprecated,
     indexable,
+    sparsefuncs_fast,
+    validation,
 )
 from sklearn.utils._array_api import (
     _is_numpy_namespace,
@@ -2558,3 +2561,62 @@ def test_indexable_return_type(constructor_name):
         expected_type = type(X)
     X = indexable(X)[0]
     assert isinstance(X, expected_type)
+
+
+@pytest.mark.parametrize(
+    "in_format, out_format", [("csr", "csc"), ("csc", "csr"), ("coo", "csc")]
+)
+def test_check_array_sparse_format_multithreaded(monkeypatch, in_format, out_format):
+    """Check that check_array converts between CSR and CSC with several threads."""
+    # Multi-threaded conversion even for this small input and on 1 core
+    monkeypatch.setattr(sparsefuncs_fast, "_PARALLEL_MIN_NNZ", 0)
+    monkeypatch.setattr(sparsefuncs_fast, "_MIN_NNZ_PER_THREAD", 1)
+    monkeypatch.setattr(validation, "_openmp_effective_n_threads", lambda: 4)
+    calls = []
+    kernel = sparsefuncs_fast._csr_to_csc_parallel
+
+    def spy_kernel(*args):
+        calls.append(args[-1])
+        kernel(*args)
+
+    monkeypatch.setattr(sparsefuncs_fast, "_csr_to_csc_parallel", spy_kernel)
+    X = sp.random(100, 20, density=0.2, format=in_format, random_state=0)
+
+    X_checked = check_array(X, accept_sparse=out_format)
+
+    assert X_checked.format == out_format
+    assert_allclose_dense_sparse(X_checked, X)
+    # COO is converted by scipy
+    assert calls == ([] if in_format == "coo" else [4])
+
+
+@pytest.mark.parametrize("order", ["C", "F"])
+def test_check_array_memory_order_multithreaded(monkeypatch, order):
+    """Check that check_array changes the memory order with several threads."""
+    # Multi-threaded conversion even for this small input and on 1 core
+    monkeypatch.setattr(arrayfuncs, "_PARALLEL_MIN_SIZE", 0)
+    monkeypatch.setattr(arrayfuncs, "_MIN_SIZE_PER_THREAD", 1)
+    monkeypatch.setattr(validation, "_openmp_effective_n_threads", lambda: 4)
+    calls = []
+    kernel = arrayfuncs._transpose_copy
+
+    def spy_kernel(*args):
+        calls.append(args[-1])
+        kernel(*args)
+
+    monkeypatch.setattr(arrayfuncs, "_transpose_copy", spy_kernel)
+    other_order = "C" if order == "F" else "F"
+    X = np.asarray(np.random.RandomState(0).rand(50, 30), order=other_order)
+
+    X_checked = check_array(X, order=order)
+
+    assert X_checked.flags[f"{order}_CONTIGUOUS"]
+    assert_array_equal(X_checked, X)
+    assert calls == [4]
+
+    # With a dtype conversion, numpy changes the dtype and the order in one copy
+    X_checked = check_array(X, order=order, dtype=np.float32)
+
+    assert X_checked.flags[f"{order}_CONTIGUOUS"]
+    assert_allclose(X_checked, X.astype(np.float32))
+    assert calls == [4]

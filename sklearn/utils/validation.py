@@ -32,8 +32,11 @@ from sklearn.utils._array_api import (
 )
 from sklearn.utils._dataframe import is_pandas_df_or_series
 from sklearn.utils._isfinite import FiniteStatus, cy_isfinite
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils._tags import get_tags
+from sklearn.utils.arrayfuncs import _ascontiguousarray, _asfortranarray
 from sklearn.utils.fixes import _object_dtype_isnan, _preserve_dia_indices_dtype
+from sklearn.utils.sparsefuncs_fast import _csc_to_csr, _csr_to_csc
 
 FLOAT_DTYPES = (np.float64, np.float32, np.float16)
 
@@ -518,6 +521,30 @@ def indexable(*iterables):
     return result
 
 
+def _asformat(sparse_container, format):
+    """Same as `sparse_container.asformat(format)`, multi-threaded for CSR <-> CSC."""
+    if sparse_container.format == "csr" and format == "csc":
+        return _csr_to_csc(sparse_container, _openmp_effective_n_threads())
+    if sparse_container.format == "csc" and format == "csr":
+        return _csc_to_csr(sparse_container, _openmp_effective_n_threads())
+    return sparse_container.asformat(format)
+
+
+def _change_memory_order(array, order):
+    """Copy the numpy array `array` in memory order `order` if needed.
+
+    Same result as `np.asarray(array, order=order)`, but multi-threaded for 2D
+    arrays. Other arrays and orders are returned unchanged.
+    """
+    if array.ndim != 2:
+        return array
+    if order == "F" and not array.flags.f_contiguous:
+        return _asfortranarray(array, _openmp_effective_n_threads())
+    if order == "C" and not array.flags.c_contiguous:
+        return _ascontiguousarray(array, _openmp_effective_n_threads())
+    return array
+
+
 def _ensure_sparse_format(
     sparse_container,
     accept_sparse,
@@ -606,7 +633,7 @@ def _ensure_sparse_format(
         # ensure correct sparse format
         if sparse_container.format not in accept_sparse:
             # create new with correct sparse
-            sparse_container = sparse_container.asformat(accept_sparse[0])
+            sparse_container = _asformat(sparse_container, accept_sparse[0])
             changed_format = True
     elif accept_sparse is not True:
         # any other type
@@ -1029,6 +1056,12 @@ def check_array(
                         )
                     array = xp.astype(array, dtype, copy=False)
                 else:
+                    if isinstance(array, np.ndarray) and (
+                        dtype is None or dtype == array.dtype
+                    ):
+                        # Without dtype conversion, the change of memory order is
+                        # the only copy: make it with several threads
+                        array = _change_memory_order(array, order)
                     array = _asarray_with_order(array, order=order, dtype=dtype, xp=xp)
             except ComplexWarning as complex_warning:
                 raise ValueError(
