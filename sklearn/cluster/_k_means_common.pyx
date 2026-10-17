@@ -5,12 +5,17 @@ import numpy as np
 from cython cimport floating
 from cython.parallel cimport prange
 from libc.math cimport sqrt
+from libc.stdlib cimport calloc, free
+from libc.string cimport memset
 
 from sklearn.utils.extmath import row_norms
 
 
 # Number of samples per data chunk defined as a global constant.
 CHUNK_SIZE = 256
+
+# Number of values per block in the reduction of the thread buffers.
+cdef int REDUCE_BLOCK_SIZE = 2048
 
 
 cdef floating _euclidean_dense_dense(
@@ -55,18 +60,24 @@ def _euclidean_dense_dense_wrapper(
 cdef floating _euclidean_sparse_dense(
         const floating[::1] a_data,  # IN
         const int[::1] a_indices,    # IN
+        int a_start,
+        int a_end,
         const floating[::1] b,       # IN
         floating b_squared_norm,
         bint squared
 ) noexcept nogil:
-    """Euclidean distance between a sparse and b dense"""
+    """Euclidean distance between a sparse and b dense
+
+    The non-zero values of a are a_data[a_start:a_end], at the indices
+    a_indices[a_start:a_end]. They are passed as indices because slicing
+    memoryviews in a parallel region makes Cython take the GIL in every thread.
+    """
     cdef:
-        int nnz = a_indices.shape[0]
         int i
         floating tmp, bi
         floating result = 0.0
 
-    for i in range(nnz):
+    for i in range(a_start, a_end):
         bi = b[a_indices[i]]
         tmp = a_data[i] - bi
         result += tmp * tmp - bi * bi
@@ -88,7 +99,7 @@ def _euclidean_sparse_dense_wrapper(
 ):
     """Wrapper of _euclidean_sparse_dense for testing purpose"""
     return _euclidean_sparse_dense(
-        a_data, a_indices, b, b_squared_norm, squared)
+        a_data, a_indices, 0, a_indices.shape[0], b, b_squared_norm, squared)
 
 
 cpdef floating _inertia_dense(
@@ -156,8 +167,7 @@ cpdef floating _inertia_sparse(
         j = labels[i]
         if single_label < 0 or single_label == j:
             sq_dist = _euclidean_sparse_dense(
-                X_data[X_indptr[i]: X_indptr[i + 1]],
-                X_indices[X_indptr[i]: X_indptr[i + 1]],
+                X_data, X_indices, X_indptr[i], X_indptr[i + 1],
                 centers[j], centers_squared_norms[j], True)
             inertia += sq_dist * sample_weight[i]
 
@@ -239,8 +249,7 @@ cpdef void _relocate_empty_clusters_sparse(
     for i in range(n_samples):
         j = labels[i]
         distances[i] = _euclidean_sparse_dense(
-            X_data[X_indptr[i]: X_indptr[i + 1]],
-            X_indices[X_indptr[i]: X_indptr[i + 1]],
+            X_data, X_indices, X_indptr[i], X_indptr[i + 1],
             centers_old[j], centers_squared_norms[j], True)
 
     if np.max(distances) == 0:
@@ -309,6 +318,99 @@ cdef void _center_shift(
     for j in range(n_clusters):
         center_shift[j] = _euclidean_dense_dense(
             &centers_new[j, 0], &centers_old[j, 0], n_features, False)
+
+
+cdef int _alloc_thread_buffers_arrays(
+        floating ***centers_new_chunks,         # OUT
+        floating ***weight_in_clusters_chunks,  # OUT
+        int n_threads) except -1:
+    """Allocate the arrays of pointers to the buffers of each thread.
+
+    The pointers are NULL until each thread allocates its buffers with
+    `_alloc_thread_buffers` in the parallel region. `_reduce_thread_buffers`
+    frees the arrays and the buffers.
+    """
+    centers_new_chunks[0] = <floating **> calloc(n_threads, sizeof(floating *))
+    weight_in_clusters_chunks[0] = <floating **> calloc(n_threads, sizeof(floating *))
+    if centers_new_chunks[0] == NULL or weight_in_clusters_chunks[0] == NULL:
+        free(centers_new_chunks[0])
+        free(weight_in_clusters_chunks[0])
+        raise MemoryError()
+    return 0
+
+
+cdef void _alloc_thread_buffers(
+        floating **centers_new_chunks,         # INOUT
+        floating **weight_in_clusters_chunks,  # INOUT
+        int thread_idx,
+        int n_clusters,
+        int n_features) noexcept nogil:
+    """Allocate the zeroed buffers of the thread `thread_idx`.
+
+    Called by each thread in the parallel region, so that its buffers are first
+    touched by the thread that uses them, on its NUMA node.
+    """
+    centers_new_chunks[thread_idx] = <floating *> calloc(
+        n_clusters * n_features, sizeof(floating))
+    weight_in_clusters_chunks[thread_idx] = <floating *> calloc(
+        n_clusters, sizeof(floating))
+
+
+cdef void _reduce_thread_buffers(
+        floating **centers_new_chunks,         # IN, freed
+        floating **weight_in_clusters_chunks,  # IN, freed
+        int n_threads,
+        floating[:, ::1] centers_new,          # OUT
+        floating[::1] weight_in_clusters,      # OUT
+        bint update_centers) noexcept nogil:
+    """Sum the buffers of each thread into the result, then free them.
+
+    `centers_new_chunks` and `weight_in_clusters_chunks` hold one buffer per
+    thread, of size n_clusters * n_features and n_clusters, or NULL. If
+    `update_centers` is False, the buffers are only freed.
+    """
+    cdef:
+        int thread_idx, i, block_idx, start, end
+        int n_clusters, n_centers_values, n_blocks
+        floating *centers_new_ptr
+        floating *centers_new_chunk
+        floating *weight_in_clusters_chunk
+
+    if update_centers:
+        n_clusters = centers_new.shape[0]
+        n_centers_values = n_clusters * centers_new.shape[1]
+        centers_new_ptr = &centers_new[0, 0]
+
+        # If the OpenMP runtime gives fewer threads than requested, the buffers
+        # of the missing threads stay NULL. The order of the threads is fixed,
+        # so that the result doesn't depend on the order in which they finish.
+        memset(&weight_in_clusters[0], 0, n_clusters * sizeof(floating))
+        for thread_idx in range(n_threads):
+            weight_in_clusters_chunk = weight_in_clusters_chunks[thread_idx]
+            if weight_in_clusters_chunk != NULL:
+                for i in range(n_clusters):
+                    weight_in_clusters[i] += weight_in_clusters_chunk[i]
+
+        # The sum over n_threads buffers of n_clusters * n_features values is
+        # done in parallel, by blocks that fit in the L1 cache. The team has
+        # n_threads threads even if there are fewer blocks: changing the size of
+        # the team from one parallel region to the next is slow.
+        n_blocks = (n_centers_values + REDUCE_BLOCK_SIZE - 1) // REDUCE_BLOCK_SIZE
+        for block_idx in prange(n_blocks, schedule='static', num_threads=n_threads):
+            start = block_idx * REDUCE_BLOCK_SIZE
+            end = min(start + REDUCE_BLOCK_SIZE, n_centers_values)
+            memset(&centers_new_ptr[start], 0, (end - start) * sizeof(floating))
+            for thread_idx in range(n_threads):
+                centers_new_chunk = centers_new_chunks[thread_idx]
+                if centers_new_chunk != NULL:
+                    for i in range(start, end):
+                        centers_new_ptr[i] += centers_new_chunk[i]
+
+    for thread_idx in range(n_threads):
+        free(centers_new_chunks[thread_idx])
+        free(weight_in_clusters_chunks[thread_idx])
+    free(centers_new_chunks)
+    free(weight_in_clusters_chunks)
 
 
 def _is_same_clustering(
