@@ -45,8 +45,7 @@ class _CategoricalEncodingMixin:
         """
         if reset:
             self._categorical_encoder = None
-            # RandomTreesEmbedding and gradient boosting have no
-            # `categorical_features` parameter.
+            # RandomTreesEmbedding has no `categorical_features` parameter.
             if hasattr(self, "categorical_features"):
                 self.is_categorical_ = _check_categorical_features(
                     X, self.categorical_features
