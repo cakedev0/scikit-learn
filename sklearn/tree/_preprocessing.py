@@ -31,8 +31,7 @@ def _encode_categorical_features(estimator, X, *, reset, dtype):
     """
     if reset:
         estimator._categorical_encoder = None
-        # RandomTreesEmbedding and gradient boosting have no
-        # `categorical_features` parameter.
+        # RandomTreesEmbedding has no `categorical_features` parameter.
         if hasattr(estimator, "categorical_features"):
             estimator.is_categorical_ = _check_categorical_features(
                 X, estimator.categorical_features
