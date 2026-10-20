@@ -8,6 +8,7 @@ from sklearn.ensemble._hist_gradient_boosting.common import (
     X_BINNED_DTYPE,
 )
 from sklearn.ensemble._hist_gradient_boosting.histogram import (
+    HistogramBuilder,
     _build_histogram,
     _build_histogram_naive,
     _build_histogram_no_hessian,
@@ -237,3 +238,47 @@ def test_hist_subtraction(constant_hessian):
     for key in ("count", "sum_hessians", "sum_gradients"):
         assert_allclose(hist_left[key], hist_left_sub[key], rtol=1e-6)
         assert_allclose(hist_right[key], hist_right_sub[key], rtol=1e-6)
+
+
+@pytest.mark.parametrize("constant_hessian", [True, False])
+def test_histograms_with_n_bins_non_missing(constant_hessian):
+    # Passing n_bins_non_missing skips the unused bins of non-root nodes, but
+    # must give the same used bins and missing values bin as computing all
+    # the bins, by brute force and by subtraction.
+    rng = np.random.RandomState(42)
+    n_samples, n_bins = 200, 256
+    n_bins_non_missing = np.array([3, 17, 255, 1], dtype=np.uint32)
+    missing_bin = n_bins - 1
+    X_binned = np.column_stack(
+        [rng.randint(0, n, size=n_samples) for n in n_bins_non_missing]
+    ).astype(X_BINNED_DTYPE)
+    X_binned[rng.rand(*X_binned.shape) < 0.1] = missing_bin
+    X_binned = np.asfortranarray(X_binned)
+    gradients = rng.randn(n_samples).astype(G_H_DTYPE)
+    if constant_hessian:
+        hessians = np.ones(1, dtype=G_H_DTYPE)
+    else:
+        hessians = rng.lognormal(size=n_samples).astype(G_H_DTYPE)
+
+    root_indices = np.arange(n_samples, dtype=np.uint32)
+    child_indices = root_indices[rng.rand(n_samples) < 0.3]
+
+    def child_histograms(**kwargs):
+        builder = HistogramBuilder(
+            X_binned, n_bins, gradients, hessians, constant_hessian, 1, **kwargs
+        )
+        root = builder.compute_histograms_brute(root_indices)
+        child = builder.compute_histograms_brute(child_indices)
+        child_copy = np.asarray(child).copy()
+        sibling = builder.compute_histograms_subtraction(root, child)
+        return child_copy, np.asarray(sibling)
+
+    expected = child_histograms()
+    result = child_histograms(n_bins_non_missing=n_bins_non_missing)
+    for hist_expected, hist_result in zip(expected, result):
+        for f, n_used in enumerate(n_bins_non_missing):
+            used = np.r_[np.arange(n_used), missing_bin]
+            for key in ("count", "sum_gradients", "sum_hessians"):
+                assert_array_equal(
+                    hist_result[f, used][key], hist_expected[f, used][key]
+                )
