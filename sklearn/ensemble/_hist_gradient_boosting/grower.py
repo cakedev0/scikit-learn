@@ -316,7 +316,13 @@ class TreeGrower:
 
         hessians_are_constant = hessians.shape[0] == 1
         self.histogram_builder = HistogramBuilder(
-            X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
+            X_binned,
+            n_bins,
+            gradients,
+            hessians,
+            hessians_are_constant,
+            n_threads,
+            n_bins_non_missing,
         )
         missing_values_bin_idx = n_bins - 1
         self.splitter = Splitter(
