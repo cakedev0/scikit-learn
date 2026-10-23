@@ -20,6 +20,7 @@ from sklearn.datasets import make_low_rank_matrix
 from sklearn.linear_model._linear_loss import (
     LinearModelLoss,
     Multinomial_LDL_Decomposition,
+    _LBFGSReparametrization,
 )
 from sklearn.utils.extmath import squared_norm
 from sklearn.utils.fixes import CSR_CONTAINERS
@@ -756,3 +757,47 @@ def test_multinomial_LDL_warning():
     msg = "Probabilities 'proba' are assumed to sum to 1, but they don't."
     with pytest.warns(UserWarning, match=msg):
         Multinomial_LDL_Decomposition(proba=p, proba_sum_to_1=True)
+
+
+@pytest.mark.parametrize("base_loss", LOSSES)
+@pytest.mark.parametrize("fit_intercept", [False, True])
+@pytest.mark.parametrize("sample_weight", [None, "range"])
+@pytest.mark.parametrize("X_container", CSR_CONTAINERS + [None])
+def test_lbfgs_reparametrization(
+    base_loss, fit_intercept, sample_weight, X_container, global_random_seed
+):
+    """_LBFGSReparametrization is a linear change of variables of LinearModelLoss."""
+    loss = LinearModelLoss(base_loss=base_loss(), fit_intercept=fit_intercept)
+    n_samples, n_features = 50, 4
+    X, y, coef = random_X_y_coef(
+        linear_model_loss=loss,
+        n_samples=n_samples,
+        n_features=n_features,
+        seed=global_random_seed,
+    )
+    # Columns with means and scales far from 0 and 1.
+    X = X * [1, 30, 0.01, 300] + [0, -5, 2, 100]
+    if sample_weight == "range":
+        sample_weight = np.linspace(1, 2, num=n_samples)
+    if X_container is not None:
+        X = X_container(X)
+    coef = coef.ravel(order="F")  # 1d, as passed to L-BFGS
+    l2_reg_strength = 0.5
+
+    reparametrization = _LBFGSReparametrization(loss, X, sample_weight)
+    params = reparametrization.to_internal(coef)
+    assert_allclose(reparametrization.from_internal(params), coef)
+
+    loss_value, gradient = reparametrization.loss_gradient(
+        params, X, y, sample_weight, 0, l2_reg_strength
+    )
+    expected_loss, expected_gradient = loss.loss_gradient(
+        coef, X, y, sample_weight, 0, l2_reg_strength
+    )
+    assert_allclose(loss_value, expected_loss)
+    # from_internal is linear: its matrix A maps params to coef, so the gradient
+    # with respect to params is A.T @ the gradient with respect to coef.
+    A = np.column_stack(
+        [reparametrization.from_internal(e) for e in np.eye(params.shape[0])]
+    )
+    assert_allclose(gradient, A.T @ expected_gradient, rtol=1e-10, atol=1e-12)

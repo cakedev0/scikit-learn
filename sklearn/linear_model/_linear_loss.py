@@ -10,6 +10,7 @@ import warnings
 import numpy as np
 from scipy import sparse
 
+from sklearn.utils import gen_batches
 from sklearn.utils._array_api import (
     _is_numpy_namespace,
     _ravel,
@@ -19,6 +20,7 @@ from sklearn.utils._array_api import (
 )
 from sklearn.utils._sparse import _align_api_if_sparse
 from sklearn.utils.extmath import safe_sparse_dot, squared_norm
+from sklearn.utils.sparsefuncs import mean_variance_axis
 
 
 def sandwich_dot(X, W):
@@ -962,6 +964,105 @@ class LinearModelLoss:
                     return _ravel(grad.T, xp=xp), hessp
 
         return grad, hessp
+
+
+def _column_mean_var(X, sample_weight=None):
+    """Weighted mean and variance of the columns of X, without copying X."""
+    if sparse.issparse(X):
+        mean, var = mean_variance_axis(X, axis=0, weights=sample_weight)
+        return mean.astype(np.float64), var.astype(np.float64)
+    n_samples, n_features = X.shape
+    sw = np.ones(n_samples) if sample_weight is None else sample_weight
+    sw_sum = np.sum(sw)
+    mean = (sw @ X) / sw_sum
+    var = np.zeros(n_features)
+    # Batches of ~1M elements, so the temporary (X - mean) ** 2 stays small.
+    for batch in gen_batches(n_samples, max(1, 2**20 // max(n_features, 1))):
+        var += sw[batch] @ (X[batch] - mean) ** 2
+    return mean.astype(np.float64), var / sw_sum
+
+
+class _LBFGSReparametrization:
+    """Change of variables for L-BFGS, as if the columns of X were centered and
+    scaled, without copying X.
+
+    L-BFGS depends on the parametrization: on columns with a large mean or
+    scale, it can stop far from the optimum (gh-35029), or its first trial step
+    can overflow the loss, which scipy's L-BFGS-B then reports as converged.
+    It optimizes over ``v = s * coef`` and ``c = intercept + coef @ m``
+    instead, with ``m`` the column means (only with an intercept) and
+    ``s = max(1, std)``. Only large columns are shrunk: scaling up near-constant
+    columns makes the penalty badly conditioned. The penalty stays on ``coef``,
+    so the minimizer doesn't change.
+
+    L-BFGS-B's gtol applies to the gradient w.r.t. ``(v, c)``. ``gtol(tol)``
+    keeps ``max |gradient| <= tol`` for ``coef`` without an intercept. With an
+    intercept, the centered gradient is used on purpose: the uncentered one can
+    be small far from the optimum.
+
+    Parameters
+    ----------
+    linear_loss : LinearModelLoss
+    X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+    sample_weight : ndarray of shape (n_samples,), default=None
+    """
+
+    def __init__(self, linear_loss, X, sample_weight=None):
+        self.linear_loss = linear_loss
+        self.n_features = X.shape[1]
+        mean, var = _column_mean_var(X, sample_weight)
+        if linear_loss.fit_intercept:
+            self.mean = mean
+        else:
+            # Without an intercept, the scale is the root mean square.
+            self.mean = np.zeros(self.n_features)
+            var = var + mean**2
+        self.scale = np.maximum(1.0, np.sqrt(var))
+
+    def gtol(self, tol):
+        """L-BFGS-B's gtol for a tolerance on the gradient w.r.t. coef."""
+        return tol / np.max(self.scale, initial=1.0)
+
+    def _as_2d(self, coef):
+        """View of coef as (n_classes or 1, n_dof)."""
+        if self.linear_loss.base_loss.is_multiclass:
+            return coef.reshape((self.linear_loss.base_loss.n_classes, -1), order="F")
+        return coef.reshape((1, -1))
+
+    def _like(self, coef_2d, like):
+        if self.linear_loss.base_loss.is_multiclass and like.ndim == 1:
+            return coef_2d.ravel(order="F")
+        return coef_2d.reshape(like.shape)
+
+    def to_internal(self, coef):
+        """(coef, intercept) -> (v, c)"""
+        params = self._as_2d(coef).astype(np.float64, copy=True)
+        weights = params[:, : self.n_features]
+        if self.linear_loss.fit_intercept:
+            params[:, -1] += weights @ self.mean
+        weights *= self.scale
+        return self._like(params, coef)
+
+    def from_internal(self, params):
+        """(v, c) -> (coef, intercept)"""
+        coef = self._as_2d(params).astype(np.float64, copy=True)
+        weights = coef[:, : self.n_features]
+        weights /= self.scale
+        if self.linear_loss.fit_intercept:
+            coef[:, -1] -= weights @ self.mean
+        return self._like(coef, params)
+
+    def loss_gradient(self, params, *args, **kwargs):
+        """LinearModelLoss.loss_gradient with respect to (v, c)."""
+        loss, gradient = self.linear_loss.loss_gradient(
+            self.from_internal(params), *args, **kwargs
+        )
+        gradient_2d = self._as_2d(gradient).copy()
+        weights_gradient = gradient_2d[:, : self.n_features]
+        if self.linear_loss.fit_intercept:
+            weights_gradient -= gradient_2d[:, -1:] * self.mean
+        weights_gradient /= self.scale
+        return loss, self._like(gradient_2d, gradient)
 
 
 class Multinomial_LDL_Decomposition:

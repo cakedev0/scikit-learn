@@ -31,7 +31,7 @@ from sklearn.linear_model._glm._newton_solver import (
     NewtonCDSolver,
     NewtonCholeskySolver,
 )
-from sklearn.linear_model._linear_loss import LinearModelLoss
+from sklearn.linear_model._linear_loss import LinearModelLoss, _LBFGSReparametrization
 from sklearn.linear_model._sag import sag_solver
 from sklearn.metrics import get_scorer, get_scorer_names, make_scorer
 from sklearn.model_selection import check_cv
@@ -625,6 +625,11 @@ def _logistic_regression_path(
             hess = loss.gradient_hessian_product  # hess = [gradient, hessp]
         warm_start_sag = {"coef": w0.T} if w0.ndim > 1 else {"coef": w0}
 
+    reparametrization = None
+    if solver == "lbfgs" and _is_numpy_namespace(xp):
+        reparametrization = _LBFGSReparametrization(loss, X, sample_weight)
+        func = reparametrization.loss_gradient
+
     coefs = list()
     n_iter = xp.zeros(len(alphas), dtype=xp.int32, device=device)
     coefs_order = "C" if not _is_numpy_namespace(xp) else "K"
@@ -664,20 +669,29 @@ def _logistic_regression_path(
             iprint = [-1, 50, 1, 100, 101][
                 np.searchsorted(np.array([0, 1, 2, 3]), verbose)
             ]
+            x0, callback, gtol = w0, lbfgs_bridge, tol
+            if reparametrization is not None:
+                x0 = reparametrization.to_internal(w0)
+                gtol = reparametrization.gtol(tol)
+                if lbfgs_bridge is not None:
+
+                    def callback(xk):
+                        lbfgs_bridge(reparametrization.from_internal(xk))
+
             opt_res = optimize.minimize(
                 func,
-                w0,
+                x0,
                 method="L-BFGS-B",
                 jac=True,
                 args=(X, y, sample_weight, 0, l2_reg_strength, n_threads),
                 options={
                     "maxiter": max_iter,
                     "maxls": 50,  # default is 20
-                    "gtol": tol,
+                    "gtol": gtol,
                     "ftol": 64 * np.finfo(float).eps,
                     **_get_additional_lbfgs_options_dict("iprint", iprint),
                 },
-                callback=lbfgs_bridge,
+                callback=callback,
             )
             n_iter_i = _check_optimize_result(
                 solver,
@@ -686,6 +700,8 @@ def _logistic_regression_path(
                 extra_warning_msg=_LOGISTIC_SOLVER_CONVERGENCE_MSG,
             )
             w0, loss = opt_res.x, opt_res.fun
+            if reparametrization is not None:
+                w0 = reparametrization.from_internal(w0)
             if lbfgs_bridge is not None:
                 lbfgs_bridge.close()
             if fit_intercept and not is_binary:
