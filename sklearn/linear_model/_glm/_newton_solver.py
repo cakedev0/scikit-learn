@@ -28,6 +28,7 @@ from sklearn.linear_model._linear_loss import (
 )
 from sklearn.utils.fixes import _get_additional_lbfgs_options_dict
 from sklearn.utils.optimize import _check_optimize_result
+from sklearn.utils.validation import _num_features, _num_samples
 
 
 def min_norm_subgradient(alpha, gradient, coef, linear_loss):
@@ -1642,3 +1643,31 @@ class NewtonCDSolver(NewtonSolver):
         ):
             # Only the intercept needs an update to the symmetric parametrization.
             self.coef[:, -1] -= np.mean(self.coef[:, -1])
+
+
+def _auto_newton_cd_solver(X):
+    """Choose between 'newton-cd-gram' and 'newton-cd' for `solver="auto"`.
+
+    'newton-cd-gram' stores dense matrices of shape (n_features, n_features), even
+    for sparse X. It is used only when such a matrix is not larger than X, i.e.
+    `n_features <= n_samples` for dense X and `n_features**2 <= X.nnz` for sparse X.
+
+    X is not validated yet. When its shape can't be read, `validate_data` raises
+    later anyway, so the returned solver does not matter.
+    """
+    try:
+        n_samples, n_features = _num_samples(X), _num_features(X)
+    except TypeError:
+        return "newton-cd-gram"
+    if not sparse.issparse(X):
+        return "newton-cd-gram" if n_features <= n_samples else "newton-cd"
+    if X.format == "coo":
+        index_arrays = (X.row, X.col)
+    elif X.format in ("csr", "csc", "bsr"):
+        index_arrays = (X.indices, X.indptr)
+    else:
+        index_arrays = ()
+    if any(index.dtype != np.int32 for index in index_arrays):
+        # The sparse coordinate descent of 'newton-cd' needs 32-bit indices.
+        return "newton-cd-gram"
+    return "newton-cd-gram" if n_features**2 <= X.nnz else "newton-cd"
