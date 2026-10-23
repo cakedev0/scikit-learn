@@ -24,6 +24,7 @@ from sklearn.linear_model._glm._newton_solver import (
     NewtonCDSolver,
     NewtonCholeskySolver,
     NewtonSolver,
+    _auto_newton_cd_solver,
 )
 from sklearn.linear_model._linear_loss import LinearModelLoss
 from sklearn.utils import check_array
@@ -41,8 +42,6 @@ from sklearn.utils.fixes import _get_additional_lbfgs_options_dict
 from sklearn.utils.optimize import _check_optimize_result, _newton_cg
 from sklearn.utils.validation import (
     _check_sample_weight,
-    _num_features,
-    _num_samples,
     check_is_fitted,
     validate_data,
 )
@@ -97,7 +96,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
         Specifies if a constant (a.k.a. bias or intercept) should be
         added to the linear predictor (`X @ coef + intercept`).
 
-    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram' 'newton-cg', \
+    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram', 'newton-cg', \
             'newton-cholesky'}, default='auto'
         Algorithm to use in the optimization problem:
 
@@ -106,8 +105,12 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             deprecation warning.
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 
@@ -296,18 +299,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             if self.l1_ratio == 0:
                 self.solver_ = "lbfgs"
             else:
-                # Suppress TypeError from _num_features and _num_samples, validate_data
-                # will later raise the right/better error.
-                try:
-                    n_features = _num_features(X)
-                    n_samples = _num_samples(X)
-                except TypeError:
-                    n_features = 1
-                    n_samples = 1
-                if n_samples >= n_features:
-                    self.solver_ = "newton-cd-gram"
-                else:
-                    self.solver_ = "newton-cd"
+                self.solver_ = _auto_newton_cd_solver(X)
         else:
             self.solver_ = self.solver
         if self.l1_ratio > 0 and self.solver_ not in ("newton-cd", "newton-cd-gram"):
@@ -663,7 +655,7 @@ class PoissonRegressor(_GeneralizedLinearRegressor):
         Specifies if a constant (a.k.a. bias or intercept) should be
         added to the linear predictor (`X @ coef + intercept`).
 
-    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram' 'newton-cg', \
+    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram', 'newton-cg', \
             'newton-cholesky'}, default='auto'
         Algorithm to use in the optimization problem:
 
@@ -672,8 +664,12 @@ class PoissonRegressor(_GeneralizedLinearRegressor):
             deprecation warning.
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 
@@ -875,7 +871,7 @@ class GammaRegressor(_GeneralizedLinearRegressor):
         Specifies if a constant (a.k.a. bias or intercept) should be
         added to the linear predictor (`X @ coef + intercept`).
 
-    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram' 'newton-cg', \
+    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram', 'newton-cg', \
             'newton-cholesky'}, default='auto'
         Algorithm to use in the optimization problem:
 
@@ -884,8 +880,12 @@ class GammaRegressor(_GeneralizedLinearRegressor):
             deprecation warning.
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 
@@ -1108,7 +1108,7 @@ class TweedieRegressor(_GeneralizedLinearRegressor):
         - 'log' for ``power > 0``, e.g. for Poisson, Gamma and Inverse Gaussian
           distributions
 
-    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram' 'newton-cg', \
+    solver : {'auto', 'lbfgs', 'newton-cd', 'newton-cd-gram', 'newton-cg', \
             'newton-cholesky'}, default='auto'
         Algorithm to use in the optimization problem:
 
@@ -1117,8 +1117,12 @@ class TweedieRegressor(_GeneralizedLinearRegressor):
             deprecation warning.
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 

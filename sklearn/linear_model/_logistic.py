@@ -30,6 +30,7 @@ from sklearn.linear_model._glm._newton_solver import (
     NewtonCDGramSolver,
     NewtonCDSolver,
     NewtonCholeskySolver,
+    _auto_newton_cd_solver,
 )
 from sklearn.linear_model._linear_loss import LinearModelLoss
 from sklearn.linear_model._sag import sag_solver
@@ -81,8 +82,6 @@ from sklearn.utils.validation import (
     _check_method_params,
     _check_sample_weight,
     _deprecate_positional_args,
-    _num_features,
-    _num_samples,
     check_is_fitted,
     validate_data,
 )
@@ -94,7 +93,7 @@ _LOGISTIC_SOLVER_CONVERGENCE_MSG = (
 )
 
 
-def _check_solver(solver, penalty, n_features, n_samples, dual):
+def _check_solver(solver, penalty, X, dual):
     if solver == "liblinear":
         warnings.warn(
             (
@@ -119,10 +118,7 @@ def _check_solver(solver, penalty, n_features, n_samples, dual):
         if penalty in ("l2", None):  # l1_ratio == 0
             solver = "lbfgs"
         else:
-            if n_samples >= n_features:
-                solver = "newton-cd-gram"
-            else:
-                solver = "newton-cd"
+            solver = _auto_newton_cd_solver(X)
 
     if solver not in (
         "liblinear",
@@ -1295,8 +1291,12 @@ class LogisticRegression(
             deprecation warning.
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 
@@ -1304,7 +1304,7 @@ class LogisticRegression(
             Calls scipy's L-BFGS-B optimizer. It works reasonably well for a wide
             class of problems.
 
-        'liblinear':
+        'liblinear'
             This solver can only handle binary classification by default and will raise
             an error for `n_classes >= 3`. To apply a one-versus-rest scheme for the
             multiclass setting one can wrap it with the
@@ -1664,20 +1664,8 @@ class LogisticRegression(
             )
             intercept_scaling = self.intercept_scaling
 
-        # Suppress TypeError from _num_features and _num_samples, validate_data
-        # will later raise the right/better error.
-        try:
-            n_features = _num_features(X)
-            n_samples = _num_samples(X)
-        except TypeError:
-            n_features = 1
-            n_samples = 1
         self.solver_, dual = _check_solver(
-            solver=self.solver,
-            penalty=penalty,
-            n_features=n_features,
-            n_samples=n_samples,
-            dual=self.dual,
+            solver=self.solver, penalty=penalty, X=X, dual=self.dual
         )
 
         if penalty != "elasticnet" and (
@@ -2076,19 +2064,21 @@ class LogisticRegressionCV(LogisticRegression, LinearClassifierMixin, BaseEstima
            The default will change from None, i.e. accuracy, to 'neg_log_loss' in
            version 1.11.
 
-    solver : {'lbfgs', 'liblinear', 'newton-cd-gram', 'newton-cg', 'newton-cholesky', \
-            'sag', 'saga'}, default='lbfgs'
-
-        Algorithm to use in the optimization problem. Default is 'lbfgs'.
-        To choose a solver, you might want to consider the following aspects:
+    solver : {'auto', 'lbfgs', 'liblinear', 'newton-cd', 'newton-cd-gram', \
+            'newton-cg', 'newton-cholesky', 'sag', 'saga'}, default='auto'
+        Algorithm to use in the optimization problem:
 
         'auto'
             This selects a good default solver. The selection may change without a
             deprecation warning. With `l1_ratio=np.max(l1_ratios)`:
 
             - For `l1_ratio == 0`: 'lbfgs'
-            - For `l1_ratio > 0` and `n_samples >= n_features`: 'newton-cd-gram'
-            - For `l1_ratio > 0` and `n_features > n_samples`: 'newton-cd'
+            - For `l1_ratio > 0` and `n_features**2 <= n_nonzero`: 'newton-cd-gram'
+            - For `l1_ratio > 0` and `n_features**2 > n_nonzero`: 'newton-cd'
+
+            `n_nonzero` is `X.nnz` for sparse `X` and `n_samples * n_features` for
+            dense `X`. So 'newton-cd-gram' is selected when its Gram matrix is not
+            larger than `X`, e.g. when `n_samples >= n_features` for dense `X`.
 
             .. versionadded:: 1.10
 
@@ -2096,7 +2086,7 @@ class LogisticRegressionCV(LogisticRegression, LinearClassifierMixin, BaseEstima
             Calls scipy's L-BFGS-B optimizer. It works reasonably well for a wide
             class of problems.
 
-        'liblinear':
+        'liblinear'
             This solver can only handle binary classification by default and will raise
             an error for `n_classes >= 3`. To apply a one-versus-rest scheme for the
             multiclass setting one can wrap it with the
@@ -2591,20 +2581,8 @@ class LogisticRegressionCV(LogisticRegression, LinearClassifierMixin, BaseEstima
             )
             intercept_scaling = self.intercept_scaling
 
-        # Suppress TypeError from _num_features and _num_samples, validate_data
-        # will later raise the right/better error.
-        try:
-            n_features = _num_features(X)
-            n_samples = _num_samples(X)
-        except TypeError:
-            n_features = 1
-            n_samples = 1
         self.solver_, dual = _check_solver(
-            solver=self.solver,
-            penalty=penalty,
-            n_features=n_features,
-            n_samples=n_samples,
-            dual=self.dual,
+            solver=self.solver, penalty=penalty, X=X, dual=self.dual
         )
 
         if penalty == "elasticnet":

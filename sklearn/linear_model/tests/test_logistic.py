@@ -338,8 +338,13 @@ def test_solver_auto(n_classes, l1_ratio, long_data):
         n_informative=3,
         random_state=42,
     )
-    LogisticRegression(solver="auto", l1_ratio=l1_ratio).fit(X, y)
-    LogisticRegressionCV(
+    if l1_ratio == 0:
+        expected_solver = "lbfgs"
+    else:
+        expected_solver = "newton-cd-gram" if long_data else "newton-cd"
+    lr = LogisticRegression(solver="auto", l1_ratio=l1_ratio).fit(X, y)
+    assert lr.solver_ == expected_solver
+    lrcv = LogisticRegressionCV(
         solver="auto",
         l1_ratios=[0, l1_ratio],
         alphas=[1],  # only a single alpha to save computation time
@@ -347,6 +352,29 @@ def test_solver_auto(n_classes, l1_ratio, long_data):
         scoring="neg_log_loss",
         use_legacy_attributes=True,
     ).fit(X, y)
+    assert lrcv.solver_ == expected_solver
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize(
+    "density, expected_solver", [(0.5, "newton-cd-gram"), (0.05, "newton-cd")]
+)
+def test_solver_auto_sparse(csr_container, density, expected_solver):
+    """Test that solver='auto' compares n_features**2 to X.nnz for sparse X."""
+    X = csr_container(sparse.random(100, 20, density=density, random_state=0))
+    y = np.random.default_rng(0).integers(2, size=100)
+    lr = LogisticRegression(solver="auto", l1_ratio=1).fit(X, y)
+    assert lr.solver_ == expected_solver
+
+
+def test_solver_auto_sparse_int64_indices():
+    """Test that solver='auto' avoids 'newton-cd' for sparse X with int64 indices."""
+    X = sparse.random(100, 20, density=0.05, format="csr", random_state=0)
+    X.indices = X.indices.astype(np.int64)
+    X.indptr = X.indptr.astype(np.int64)
+    y = np.random.default_rng(0).integers(2, size=100)
+    lr = LogisticRegression(solver="auto", l1_ratio=1).fit(X, y)
+    assert lr.solver_ == "newton-cd-gram"
 
 
 @pytest.mark.parametrize(
