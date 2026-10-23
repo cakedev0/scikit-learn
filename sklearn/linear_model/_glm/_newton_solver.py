@@ -25,6 +25,7 @@ from sklearn.linear_model._cd_fast import (
 )
 from sklearn.linear_model._linear_loss import (
     LinearModelLoss,
+    _LBFGSReparametrization,
 )
 from sklearn.utils.fixes import _get_additional_lbfgs_options_dict
 from sklearn.utils.optimize import _check_optimize_result
@@ -295,22 +296,23 @@ class NewtonSolver(ABC):
         coef_shape = self.coef.shape
         self.coef = self.coef.ravel(order="F")  # scipy minimize expects 1d arrays
         max_iter = self.max_iter - self.iteration
+        reparametrization = _LBFGSReparametrization(self.linear_loss, X, sample_weight)
         opt_res = scipy.optimize.minimize(
-            self.linear_loss.loss_gradient,
-            self.coef,
+            reparametrization.loss_gradient,
+            reparametrization.to_internal(self.coef),
             method="L-BFGS-B",
             jac=True,
             options={
                 "maxiter": max_iter,
                 "maxls": 50,  # default is 20
-                "gtol": self.tol,
+                "gtol": reparametrization.gtol(self.tol),
                 "ftol": 64 * np.finfo(np.float64).eps,
                 **_get_additional_lbfgs_options_dict("iprint", self.verbose - 1),
             },
             args=(X, y, sample_weight, 0, self.l2_reg_strength, self.n_threads),
         )
         self.iteration += _check_optimize_result("lbfgs", opt_res, max_iter=max_iter)
-        self.coef = opt_res.x
+        self.coef = reparametrization.from_internal(opt_res.x)
         self.converged = opt_res.status == 0
         if len(coef_shape) > 1:
             self.coef = self.coef.reshape(coef_shape, order="F")
