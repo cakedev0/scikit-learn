@@ -17,7 +17,11 @@ from sklearn.utils.extmath import row_norms
 # Number of samples per data chunk defined as a global constant.
 CHUNK_SIZE = 256
 
-# Number of values per block in the reduction of the thread buffers.
+# Size of a cache line in bytes (64 on x86-64).
+cdef int CACHE_LINE_SIZE = 64
+
+# Number of values per block in the reduction of the thread buffers: a block
+# (8 KiB in float32, 16 KiB in float64) fits in the L1 cache.
 cdef int REDUCE_BLOCK_SIZE = 2048
 
 
@@ -547,97 +551,111 @@ cdef void _center_shift(
             &centers_new[j, 0], &centers_old[j, 0], n_features, False)
 
 
-cdef int _alloc_thread_buffers_arrays(
-        floating ***centers_new_chunks,         # OUT
-        floating ***weight_in_clusters_chunks,  # OUT
-        int n_threads) except -1:
-    """Allocate the arrays of pointers to the buffers of each thread.
+def _alloc_thread_buffers(n_threads, n_clusters, n_features, dtype):
+    """Allocate the zeroed buffers of the threads of the Lloyd iterations.
 
-    The pointers are NULL until each thread allocates its buffers with
-    `_alloc_thread_buffers` in the parallel region. `_reduce_thread_buffers`
-    frees the arrays and the buffers.
+    Returns an array of shape (n_threads, row_size). Row `thread_idx` holds the
+    partial sums of thread `thread_idx`:
+
+    - `row[:n_clusters * n_features]`: the weighted sums of the samples of each
+      cluster, flattened (the partial `centers_new`),
+    - `row[n_clusters * n_features:n_clusters * (n_features + 1)]`: the sums of
+      the weights of the samples of each cluster (the partial
+      `weight_in_clusters`),
+    - then at least one cache line of padding, so that two threads never write
+      to the same cache line.
+
+    The buffers are zeroed again by `_reduce_thread_buffers`, so that they are
+    allocated once and reused by all the iterations: allocating them at each
+    iteration was dominated by page faults with many threads. `np.zeros`
+    doesn't touch the pages of a large array: each page is placed on the NUMA
+    node of the thread that writes it first, i.e. the thread that uses it.
     """
-    centers_new_chunks[0] = <floating **> calloc(n_threads, sizeof(floating *))
-    weight_in_clusters_chunks[0] = <floating **> calloc(n_threads, sizeof(floating *))
-    if centers_new_chunks[0] == NULL or weight_in_clusters_chunks[0] == NULL:
-        free(centers_new_chunks[0])
-        free(weight_in_clusters_chunks[0])
-        raise MemoryError()
-    return 0
+    itemsize = np.dtype(dtype).itemsize
+    n_values_per_cache_line = CACHE_LINE_SIZE // itemsize
 
+    # Round the row up to whole cache lines, plus one cache line of padding.
+    n_values = n_clusters * (n_features + 1)
+    n_cache_lines = int(np.ceil(n_values / n_values_per_cache_line)) + 1
+    row_size = n_cache_lines * n_values_per_cache_line
 
-cdef void _alloc_thread_buffers(
-        floating **centers_new_chunks,         # INOUT
-        floating **weight_in_clusters_chunks,  # INOUT
-        int thread_idx,
-        int n_clusters,
-        int n_features) noexcept nogil:
-    """Allocate the zeroed buffers of the thread `thread_idx`.
-
-    Called by each thread in the parallel region, so that its buffers are first
-    touched by the thread that uses them, on its NUMA node.
-    """
-    centers_new_chunks[thread_idx] = <floating *> calloc(
-        n_clusters * n_features, sizeof(floating))
-    weight_in_clusters_chunks[thread_idx] = <floating *> calloc(
-        n_clusters, sizeof(floating))
+    # The rows start on a cache line, so that the reduction zeroes whole lines:
+    # allocate one more cache line, and skip the values before the first
+    # address that is a multiple of CACHE_LINE_SIZE.
+    buffers = np.zeros(n_threads * row_size + n_values_per_cache_line, dtype=dtype)
+    address = buffers.ctypes.data
+    n_skipped_bytes = (CACHE_LINE_SIZE - address % CACHE_LINE_SIZE) % CACHE_LINE_SIZE
+    start = n_skipped_bytes // itemsize
+    buffers = buffers[start : start + n_threads * row_size]
+    return buffers.reshape(n_threads, row_size)
 
 
 cdef void _reduce_thread_buffers(
-        floating **centers_new_chunks,         # IN, freed
-        floating **weight_in_clusters_chunks,  # IN, freed
+        floating[:, ::1] thread_buffers,       # INOUT (>= n_threads, row_size)
         int n_threads,
-        floating[:, ::1] centers_new,          # OUT
-        floating[::1] weight_in_clusters,      # OUT
-        bint update_centers) noexcept nogil:
-    """Sum the buffers of each thread into the result, then free them.
+        floating[:, ::1] centers_new,          # OUT (n_clusters, n_features)
+        floating[::1] weight_in_clusters,      # OUT (n_clusters,)
+) noexcept nogil:
+    """Sum the buffers of the first n_threads threads into the result.
 
-    `centers_new_chunks` and `weight_in_clusters_chunks` hold one buffer per
-    thread, of size n_clusters * n_features and n_clusters, or NULL. If
-    `update_centers` is False, the buffers are only freed.
+    `centers_new` is the sum over the threads of the first
+    `n_clusters * n_features` values of their row, reshaped, and
+    `weight_in_clusters` the sum of the next `n_clusters` values (see
+    `_alloc_thread_buffers` for the layout). The buffers are zeroed again, so
+    that the next iteration can reuse them.
     """
     cdef:
-        int thread_idx, i, block_idx, start, end
-        int n_clusters, n_centers_values, n_blocks
-        floating *centers_new_ptr
-        floating *centers_new_chunk
-        floating *weight_in_clusters_chunk
+        int n_clusters = centers_new.shape[0]
+        int n_center_values = n_clusters * centers_new.shape[1]
+        int n_values_per_cache_line = CACHE_LINE_SIZE // sizeof(floating)
+        # Number of blocks of REDUCE_BLOCK_SIZE values, rounded up
+        int n_blocks = (n_center_values + REDUCE_BLOCK_SIZE - 1) // REDUCE_BLOCK_SIZE
+        int thread_idx, cluster_idx, block_idx, start, end, value_idx
+        int line_idx, n_lines, line_start, line_end, line_is_nonzero
+        # centers_new as a flat array of n_center_values values
+        floating *centers_new_flat = &centers_new[0, 0]
+        floating *thread_weights
+        floating *thread_centers
 
-    if update_centers:
-        n_clusters = centers_new.shape[0]
-        n_centers_values = n_clusters * centers_new.shape[1]
-        centers_new_ptr = &centers_new[0, 0]
-
-        # If the OpenMP runtime gives fewer threads than requested, the buffers
-        # of the missing threads stay NULL. The order of the threads is fixed,
-        # so that the result doesn't depend on the order in which they finish.
-        memset(&weight_in_clusters[0], 0, n_clusters * sizeof(floating))
-        for thread_idx in range(n_threads):
-            weight_in_clusters_chunk = weight_in_clusters_chunks[thread_idx]
-            if weight_in_clusters_chunk != NULL:
-                for i in range(n_clusters):
-                    weight_in_clusters[i] += weight_in_clusters_chunk[i]
-
-        # The sum over n_threads buffers of n_clusters * n_features values is
-        # done in parallel, by blocks that fit in the L1 cache. The team has
-        # n_threads threads even if there are fewer blocks: changing the size of
-        # the team from one parallel region to the next is slow.
-        n_blocks = (n_centers_values + REDUCE_BLOCK_SIZE - 1) // REDUCE_BLOCK_SIZE
-        for block_idx in prange(n_blocks, schedule='static', num_threads=n_threads):
-            start = block_idx * REDUCE_BLOCK_SIZE
-            end = min(start + REDUCE_BLOCK_SIZE, n_centers_values)
-            memset(&centers_new_ptr[start], 0, (end - start) * sizeof(floating))
-            for thread_idx in range(n_threads):
-                centers_new_chunk = centers_new_chunks[thread_idx]
-                if centers_new_chunk != NULL:
-                    for i in range(start, end):
-                        centers_new_ptr[i] += centers_new_chunk[i]
-
+    # The order of the threads is fixed, so that the result doesn't depend on
+    # the order in which they finish. If the OpenMP runtime gave fewer threads
+    # than requested, the buffers of the missing threads are still zero.
+    memset(&weight_in_clusters[0], 0, n_clusters * sizeof(floating))
     for thread_idx in range(n_threads):
-        free(centers_new_chunks[thread_idx])
-        free(weight_in_clusters_chunks[thread_idx])
-    free(centers_new_chunks)
-    free(weight_in_clusters_chunks)
+        thread_weights = &thread_buffers[thread_idx, n_center_values]
+        for cluster_idx in range(n_clusters):
+            weight_in_clusters[cluster_idx] += thread_weights[cluster_idx]
+            thread_weights[cluster_idx] = 0
+
+    # The sum over n_threads buffers of n_clusters * n_features values is done
+    # in parallel, by blocks that fit in the L1 cache. The team has n_threads
+    # threads even if there are fewer blocks: changing the size of the team from
+    # one parallel region to the next is slow. A single block is summed by the
+    # calling thread: waking the team would cost more than the sum.
+    for block_idx in prange(n_blocks, schedule='static', num_threads=n_threads,
+                            use_threads_if=n_blocks > 1):
+        start = block_idx * REDUCE_BLOCK_SIZE
+        end = min(start + REDUCE_BLOCK_SIZE, n_center_values)
+        # Number of cache lines of the block, rounded up
+        n_lines = (
+            (end - start + n_values_per_cache_line - 1) // n_values_per_cache_line)
+        memset(&centers_new_flat[start], 0, (end - start) * sizeof(floating))
+        for thread_idx in range(n_threads):
+            thread_centers = &thread_buffers[thread_idx, 0]
+            # Only the cache lines that hold non-zero values are zeroed: the
+            # others are not written back to memory, and the pages that the
+            # thread never wrote to stay unmapped, as after a calloc.
+            for line_idx in range(n_lines):
+                line_start = start + line_idx * n_values_per_cache_line
+                line_end = min(line_start + n_values_per_cache_line, end)
+                line_is_nonzero = 0
+                for value_idx in range(line_start, line_end):
+                    centers_new_flat[value_idx] += thread_centers[value_idx]
+                    line_is_nonzero = (
+                        line_is_nonzero | (thread_centers[value_idx] != 0))
+                if line_is_nonzero:
+                    memset(&thread_centers[line_start], 0,
+                           (line_end - line_start) * sizeof(floating))
 
 
 def _is_same_clustering(
