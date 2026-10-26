@@ -4,7 +4,7 @@
 import numpy as np
 from cython cimport floating
 from cython.parallel cimport parallel, prange
-from libc.math cimport INFINITY, sqrt
+from libc.math cimport sqrt
 from libc.stdlib cimport calloc, free
 from libc.string cimport memset
 
@@ -200,209 +200,317 @@ cdef inline floating _recompute_threshold(floating dummy) noexcept nogil:
 
 
 def _kmeans_plusplus_trials_dense(
-        const floating[:, ::1] X,                       # IN
-        const floating[::1] x_squared_norms,            # IN
-        const floating[::1] sample_weight,              # IN
-        const floating[:, ::1] candidates,              # IN
-        const floating[::1] candidates_squared_norms,   # IN
-        const floating[::1] closest_dist_sq,            # IN
-        floating[:, ::1] trials_dist_sq,                # OUT
-        double[:, ::1] trials_chunk_pot,                # OUT
+        const floating[:, ::1] X,                       # IN (n_samples, n_features)
+        const floating[::1] x_squared_norms,            # IN (n_samples,)
+        const floating[::1] sample_weight,              # IN (n_samples,)
+        const floating[:, ::1] candidates,              # IN (n_trials, n_features)
+        const floating[::1] candidates_squared_norms,   # IN (n_trials,)
+        const floating[::1] closest_dist_sq,            # IN (n_samples,)
+        floating[:, ::1] trials_dist_sq,                # OUT (n_trials, n_samples)
+        double[:, ::1] trials_chunk_potentials,         # OUT (n_trials, n_chunks)
         int n_threads):
     """Evaluate k-means++ candidate centers for dense input data.
 
-    For each candidate `j` and sample `i`, compute the squared distance from
-    sample `i` to its closest center if candidate `j` was added, i.e.
-    `trials_dist_sq[j, i] = min(closest_dist_sq[i], ||X[i] - candidates[j]||²)`.
+    The potential of a sample is its squared distance to the closest center,
+    weighted by `sample_weight`.
 
-    `trials_chunk_pot[j, chunk_idx]` is the sum of these distances weighted by
-    `sample_weight` over the chunk of `CHUNK_SIZE` samples `chunk_idx`. Summing
-    over the chunks gives the potential of each candidate, and the per-chunk
-    sums allow sampling the next candidates without a cumulative sum over all
-    the samples.
+    Each candidate is evaluated as a possible new center: with the candidate
+    `candidates[trial_idx]` added to the current centers, the closest center of
+    sample `X[sample_idx]` is either its current one or the candidate, whichever
+    is nearer. For each candidate, compute:
+
+    - `trials_dist_sq[trial_idx, sample_idx]`: the squared distance from the
+      sample to that closest center, i.e.
+      `min(closest_dist_sq[sample_idx], ||X[sample_idx] - candidates[trial_idx]||²)`,
+    - `trials_chunk_potentials[trial_idx]`: the sums of the corresponding
+      potentials over each chunk of `CHUNK_SIZE` samples.
+
+    Summing per chunk is the parallel part of the sum over all the samples:
+    each chunk is summed by a single thread, without synchronization, and the
+    caller finishes the sum over the chunks. The chunks have a fixed size,
+    so the result doesn't depend on the number of threads.
+    The caller uses these sums to:
+    - pick the candidate with the smallest potential
+      `trials_chunk_potentials[trial_idx].sum()`,
+    - sample the next candidates using a fast two-stage process (see
+      `_kmeans_plusplus_sample_candidates` for details).
     """
     cdef:
         int n_samples = X.shape[0]
         int n_features = X.shape[1]
         int n_trials = candidates.shape[0]
-        int n_chunks = trials_chunk_pot.shape[1]
+        int n_chunks = trials_chunk_potentials.shape[1]
         int chunk_size = CHUNK_SIZE
-        int ld_trials = trials_dist_sq.strides[0] // sizeof(floating)
+        # Number of elements between two rows of trials_dist_sq (the "leading
+        # dimension" of BLAS)
+        int trials_row_stride = trials_dist_sq.strides[0] // sizeof(floating)
         # Each thread processes a contiguous block of chunks with a single BLAS
         # call: many small concurrent BLAS calls scale badly with the number of
         # threads (at least with OpenBLAS).
         int n_blocks = min(n_threads, n_chunks)
-        int block_idx, first_chunk, last_chunk, chunk_idx, start, end, i, j
-        floating dist, norms
+        int block_idx, first_chunk, last_chunk, chunk_idx, start, end
+        int trial_idx, sample_idx
+        floating dist_sq, norms
         floating threshold = _recompute_threshold(<floating> 0)
-        double pot
+        double potential
 
     for block_idx in prange(n_blocks, nogil=True, num_threads=n_blocks,
                             schedule='static'):
+        # Samples X[start:end] of the chunks first_chunk to last_chunk - 1
         first_chunk = block_idx * n_chunks // n_blocks
         last_chunk = (block_idx + 1) * n_chunks // n_blocks
         start = first_chunk * chunk_size
         end = min(last_chunk * chunk_size, n_samples)
 
-        # trials_dist_sq[:, start:end] = -2 candidates.X[start:end].T
+        # trials_dist_sq[:, start:end] = -2 candidates @ X[start:end].T
         _gemm(RowMajor, NoTrans, Trans, n_trials, end - start, n_features,
               -2.0, &candidates[0, 0], n_features, &X[start, 0], n_features,
-              0.0, &trials_dist_sq[0, start], ld_trials)
+              0.0, &trials_dist_sq[0, start], trials_row_stride)
 
         for chunk_idx in range(first_chunk, last_chunk):
             start = chunk_idx * chunk_size
             end = min(start + chunk_size, n_samples)
-            for j in range(n_trials):
-                pot = 0.0
-                for i in range(start, end):
-                    norms = x_squared_norms[i] + candidates_squared_norms[j]
-                    dist = trials_dist_sq[j, i] + norms
-                    if dist < threshold * norms:
-                        dist = _euclidean_dense_dense(
-                            &X[i, 0], &candidates[j, 0], n_features, True)
-                    if closest_dist_sq[i] < dist:
-                        dist = closest_dist_sq[i]
-                    trials_dist_sq[j, i] = dist
-                    pot = pot + sample_weight[i] * dist
-                trials_chunk_pot[j, chunk_idx] = pot
+            for trial_idx in range(n_trials):
+                # potential = (
+                #     sample_weight * trials_dist_sq[trial_idx]
+                # )[start:end].sum()
+                potential = 0.0
+                for sample_idx in range(start, end):
+                    # dist_sq = ||x||² - 2 x.c + ||c||²
+                    norms = (x_squared_norms[sample_idx]
+                             + candidates_squared_norms[trial_idx])
+                    dist_sq = trials_dist_sq[trial_idx, sample_idx] + norms
+                    if dist_sq < threshold * norms:
+                        # Small squared distances computed this way can be
+                        # inaccurate because of catastrophic cancellation:
+                        # recompute these with the numerically safer but
+                        # slower sum of squared differences.
+                        dist_sq = _euclidean_dense_dense(
+                            &X[sample_idx, 0], &candidates[trial_idx, 0],
+                            n_features, True)
+                    # trials_dist_sq[trial_idx, sample_idx] = min(
+                    #     closest_dist_sq[sample_idx], dist_sq)
+                    if closest_dist_sq[sample_idx] < dist_sq:
+                        dist_sq = closest_dist_sq[sample_idx]
+                    trials_dist_sq[trial_idx, sample_idx] = dist_sq
+                    potential = potential + sample_weight[sample_idx] * dist_sq
+                trials_chunk_potentials[trial_idx, chunk_idx] = potential
+
+
+cdef inline int _lower_bound(
+        const int[::1] a, int lo, int hi, int value) noexcept nogil:
+    """First index of the sorted a[lo:hi] whose value is >= value, or hi."""
+    cdef int mid
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if a[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 def _kmeans_plusplus_trials_sparse(
-        X,                                              # IN
-        const floating[::1] x_squared_norms,            # IN
-        const floating[::1] sample_weight,              # IN
-        const floating[:, ::1] candidates,              # IN
-        const floating[::1] candidates_squared_norms,   # IN
-        const floating[::1] closest_dist_sq,            # IN
-        floating[:, ::1] trials_dist_sq,                # OUT
-        double[:, ::1] trials_chunk_pot,                # OUT
+        X,                                              # IN (n_samples, n_features)
+        X_csc,                                          # IN (n_samples, n_features)
+        const floating[::1] x_squared_norms,            # IN (n_samples,)
+        const floating[::1] sample_weight,              # IN (n_samples,)
+        const intp_t[::1] candidate_indices,            # IN (n_trials,)
+        const floating[:, ::1] candidates,              # IN (n_trials, n_features)
+        const floating[::1] candidates_squared_norms,   # IN (n_trials,)
+        const floating[::1] closest_dist_sq,            # IN (n_samples,)
+        floating[:, ::1] trials_dist_sq,                # OUT (n_trials, n_samples)
+        double[:, ::1] trials_chunk_potentials,         # OUT (n_trials, n_chunks)
         int n_threads):
     """Evaluate k-means++ candidate centers for sparse input data.
 
-    See `_kmeans_plusplus_trials_dense` for details.
+    `X` is in CSR format and `X_csc` is the same matrix in CSC format, with
+    sorted row indices. `candidates` are the rows `candidate_indices` of `X`, as a
+    dense array.
+
+    Same outputs, chunks and parallel split as `_kmeans_plusplus_trials_dense`
+    (see it for details). Only the computation of the distances differs:
+    `-2 candidates @ X.T` doesn't use BLAS, it reads the CSC columns of the
+    non-zeros of each candidate. And the small distances are recomputed from a
+    dense copy of the sample.
     """
     cdef:
         const floating[::1] X_data = X.data
         const int[::1] X_indices = X.indices
         const int[::1] X_indptr = X.indptr
+        const floating[::1] Xc_data = X_csc.data
+        const int[::1] Xc_indices = X_csc.indices
+        const int[::1] Xc_indptr = X_csc.indptr
 
         int n_samples = X.shape[0]
         int n_features = X.shape[1]
         int n_trials = candidates.shape[0]
-        int n_chunks = trials_chunk_pot.shape[1]
+        int n_chunks = trials_chunk_potentials.shape[1]
         int chunk_size = CHUNK_SIZE
-        int chunk_idx, start, end, i, j, k
-        floating dist, norms, c_k, diff
+        int n_blocks = min(n_threads, n_chunks)
+        int block_idx, first_chunk, last_chunk, chunk_idx, start, end
+        int trial_idx, sample_idx, k
+        int p, q, q_end, col
+        intp_t candidate_idx
+        floating dist_sq, norms, minus_2_c_k
         floating threshold = _recompute_threshold(<floating> 0)
+        double potential
         # Dense copy of a sample, for the direct computation of small distances
         floating *x_dense
 
-    with nogil, parallel(num_threads=min(n_threads, n_chunks)):
+    with nogil, parallel(num_threads=n_blocks):
         x_dense = <floating*> calloc(n_features, sizeof(floating))
 
-        for chunk_idx in prange(n_chunks, schedule='static'):
-            start = chunk_idx * chunk_size
-            end = min(start + chunk_size, n_samples)
-            for j in range(n_trials):
-                trials_chunk_pot[j, chunk_idx] = 0.0
-            for i in range(start, end):
-                for j in range(n_trials):
-                    # ||c||² + sum over the non-zeros of x of (x_k - c_k)² - c_k²
-                    dist = candidates_squared_norms[j]
-                    for k in range(X_indptr[i], X_indptr[i + 1]):
-                        c_k = candidates[j, X_indices[k]]
-                        diff = X_data[k] - c_k
-                        dist = dist + diff * diff - c_k * c_k
-                    norms = x_squared_norms[i] + candidates_squared_norms[j]
-                    if dist < threshold * norms:
-                        for k in range(X_indptr[i], X_indptr[i + 1]):
-                            x_dense[X_indices[k]] = x_dense[X_indices[k]] + X_data[k]
-                        dist = _euclidean_dense_dense(
-                            x_dense, &candidates[j, 0], n_features, True)
-                        for k in range(X_indptr[i], X_indptr[i + 1]):
-                            x_dense[X_indices[k]] = 0.0
-                    if closest_dist_sq[i] < dist:
-                        dist = closest_dist_sq[i]
-                    trials_dist_sq[j, i] = dist
-                    trials_chunk_pot[j, chunk_idx] = (
-                        trials_chunk_pot[j, chunk_idx] + sample_weight[i] * dist)
+        for block_idx in prange(n_blocks, schedule='static'):
+            # Samples X[start:end] of the chunks first_chunk to last_chunk - 1
+            first_chunk = block_idx * n_chunks // n_blocks
+            last_chunk = (block_idx + 1) * n_chunks // n_blocks
+            start = first_chunk * chunk_size
+            end = min(last_chunk * chunk_size, n_samples)
+
+            # trials_dist_sq[:, start:end] = -2 candidates @ X[start:end].T. The
+            # candidates are rows of X, so they are sparse too: only the columns
+            # of their non-zeros are read, which is much less work than a pass
+            # over all the non-zeros of X[start:end] per candidate.
+            for trial_idx in range(n_trials):
+                for sample_idx in range(start, end):
+                    trials_dist_sq[trial_idx, sample_idx] = 0.0
+                candidate_idx = candidate_indices[trial_idx]
+                for p in range(X_indptr[candidate_idx], X_indptr[candidate_idx + 1]):
+                    # trials_dist_sq[trial_idx, start:end] += (
+                    #     -2 c_k * X[start:end, col])
+                    col = X_indices[p]
+                    minus_2_c_k = -2 * X_data[p]
+                    q_end = Xc_indptr[col + 1]
+                    q = _lower_bound(Xc_indices, Xc_indptr[col], q_end, start)
+                    while q < q_end and Xc_indices[q] < end:
+                        sample_idx = Xc_indices[q]
+                        trials_dist_sq[trial_idx, sample_idx] = (
+                            trials_dist_sq[trial_idx, sample_idx]
+                            + minus_2_c_k * Xc_data[q])
+                        q = q + 1
+
+            for chunk_idx in range(first_chunk, last_chunk):
+                start = chunk_idx * chunk_size
+                end = min(start + chunk_size, n_samples)
+                for trial_idx in range(n_trials):
+                    # potential = (
+                    #     sample_weight * trials_dist_sq[trial_idx]
+                    # )[start:end].sum()
+                    potential = 0.0
+                    for sample_idx in range(start, end):
+                        # dist_sq = ||x||² - 2 x.c + ||c||²
+                        norms = (x_squared_norms[sample_idx]
+                                 + candidates_squared_norms[trial_idx])
+                        dist_sq = trials_dist_sq[trial_idx, sample_idx] + norms
+                        if dist_sq < threshold * norms:
+                            # Small squared distances computed this way can be
+                            # inaccurate because of catastrophic cancellation:
+                            # recompute these with the numerically safer but
+                            # slower sum of squared differences with
+                            # x_dense = X[sample_idx].toarray()
+                            for k in range(X_indptr[sample_idx],
+                                           X_indptr[sample_idx + 1]):
+                                x_dense[X_indices[k]] = X_data[k]
+                            dist_sq = _euclidean_dense_dense(
+                                x_dense, &candidates[trial_idx, 0], n_features, True)
+                            # Reset x_dense to zeros for the next sample
+                            for k in range(X_indptr[sample_idx],
+                                           X_indptr[sample_idx + 1]):
+                                x_dense[X_indices[k]] = 0.0
+                        # trials_dist_sq[trial_idx, sample_idx] = min(
+                        #     closest_dist_sq[sample_idx], dist_sq)
+                        if closest_dist_sq[sample_idx] < dist_sq:
+                            dist_sq = closest_dist_sq[sample_idx]
+                        trials_dist_sq[trial_idx, sample_idx] = dist_sq
+                        potential = potential + sample_weight[sample_idx] * dist_sq
+                    trials_chunk_potentials[trial_idx, chunk_idx] = potential
 
         free(x_dense)
 
 
 def _kmeans_plusplus_sample_candidates(
-        const double[::1] rand_vals,            # IN
-        const double[::1] chunk_pot,            # IN
-        const floating[::1] closest_dist_sq,    # IN
-        const floating[::1] sample_weight,      # IN
-        intp_t[::1] candidate_ids):             # OUT
+        random_state,                           # IN
+        const double[::1] chunk_potentials,     # IN (n_chunks,)
+        const floating[::1] closest_dist_sq,    # IN (n_samples,)
+        const floating[::1] sample_weight,      # IN (n_samples,)
+        intp_t[::1] candidate_indices):         # OUT (n_trials,)
     """Sample k-means++ candidate centers.
 
-    The probability of a sample is proportional to its weighted squared
-    distance to the closest center. For each value of `rand_vals`, drawn
-    uniformly in [0, 1), a chunk of `CHUNK_SIZE` samples is first sampled from
-    the potentials per chunk, then a sample within that chunk.
+    The probability of a sample is proportional to its potential, i.e. its weighted
+    squared distance to the closest center
+    `sample_weight[sample_idx] * closest_dist_sq[sample_idx]`.
+
+    For each candidate, using a `random_potential` drawn uniformly in
+    [0, total potential) from `random_state`:
+
+    - first, a chunk is chosen with probability proportional to the chunk's
+      own potential (the sum of the potentials of its samples), i.e.::
+
+          chunk_idx = np.searchsorted(np.cumsum(chunk_potentials), random_potential)
+
+    - then, a sample of that chunk is chosen with probability proportional to
+      its potential, i.e.::
+
+          candidate_idx = chunk_start + np.searchsorted(
+              np.cumsum(sample_potentials[chunk_start:chunk_end]),
+              random_potential - chunk_potentials[:chunk_idx].sum(),
+          )
+
+    This picks the same samples as a search in the cumulative sum of the
+    potentials of all the samples (up to rounding errors), but only computes
+    the cumulative sums of `n_chunks + CHUNK_SIZE` values. Unlike the numpy
+    code above, a sample with a zero potential is never picked, even with
+    rounding errors.
     """
     cdef:
-        const double[::1] chunk_pot_cumsum = np.cumsum(chunk_pot)
+        const double[::1] chunk_potentials_cumsum = np.cumsum(chunk_potentials)
         int n_samples = closest_dist_sq.shape[0]
-        int n_chunks = chunk_pot.shape[0]
-        int n_candidates = rand_vals.shape[0]
+        int n_chunks = chunk_potentials.shape[0]
+        int n_trials = candidate_indices.shape[0]
+        # Drawn uniformly in [0, total potential)
+        const double[::1] random_potentials = (
+            random_state.uniform(size=n_trials)
+            * chunk_potentials_cumsum[n_chunks - 1])
         int chunk_size = CHUNK_SIZE
-        int j, chunk_idx, lo, hi, start, end, i
-        intp_t candidate
-        double rand_val, cumsum, pot
+        int trial_idx, chunk_idx, lo, hi, start, end, sample_idx
+        intp_t candidate_idx
+        double random_potential, potential_cumsum, potential
 
     with nogil:
-        for j in range(n_candidates):
-            rand_val = rand_vals[j] * chunk_pot_cumsum[n_chunks - 1]
+        for trial_idx in range(n_trials):
+            random_potential = random_potentials[trial_idx]
 
-            # First chunk whose cumulative potential reaches rand_val
+            # Find the index of the first chunk whose cumulative potential
+            # reaches random_potential.
             lo, hi = 0, n_chunks - 1
             while lo < hi:
                 chunk_idx = (lo + hi) // 2
-                if chunk_pot_cumsum[chunk_idx] < rand_val:
+                if chunk_potentials_cumsum[chunk_idx] < random_potential:
                     lo = chunk_idx + 1
                 else:
                     hi = chunk_idx
-            if lo > 0:
-                rand_val -= chunk_pot_cumsum[lo - 1]
+            chunk_idx = lo
 
-            # First sample of the chunk with a positive potential whose cumulative
-            # potential reaches rand_val. Rounding errors can make rand_val larger
-            # than the potential of the chunk: then take its last sample with a
-            # positive potential.
-            start = lo * chunk_size
+            if chunk_idx > 0:
+                random_potential -= chunk_potentials_cumsum[chunk_idx - 1]
+
+            # Find the first sample of the chunk with a non-zero potential whose
+            # cumulative potential reaches random_potential. Rounding errors can
+            # make random_potential larger than the potential of the chunk: then
+            # take its last sample with a non-zero potential.
+            start = chunk_idx * chunk_size
             end = min(start + chunk_size, n_samples)
-            candidate = start
-            cumsum = 0.0
-            for i in range(start, end):
-                pot = sample_weight[i] * closest_dist_sq[i]
-                if pot > 0:
-                    candidate = i
-                    cumsum += pot
-                    if cumsum >= rand_val:
+            candidate_idx = start
+            potential_cumsum = 0.0
+            for sample_idx in range(start, end):
+                potential = sample_weight[sample_idx] * closest_dist_sq[sample_idx]
+                if potential > 0:
+                    candidate_idx = sample_idx
+                    potential_cumsum += potential
+                    if potential_cumsum >= random_potential:
                         break
-            candidate_ids[j] = candidate
-
-
-def _kmeans_plusplus_best_candidate(const double[:, ::1] trials_chunk_pot):
-    """Index of the k-means++ candidate with the smallest potential."""
-    cdef:
-        int n_trials = trials_chunk_pot.shape[0]
-        int n_chunks = trials_chunk_pot.shape[1]
-        int best = 0
-        int j, chunk_idx
-        double pot, best_pot = INFINITY
-
-    with nogil:
-        for j in range(n_trials):
-            pot = 0.0
-            for chunk_idx in range(n_chunks):
-                pot += trials_chunk_pot[j, chunk_idx]
-            if pot < best_pot:
-                best, best_pot = j, pot
-    return best
+            candidate_indices[trial_idx] = candidate_idx
 
 
 cpdef void _relocate_empty_clusters_dense(
