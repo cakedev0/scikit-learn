@@ -966,20 +966,31 @@ class LinearModelLoss:
         return grad, hessp
 
 
-def _column_mean_var(X, sample_weight=None):
-    """Weighted mean and variance of the columns of X, without copying X."""
+def _column_mean_var(X, sample_weight=None, max_dense_samples=10_000):
+    """Weighted mean and variance of the columns of X, without copying X.
+
+    For dense X, they are estimated on at most `max_dense_samples` evenly spaced
+    rows: the single-threaded pass over all of X can cost more than a few L-BFGS
+    iterations, and a reparametrization only needs rough values.
+    """
     if sparse.issparse(X):
         mean, var = mean_variance_axis(X, axis=0, weights=sample_weight)
         return mean.astype(np.float64), var.astype(np.float64)
     n_samples, n_features = X.shape
-    sw = np.ones(n_samples) if sample_weight is None else sample_weight
-    sw_sum = np.sum(sw)
-    mean = (sw @ X) / sw_sum
+    # sw has the dtype of X, so that sw @ X doesn't cast X to float64.
+    sw = np.ones(n_samples, dtype=X.dtype) if sample_weight is None else sample_weight
+    step = -(-n_samples // max_dense_samples)  # ceil division
+    X, sw = X[::step], sw[::step]
+    sw_sum = np.sum(sw, dtype=np.float64)
+    if sw_sum == 0:
+        # Only zero weights in the subsample: no reparametrization.
+        return np.zeros(n_features), np.zeros(n_features)
+    mean = (sw @ X).astype(np.float64) / sw_sum
     var = np.zeros(n_features)
     # Batches of ~1M elements, so the temporary (X - mean) ** 2 stays small.
-    for batch in gen_batches(n_samples, max(1, 2**20 // max(n_features, 1))):
+    for batch in gen_batches(X.shape[0], max(1, 2**20 // max(n_features, 1))):
         var += sw[batch] @ (X[batch] - mean) ** 2
-    return mean.astype(np.float64), var / sw_sum
+    return mean, var / sw_sum
 
 
 class _LBFGSReparametrization:
@@ -991,9 +1002,10 @@ class _LBFGSReparametrization:
     can overflow the loss, which scipy's L-BFGS-B then reports as converged.
     It optimizes over ``v = s * coef`` and ``c = intercept + coef @ m``
     instead, with ``m`` the column means (only with an intercept) and
-    ``s = max(1, std)``. Only large columns are shrunk: scaling up near-constant
-    columns makes the penalty badly conditioned. The penalty stays on ``coef``,
-    so the minimizer doesn't change.
+    ``s = max(1, std)``, estimated on a subsample of the rows for dense X. Only
+    large columns are shrunk: scaling up near-constant columns makes the
+    penalty badly conditioned. The penalty stays on ``coef``, so the minimizer
+    doesn't change, whatever the values of ``m`` and ``s``.
 
     L-BFGS-B's gtol applies to the gradient w.r.t. ``(v, c)``. ``gtol(tol)``
     keeps ``max |gradient| <= tol`` for ``coef`` without an intercept. With an
@@ -1045,11 +1057,14 @@ class _LBFGSReparametrization:
 
     def from_internal(self, params):
         """(v, c) -> (coef, intercept)"""
-        coef = self._as_2d(params).astype(np.float64, copy=True)
+        params_2d = self._as_2d(params)
+        # empty_like keeps the F order of multiclass params, so that _like and
+        # LinearModelLoss only take views of coef.
+        coef = np.empty_like(params_2d, dtype=np.float64)
         weights = coef[:, : self.n_features]
-        weights /= self.scale
+        np.divide(params_2d[:, : self.n_features], self.scale, out=weights)
         if self.linear_loss.fit_intercept:
-            coef[:, -1] -= weights @ self.mean
+            coef[:, -1] = params_2d[:, -1] - weights @ self.mean
         return self._like(coef, params)
 
     def loss_gradient(self, params, *args, **kwargs):
@@ -1057,12 +1072,13 @@ class _LBFGSReparametrization:
         loss, gradient = self.linear_loss.loss_gradient(
             self.from_internal(params), *args, **kwargs
         )
-        gradient_2d = self._as_2d(gradient).copy()
+        # gradient is a new array: update it in place, in its own memory order.
+        gradient_2d = self._as_2d(gradient)
         weights_gradient = gradient_2d[:, : self.n_features]
         if self.linear_loss.fit_intercept:
             weights_gradient -= gradient_2d[:, -1:] * self.mean
         weights_gradient /= self.scale
-        return loss, self._like(gradient_2d, gradient)
+        return loss, gradient
 
 
 class Multinomial_LDL_Decomposition:

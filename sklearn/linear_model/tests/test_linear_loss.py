@@ -20,6 +20,7 @@ from sklearn.datasets import make_low_rank_matrix
 from sklearn.linear_model._linear_loss import (
     LinearModelLoss,
     Multinomial_LDL_Decomposition,
+    _column_mean_var,
     _LBFGSReparametrization,
 )
 from sklearn.utils.extmath import squared_norm
@@ -801,3 +802,22 @@ def test_lbfgs_reparametrization(
         [reparametrization.from_internal(e) for e in np.eye(params.shape[0])]
     )
     assert_allclose(gradient, A.T @ expected_gradient, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_column_mean_var_subsample(dtype, global_random_seed):
+    """On dense X, _column_mean_var estimates the mean and variance on a subsample."""
+    rng = np.random.RandomState(global_random_seed)
+    X = (rng.normal(size=(25_000, 3)) * [1, 30, 0.01] + [0, 1e4, 2]).astype(dtype)
+    sample_weight = rng.uniform(0.5, 2, size=X.shape[0]).astype(dtype)
+    mean, var = _column_mean_var(X, sample_weight, max_dense_samples=5_000)
+    expected_mean = np.average(X, axis=0, weights=sample_weight)
+    expected_var = np.average((X - expected_mean) ** 2, axis=0, weights=sample_weight)
+    assert_allclose((mean - expected_mean) / np.sqrt(expected_var), 0, atol=0.1)
+    assert_allclose(var, expected_var, rtol=0.1)
+
+    # Only zero weights in the subsample: no centering and no scaling.
+    sample_weight[::5] = 0
+    mean, var = _column_mean_var(X, sample_weight, max_dense_samples=5_000)
+    assert_allclose(mean, 0)
+    assert_allclose(var, 0)
