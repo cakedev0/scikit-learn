@@ -8,6 +8,8 @@ from sklearn.utils.arrayfuncs import (
     _all_with_any_reduction_axis_1,
     _ascontiguousarray,
     _asfortranarray,
+    _center,
+    _mean_variance,
     min_pos,
 )
 
@@ -124,3 +126,52 @@ def test_change_memory_order_small_input(monkeypatch, convert, order):
     X = np.asarray(rng.uniform(size=(25, 10)), order=order)
     assert_array_equal(convert(X, 8), X)
     assert calls == [5]
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+# One chunk of rows, several chunks with a partial last one
+@pytest.mark.parametrize("shape", [(5, 3), (1, 50), (1000, 7), (600, 70)])
+def test_mean_variance(monkeypatch, dtype, shape):
+    """Check _mean_variance against numpy, also far from the origin."""
+    # Parallel even for these small inputs
+    monkeypatch.setattr(arrayfuncs, "_PARALLEL_MIN_SIZE", 0)
+    monkeypatch.setattr(arrayfuncs, "_MIN_SIZE_PER_THREAD", 1)
+    rng = np.random.RandomState(0)
+    X = (rng.uniform(size=shape) + 1e4).astype(dtype)
+    X[:, 0] = 1e4  # constant column
+    X_64 = X.astype(np.float64)
+
+    results = [_mean_variance(X, n_threads) for n_threads in [1, 3, 8]]
+
+    mean, var = results[0]
+    assert mean.dtype == var.dtype == np.float64
+    assert_allclose(mean, X_64.mean(axis=0), rtol=1e-12)
+    assert_allclose(var, X_64.var(axis=0), rtol=1e-9, atol=1e-12)
+    assert var[0] == 0
+    # The result doesn't depend on the number of threads
+    for other_mean, other_var in results[1:]:
+        assert_array_equal(other_mean, mean)
+        assert_array_equal(other_var, var)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("copy", [True, False])
+@pytest.mark.parametrize("n_threads", [1, 3, 8])
+def test_center(monkeypatch, dtype, copy, n_threads):
+    """Check that _center subtracts the mean, in place or not."""
+    monkeypatch.setattr(arrayfuncs, "_PARALLEL_MIN_SIZE", 0)
+    monkeypatch.setattr(arrayfuncs, "_MIN_SIZE_PER_THREAD", 1)
+    rng = np.random.RandomState(0)
+    X_orig = (rng.uniform(size=(300, 7)) + 1e4).astype(dtype)
+    mean = X_orig.mean(axis=0)
+    X = X_orig.copy()
+
+    X_centered = _center(X, mean, n_threads, copy=copy)
+
+    assert X_centered.dtype == dtype
+    assert X_centered.flags.c_contiguous
+    assert_array_equal(X_centered, X_orig - mean)
+    if copy:
+        assert_array_equal(X, X_orig)
+    else:
+        assert X_centered is X

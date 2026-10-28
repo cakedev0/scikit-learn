@@ -31,6 +31,11 @@ cdef intp_t TILE_SIZE = 32
 _PARALLEL_MIN_SIZE = 500_000
 _MIN_SIZE_PER_THREAD = 50_000
 
+# Rows per chunk of the column sums of _mean_variance: the sums don't depend on
+# the number of threads, and the float64 sums of all the chunks take less than 2%
+# of the memory of X.
+cdef intp_t MEAN_VARIANCE_CHUNK_SIZE = 256
+
 
 def min_pos(const floating[:] X):
     """Find the minimum value of an array over positive values.
@@ -207,3 +212,102 @@ def _transpose_copy(
         for col in range(col_start, col_end):
             for row in range(row_start, row_end):
                 X_out[col, row] = X[row, col]
+
+
+def _n_threads_for_size(X, int n_threads):
+    """Number of threads for a pass over the values of X, at least 1."""
+    if X.size < _PARALLEL_MIN_SIZE:
+        return 1
+    return max(1, min(n_threads, X.size // _MIN_SIZE_PER_THREAD))
+
+
+def _mean_variance(X, int n_threads):
+    """Return the mean and the variance of the columns of X in float64.
+
+    Same result as `X.mean(axis=0)` and `X.var(axis=0)` computed in float64,
+    up to rounding, in a single pass over X with n_threads threads. The sums
+    are accumulated by fixed chunks of rows, so that the result doesn't depend
+    on n_threads, and on the deviations from the first row of X, so that the
+    variance doesn't cancel out when X is far from the origin.
+
+    X must be a C-contiguous 2D array of float32 or float64, with at least one
+    row.
+    """
+    n_threads = _n_threads_for_size(X, n_threads)
+    n_samples = X.shape[0]
+    n_chunks = (n_samples + MEAN_VARIANCE_CHUNK_SIZE - 1) // MEAN_VARIANCE_CHUNK_SIZE
+    chunk_sums = np.empty((n_chunks, X.shape[1]), dtype=np.float64)
+    chunk_sq_sums = np.empty((n_chunks, X.shape[1]), dtype=np.float64)
+    _chunk_deviation_sums(X, chunk_sums, chunk_sq_sums, n_threads)
+
+    deviation_mean = chunk_sums.sum(axis=0) / n_samples
+    mean = X[0].astype(np.float64) + deviation_mean
+    # Can be slightly negative because of rounding errors for constant columns
+    var = np.maximum(chunk_sq_sums.sum(axis=0) / n_samples - deviation_mean**2, 0)
+    return mean, var
+
+
+def _center(X, mean, int n_threads, bint copy):
+    """Return X - mean, using n_threads threads.
+
+    Same result as `X - mean` if `copy` is True, or `X -= mean` if `copy` is
+    False (X is then modified and returned).
+
+    X must be a C-contiguous 2D array of float32 or float64, and mean a 1D
+    array of the same dtype.
+    """
+    n_threads = _n_threads_for_size(X, n_threads)
+    # A copy is first written by the threads rather than by the main thread: its
+    # memory is spread over their NUMA nodes
+    X_out = np.empty_like(X) if copy else X
+    _subtract_row(X, mean, X_out, n_threads)
+    return X_out
+
+
+def _chunk_deviation_sums(
+    const floating[:, ::1] X,  # IN
+    double[:, ::1] chunk_sums,  # OUT
+    double[:, ::1] chunk_sq_sums,  # OUT
+    int n_threads,
+):
+    """Sums of X - X[0] and of its square over each chunk of MEAN_VARIANCE_CHUNK_SIZE rows.
+
+    chunk_sums[c] = (X[rows] - X[0]).sum(axis=0)
+    chunk_sq_sums[c] = ((X[rows] - X[0]) ** 2).sum(axis=0)
+    with rows = c * MEAN_VARIANCE_CHUNK_SIZE, ..., (c + 1) * MEAN_VARIANCE_CHUNK_SIZE - 1
+    """
+    cdef:
+        intp_t n_rows = X.shape[0]
+        intp_t n_cols = X.shape[1]
+        intp_t chunk, row, col
+        double deviation
+
+    for chunk in prange(chunk_sums.shape[0], nogil=True, num_threads=n_threads,
+                        schedule='static'):
+        for col in range(n_cols):
+            chunk_sums[chunk, col] = 0
+            chunk_sq_sums[chunk, col] = 0
+        for row in range(chunk * MEAN_VARIANCE_CHUNK_SIZE,
+                         min((chunk + 1) * MEAN_VARIANCE_CHUNK_SIZE, n_rows)):
+            for col in range(n_cols):
+                deviation = <double> X[row, col] - X[0, col]
+                chunk_sums[chunk, col] += deviation
+                chunk_sq_sums[chunk, col] += deviation * deviation
+
+
+def _subtract_row(
+    const floating[:, ::1] X,  # IN
+    const floating[::1] values,  # IN
+    floating[:, ::1] X_out,  # OUT, can be X
+    int n_threads,
+):
+    """X_out = X - values"""
+    cdef:
+        intp_t n_rows = X.shape[0]
+        intp_t n_cols = X.shape[1]
+        intp_t row, col
+
+    for row in prange(n_rows, nogil=True, num_threads=n_threads,
+                      schedule='static'):
+        for col in range(n_cols):
+            X_out[row, col] = X[row, col] - values[col]
