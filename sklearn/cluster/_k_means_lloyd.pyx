@@ -29,7 +29,8 @@ def lloyd_iter_chunked_dense(
         int[::1] labels,                     # OUT
         floating[::1] center_shift,          # OUT
         int n_threads,
-        bint update_centers=True):
+        bint update_centers=True,
+        const floating[::1] shift=None):
     """Single iteration of K-means lloyd algorithm with dense input.
 
     Update labels and centers (inplace), for one iteration, distributed
@@ -72,6 +73,14 @@ def lloyd_iter_chunked_dense(
         - If False, only the labels will be computed, i.e runs the E-step of
           the algorithm. This is useful especially when calling predict on a
           fitted model.
+
+    shift : ndarray of shape (n_features,), dtype=floating, default=None
+        If not None, compute the labels of `X - shift` without materializing
+        it: each chunk is shifted into a thread local buffer. `centers_old`
+        must then be relative to `shift` too. Shifting by a point close to the
+        data avoids the catastrophic cancellation of ||C||² - 2 X.C^T when X
+        is far from the origin. Must be None if `update_centers` is True (the
+        relocation of empty clusters uses the unshifted X).
     """
     cdef:
         int n_samples = X.shape[0]
@@ -101,8 +110,13 @@ def lloyd_iter_chunked_dense(
         floating *centers_new_chunk
         floating *weight_in_clusters_chunk
         floating *pairwise_distances_chunk
+        floating *X_shifted_chunk = NULL
+        const floating *shift_ptr = NULL
 
         omp_lock_t lock
+
+    if shift is not None:
+        shift_ptr = &shift[0]
 
     # count remainder chunk in total number of chunks
     n_chunks += n_samples != n_chunks * n_samples_chunk
@@ -120,6 +134,8 @@ def lloyd_iter_chunked_dense(
         centers_new_chunk = <floating*> calloc(n_clusters * n_features, sizeof(floating))
         weight_in_clusters_chunk = <floating*> calloc(n_clusters, sizeof(floating))
         pairwise_distances_chunk = <floating*> malloc(n_samples_chunk * n_clusters * sizeof(floating))
+        if shift_ptr != NULL:
+            X_shifted_chunk = <floating*> malloc(n_samples_chunk * n_features * sizeof(floating))
 
         for chunk_idx in prange(n_chunks, schedule='static'):
             start = chunk_idx * n_samples_chunk
@@ -137,7 +153,9 @@ def lloyd_iter_chunked_dense(
                 centers_new_chunk,
                 weight_in_clusters_chunk,
                 pairwise_distances_chunk,
-                update_centers)
+                update_centers,
+                shift_ptr,
+                X_shifted_chunk)
 
         # reduction from local buffers.
         if update_centers:
@@ -154,6 +172,7 @@ def lloyd_iter_chunked_dense(
         free(centers_new_chunk)
         free(weight_in_clusters_chunk)
         free(pairwise_distances_chunk)
+        free(X_shifted_chunk)
 
     if update_centers:
         omp_destroy_lock(&lock)
@@ -174,11 +193,13 @@ cdef void _update_chunk_dense(
         floating *centers_new,                      # OUT
         floating *weight_in_clusters,               # OUT
         floating *pairwise_distances,               # OUT
-        bint update_centers) noexcept nogil:
+        bint update_centers,
+        const floating *shift,                      # IN, or NULL
+        floating *X_shifted) noexcept nogil:        # BUFFER, unused if no shift
     """K-means combined EM step for one dense data chunk.
 
     Compute the partial contribution of a single data chunk to the labels and
-    centers.
+    centers. If `shift` is not NULL, the labels are the ones of `X - shift`.
     """
     cdef:
         int n_samples = labels.shape[0]
@@ -187,6 +208,14 @@ cdef void _update_chunk_dense(
 
         floating sq_dist, min_sq_dist
         int i, j, k, label
+        const floating *X_chunk = &X[0, 0]
+
+    if shift != NULL:
+        # X_shifted = X - shift
+        for i in range(n_samples):
+            for k in range(n_features):
+                X_shifted[i * n_features + k] = X[i, k] - shift[k]
+        X_chunk = X_shifted
 
     # Instead of computing the full pairwise squared distances matrix,
     # ||X - C||² = ||X||² - 2 X.C^T + ||C||², we only need to store
@@ -199,7 +228,7 @@ cdef void _update_chunk_dense(
 
     # pairwise_distances += -2 * X.dot(C.T)
     _gemm(RowMajor, NoTrans, Trans, n_samples, n_clusters, n_features,
-          -2.0, &X[0, 0], n_features, &centers_old[0, 0], n_features,
+          -2.0, X_chunk, n_features, &centers_old[0, 0], n_features,
           1.0, pairwise_distances, n_clusters)
 
     for i in range(n_samples):
