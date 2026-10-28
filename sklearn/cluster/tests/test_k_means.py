@@ -1,5 +1,6 @@
 """Testing for K-means"""
 
+import copy
 import re
 import sys
 from io import StringIO
@@ -25,6 +26,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import pairwise_distances, pairwise_distances_argmin
 from sklearn.metrics.cluster import v_measure_score
 from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.utils import arrayfuncs
 from sklearn.utils._testing import (
     assert_allclose,
     assert_array_equal,
@@ -595,6 +597,65 @@ def test_minibatch_iter_steps():
     assert km.n_iter_ == 10
     assert km.n_steps_ == (10 * n_samples) // batch_size
     assert isinstance(km.n_steps_, int)
+
+
+@pytest.mark.parametrize(
+    "make_input",
+    [
+        lambda X: X,
+        lambda X: X[10:],
+        lambda X: np.asfortranarray(X),
+        lambda X: X.astype(np.float32),
+        lambda X: X.tolist(),
+    ],
+    ids=["array", "view", "fortran", "float32", "list"],
+)
+@pytest.mark.parametrize("offset", [0, 1e3])
+def test_kmeans_copyx_true_input_not_modified(monkeypatch, make_input, offset):
+    # Check that fit doesn't modify X with copy_x=True, whether it is centered
+    # (offset=1e3) or not, and whether the validation already copies it or not.
+    monkeypatch.setattr(arrayfuncs, "_PARALLEL_MIN_SIZE", 0)
+    monkeypatch.setattr(arrayfuncs, "_MIN_SIZE_PER_THREAD", 1)
+    X_input = make_input(X - X.mean(axis=0) + offset)
+    X_input_copy = copy.deepcopy(X_input)
+
+    km = KMeans(n_clusters=n_clusters, n_init=1, random_state=0).fit(X_input)
+
+    assert_array_equal(np.asarray(X_input), np.asarray(X_input_copy))
+    expected = KMeans(n_clusters=n_clusters, n_init=1, random_state=0).fit(
+        np.asarray(X_input_copy)
+    )
+    assert_array_equal(km.labels_, expected.labels_)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("offset", [0, 1e3])
+def test_kmeans_tol_scaled_by_mean_feature_variance(dtype, offset):
+    # Check that the tolerance is tol times the mean variance of the features,
+    # whether X is centered by fit (offset=1e3) or not.
+    X_shifted = (X - X.mean(axis=0) + offset).astype(dtype)
+    km = KMeans(n_clusters=n_clusters, tol=1e-3, random_state=0).fit(X_shifted)
+
+    expected = 1e-3 * np.var(X_shifted.astype(np.float64), axis=0).mean()
+    assert km._tol == pytest.approx(expected, rel=1e-6)
+
+
+def test_kmeans_float32_far_from_origin():
+    # Check that fit gives the same clustering on float32 data far from the
+    # origin compared to its spread (here GPS coordinates) as on the same data
+    # centered beforehand.
+    rng = np.random.RandomState(0)
+    hubs = np.array([48.86, 2.35]) + rng.normal(scale=0.05, size=(10, 2))
+    X = hubs[rng.randint(10, size=2000)] + rng.normal(scale=0.003, size=(2000, 2))
+    X = X.astype(np.float32)
+    init = X[:10]
+
+    km = KMeans(n_clusters=10, init=init, n_init=1).fit(X)
+
+    X_mean = X.mean(axis=0)
+    km_centered = KMeans(n_clusters=10, init=init - X_mean, n_init=1).fit(X - X_mean)
+    assert_array_equal(km.labels_, km_centered.labels_)
+    assert_allclose(km.cluster_centers_, km_centered.cluster_centers_ + X_mean)
 
 
 def test_kmeans_copyx():

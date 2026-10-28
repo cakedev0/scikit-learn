@@ -42,6 +42,7 @@ from sklearn.metrics.pairwise import _euclidean_distances, euclidean_distances
 from sklearn.utils import check_array, check_random_state
 from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils._param_validation import Interval, StrOptions, validate_params
+from sklearn.utils.arrayfuncs import _center, _mean_variance
 from sklearn.utils.extmath import row_norms
 from sklearn.utils.parallel import (
     _get_threadpool_controller,
@@ -869,9 +870,6 @@ class _BaseKMeans(
                 f"n_samples={X.shape[0]} should be >= n_clusters={self.n_clusters}."
             )
 
-        # tol
-        self._tol = _tolerance(X, self.tol)
-
         # n-init
         if self.n_init == "auto":
             if isinstance(self.init, str) and self.init == "k-means++":
@@ -1444,13 +1442,16 @@ class KMeans(_BaseKMeans):
         self : object
             Fitted estimator.
         """
+        X_input = X
+        # Dense X is copied, if needed, only when it is centered below. Sparse X
+        # is never modified.
         X = validate_data(
             self,
             X,
             accept_sparse="csr",
             dtype=[np.float64, np.float32],
             order="C",
-            copy=self.copy_x,
+            copy=False,
             accept_large_sparse=False,
         )
 
@@ -1467,14 +1468,28 @@ class KMeans(_BaseKMeans):
             init = check_array(init, dtype=X.dtype, copy=True, order="C")
             self._validate_center_shape(X, init)
 
-        # subtract of mean of x for more accurate distance computations
-        if not sp.issparse(X):
-            X_mean = X.mean(axis=0)
-            # The copy was already done above
-            X -= X_mean
-
-            if init_is_array_like:
-                init -= X_mean
+        # Squared distances computed as ||x||² - 2 x.c + ||c||² lose precision
+        # when X is far from the origin compared to its spread. Subtract the
+        # mean of X when its squared norm is larger than the total variance:
+        # below, the rounding errors are about the same as for centered data.
+        X_mean = None
+        if sp.issparse(X):
+            self._tol = _tolerance(X, self.tol)
+        else:
+            mean, var = _mean_variance(X, self._n_threads)
+            self._tol = self.tol * var.mean()
+            if mean @ mean > var.sum():
+                X_mean = mean.astype(X.dtype)
+                # Copy X only if the validation didn't already, like
+                # check_array(copy=True) does
+                X = _center(
+                    X,
+                    X_mean,
+                    self._n_threads,
+                    copy=self.copy_x and np.may_share_memory(X, X_input),
+                )
+                if init_is_array_like:
+                    init -= X_mean
 
         # precompute squared norms of data points
         x_squared_norms = row_norms(X, squared=True)
@@ -1524,7 +1539,7 @@ class KMeans(_BaseKMeans):
                 best_inertia = inertia
                 best_n_iter = n_iter_
 
-        if not sp.issparse(X):
+        if X_mean is not None:
             if not self.copy_x:
                 X += X_mean
             best_centers += X_mean
@@ -1910,6 +1925,8 @@ class MiniBatchKMeans(_BaseKMeans):
 
     def _check_params_vs_input(self, X):
         super()._check_params_vs_input(X, default_n_init=3)
+
+        self._tol = _tolerance(X, self.tol)
 
         self._batch_size = min(self.batch_size, X.shape[0])
 
