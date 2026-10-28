@@ -662,6 +662,26 @@ def test_kmeans_predict(
     assert_array_equal(pred, np.arange(10))
 
 
+@pytest.mark.parametrize("Estimator", [KMeans, MiniBatchKMeans])
+def test_predict_score_float32_far_from_origin(Estimator):
+    # Check that predict and score find the closest centers for float32 data far
+    # from the origin compared to the spread of the clusters (here GPS
+    # coordinates), where ||C||² - 2 X.C^T cancels catastrophically.
+    rng = np.random.RandomState(0)
+    hubs = np.array([48.86, 2.35]) + rng.normal(scale=0.05, size=(10, 2))
+    X = hubs[rng.randint(10, size=2000)] + rng.normal(scale=0.003, size=(2000, 2))
+    X = X.astype(np.float32)
+
+    km = Estimator(n_clusters=10, random_state=0).fit(X)
+
+    X_64 = X.astype(np.float64)
+    centers_64 = km.cluster_centers_.astype(np.float64)
+    expected_labels = pairwise_distances_argmin(X_64, centers_64)
+    expected_inertia = ((X_64 - centers_64[expected_labels]) ** 2).sum()
+    assert_array_equal(km.predict(X), expected_labels)
+    assert km.score(X) == pytest.approx(-expected_inertia, rel=1e-4)
+
+
 @pytest.mark.parametrize("X_csr", X_as_any_csr)
 @pytest.mark.parametrize("Estimator", [KMeans, MiniBatchKMeans])
 def test_dense_sparse(Estimator, X_csr, global_random_seed):

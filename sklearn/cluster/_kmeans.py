@@ -796,20 +796,29 @@ def _labels_inertia(X, sample_weight, centers, n_threads=1, return_inertia=True)
     if sp.issparse(X):
         _labels = lloyd_iter_chunked_sparse
         _inertia = _inertia_sparse
+        labels_centers, shift_kwargs = centers, {}
     else:
         _labels = lloyd_iter_chunked_dense
         _inertia = _inertia_dense
+        # The closest centers are found with ||C||² - 2 X.C^T, which cancels
+        # catastrophically when X and C are far from the origin compared to
+        # their spread (e.g. float32 GPS coordinates). Find them relative to
+        # the mean of the centers instead, like fit does relative to the mean
+        # of X.
+        shift = centers.mean(axis=0)
+        labels_centers, shift_kwargs = centers - shift, {"shift": shift}
 
     _labels(
         X,
         sample_weight,
-        centers,
+        labels_centers,
         centers_new=None,
         weight_in_clusters=None,
         labels=labels,
         center_shift=center_shift,
         n_threads=n_threads,
         update_centers=False,
+        **shift_kwargs,
     )
 
     if return_inertia:
