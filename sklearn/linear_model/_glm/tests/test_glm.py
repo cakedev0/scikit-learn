@@ -39,6 +39,7 @@ from sklearn.utils._array_api import (
     yield_namespace_device_dtype_combinations,
 )
 from sklearn.utils._testing import _array_api_for_tests, assert_allclose
+from sklearn.utils.fixes import CSR_CONTAINERS
 
 SOLVERS = ["lbfgs", "newton-cd", "newton-cd-gram", "newton-cg", "newton-cholesky"]
 
@@ -1370,3 +1371,19 @@ def test_poisson_regressor_array_api_warm_start(
         reg_xp.predict(X_xp)
         # fit again and ensure there is no error
         reg_xp.fit(X_xp, y_xp)
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+def test_newton_cd_sparse_constant_column(csr_container):
+    """Check that newton-cd gives the same fit for sparse and dense X with a constant
+    column and an intercept."""
+    # With this seed, the weighted mean of the constant column is not exactly 1 and
+    # the sparse coordinate descent used to diverge.
+    rng = np.random.RandomState(55)
+    X = rng.randn(12, 3)
+    y = rng.poisson(np.exp(X @ [0.3, -0.2, 0.1] + 0.5))
+    X = np.c_[X, np.ones(12)]
+    params = dict(alpha=0, solver="newton-cd", tol=1e-12, max_iter=1000)
+    model_dense = PoissonRegressor(**params).fit(X, y)
+    model_sparse = PoissonRegressor(**params).fit(csr_container(X), y)
+    assert_allclose(model_sparse.predict(X), model_dense.predict(X), rtol=1e-6)
