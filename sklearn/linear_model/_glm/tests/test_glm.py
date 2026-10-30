@@ -8,7 +8,7 @@ from functools import partial
 import numpy as np
 import pytest
 import scipy
-from scipy import linalg
+from scipy import linalg, sparse
 from scipy.optimize import minimize, root
 from scipy.optimize._linesearch import LineSearchWarning
 
@@ -39,6 +39,7 @@ from sklearn.utils._array_api import (
     yield_namespace_device_dtype_combinations,
 )
 from sklearn.utils._testing import _array_api_for_tests, assert_allclose
+from sklearn.utils.fixes import CSR_CONTAINERS
 
 SOLVERS = ["lbfgs", "newton-cd", "newton-cd-gram", "newton-cg", "newton-cholesky"]
 
@@ -1037,7 +1038,33 @@ def test_solver_auto(l1_ratio, long_data):
         random_state=42,
     )
     y = np.abs(y)  # make it non-negative
-    PoissonRegressor(solver="auto", l1_ratio=l1_ratio).fit(X, y)
+    glm = PoissonRegressor(solver="auto", l1_ratio=l1_ratio).fit(X, y)
+    if l1_ratio == 0:
+        assert glm.solver_ == "lbfgs"
+    else:
+        assert glm.solver_ == ("newton-cd-gram" if long_data else "newton-cd")
+
+
+@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
+@pytest.mark.parametrize(
+    "density, expected_solver", [(0.5, "newton-cd-gram"), (0.05, "newton-cd")]
+)
+def test_solver_auto_sparse(csr_container, density, expected_solver):
+    """Test that solver='auto' compares n_features**2 to X.nnz for sparse X."""
+    X = csr_container(sparse.random(100, 20, density=density, random_state=0))
+    y = np.random.default_rng(0).poisson(size=100)
+    glm = PoissonRegressor(solver="auto", l1_ratio=1).fit(X, y)
+    assert glm.solver_ == expected_solver
+
+
+def test_solver_auto_sparse_int64_indices():
+    """Test that solver='auto' avoids 'newton-cd' for sparse X with int64 indices."""
+    X = sparse.random(100, 20, density=0.05, format="csr", random_state=0)
+    X.indices = X.indices.astype(np.int64)
+    X.indptr = X.indptr.astype(np.int64)
+    y = np.random.default_rng(0).poisson(size=100)
+    glm = PoissonRegressor(solver="auto", l1_ratio=1).fit(X, y)
+    assert glm.solver_ == "newton-cd-gram"
 
 
 @pytest.mark.parametrize(

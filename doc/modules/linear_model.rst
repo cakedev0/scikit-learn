@@ -1115,7 +1115,8 @@ each solver:
 | Robust to unscaled datasets  |     yes     |       yes       |     yes               |     yes         |     yes              |       yes       |    no     |    no      |
 +------------------------------+-------------+-----------------+-----------------------+-----------------+----------------------+-----------------+-----------+------------+
 
-The "lbfgs" solver is used by default for its robustness. For
+The default `solver="auto"` uses "lbfgs" for L2 or no penalty, for its robustness,
+and "newton-cd-gram" or "newton-cd" with L1 or Elastic-Net penalty. For
 `n_samples >> n_features`, "newton-cholesky" is a good choice and can reach high
 precision (tiny `tol` values). With L1 or Elastic-Net penalty, "newton-cd-gram" is
 a good choice for `n_samples >> n_features`, while "newton-cd" is a good choice for
