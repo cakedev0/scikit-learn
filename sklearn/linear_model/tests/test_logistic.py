@@ -2849,7 +2849,8 @@ def test_zero_max_iter(solver):
         assert clf.n_iter_ == 0
 
     if solver != "lbfgs":
-        # XXX: lbfgs has already started to update the coefficients...
+        # XXX: lbfgs has already started to update the coefficients, and its
+        # first step on centered and scaled columns can already be good.
         assert_allclose(clf.coef_, np.zeros_like(clf.coef_))
         assert_allclose(
             clf.decision_function(X),
@@ -2859,7 +2860,7 @@ def test_zero_max_iter(solver):
             clf.predict_proba(X),
             np.full(shape=(X.shape[0], 2), fill_value=0.5),
         )
-    assert clf.score(X, y) < 0.7
+        assert clf.score(X, y) < 0.7
 
 
 def test_passing_params_without_enabling_metadata_routing():
@@ -3603,3 +3604,22 @@ def test_intercept_scaling_deprecated(est, intercept_scaling):
     msg = "The parameter 'intercept_scaling' was deprecated"
     with pytest.warns(FutureWarning, match=msg):
         lr.fit(X, y)
+
+
+@pytest.mark.parametrize("n_classes", [2, 3])
+def test_lbfgs_offset_features(n_classes, global_random_seed):
+    """lbfgs finds the same coef_ when a large constant is added to the features.
+
+    Non-regression test for gh-35029.
+    """
+    X, y = make_classification(
+        n_samples=500,
+        n_features=5,
+        n_informative=3,
+        n_classes=n_classes,
+        random_state=global_random_seed,
+    )
+    params = dict(solver="lbfgs", tol=1e-8)
+    reference = LogisticRegression(**params).fit(X, y)
+    shifted = LogisticRegression(**params).fit(X + 1e4, y)
+    assert_allclose(shifted.coef_, reference.coef_, rtol=1e-5, atol=1e-6)
