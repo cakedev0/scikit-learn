@@ -869,9 +869,6 @@ class _BaseKMeans(
                 f"n_samples={X.shape[0]} should be >= n_clusters={self.n_clusters}."
             )
 
-        # tol
-        self._tol = _tolerance(X, self.tol)
-
         # n-init
         if self.n_init == "auto":
             if isinstance(self.init, str) and self.init == "k-means++":
@@ -1479,6 +1476,14 @@ class KMeans(_BaseKMeans):
         # precompute squared norms of data points
         x_squared_norms = row_norms(X, squared=True)
 
+        if sp.issparse(X):
+            self._tol = _tolerance(X, self.tol)
+        else:
+            # X is centered: the mean of the feature variances is the mean squared
+            # norm of the rows divided by n_features. Unlike np.var, this needs no
+            # extra pass over X and no X-sized temporary.
+            self._tol = self.tol * x_squared_norms.mean() / X.shape[1]
+
         if self._algorithm == "elkan":
             kmeans_single = _kmeans_single_elkan
         else:
@@ -1910,6 +1915,8 @@ class MiniBatchKMeans(_BaseKMeans):
 
     def _check_params_vs_input(self, X):
         super()._check_params_vs_input(X, default_n_init=3)
+
+        self._tol = _tolerance(X, self.tol)
 
         self._batch_size = min(self.batch_size, X.shape[0])
 
