@@ -1,6 +1,7 @@
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+from libc.float cimport DBL_EPSILON, FLT_EPSILON
 from libc.math cimport fabs, sqrt
 from libc.stdlib cimport free, malloc
 from libc.string cimport memset
@@ -592,6 +593,55 @@ def enet_coordinate_descent(
     return np.asarray(w), gap, tol, n_iter + 1
 
 
+cdef floating _centered_colnorm2_sparse(
+    const floating[::1] X_data,
+    const int32_t[::1] X_indices,
+    int32_t startptr,
+    int32_t endptr,
+    const floating[::1] sample_weight,
+    bint no_sample_weights,
+    floating X_mean_j,
+    floating sw_sum,
+    unsigned int n_samples,
+    bint center,
+) noexcept nogil:
+    """Squared norm of a centered sparse column, np.sum(sw * (X[:, j] - X_mean_j)**2).
+
+    The column j is given by X_data[startptr:endptr] at rows
+    X_indices[startptr:endptr]. sw_sum is only used if center is True.
+    """
+    cdef floating normalize_sum = 0.0
+    cdef floating sw_nz_sum = 0.0
+    cdef floating var
+    cdef floating eps = FLT_EPSILON if floating is float else DBL_EPSILON
+    cdef int32_t i_ind
+
+    if no_sample_weights:
+        for i_ind in range(startptr, endptr):
+            normalize_sum += (X_data[i_ind] - X_mean_j) ** 2
+        sw_nz_sum = endptr - startptr
+    else:
+        for i_ind in range(startptr, endptr):
+            normalize_sum += (
+                sample_weight[X_indices[i_ind]] * (X_data[i_ind] - X_mean_j) ** 2
+            )
+            sw_nz_sum += sample_weight[X_indices[i_ind]]
+    if not center:
+        return normalize_sum
+
+    # The implicit zeros contribute their total weight times X_mean_j**2. Without
+    # any, sw_sum - sw_nz_sum is only made of rounding errors.
+    if endptr - startptr < n_samples:
+        normalize_sum += fmax(sw_sum - sw_nz_sum, 0) * X_mean_j ** 2
+    # X_mean_j is only accurate up to rounding errors, so a constant column gets a
+    # tiny positive norm instead of 0, and coordinate descent diverges on it. Same
+    # bound as sklearn.preprocessing._data._is_constant_feature.
+    var = normalize_sum / sw_sum
+    if var <= n_samples * eps * var + (n_samples * X_mean_j * eps) ** 2:
+        return 0.0
+    return normalize_sum
+
+
 def R_and_X_colnorm2_sparse(
     const floating[::1] w,
     const floating[::1] X_data,
@@ -620,11 +670,9 @@ def R_and_X_colnorm2_sparse(
     """
     cdef unsigned int n_samples = y.shape[0]
     cdef unsigned int n_features = w.shape[0]
-    cdef floating tmp
     cdef floating w_j
     cdef floating X_mean_j
-    cdef floating normalize_sum
-    cdef floating sw_sum
+    cdef floating sw_sum = 0.0
     cdef int32_t i, i_ind
     cdef unsigned int j
     cdef int32_t startptr = X_indptr[0]
@@ -641,8 +689,8 @@ def R_and_X_colnorm2_sparse(
             if X_mean[j]:
                 center = True
                 break
-        if center and not no_sample_weights:
-            sw_sum = np.sum(sample_weight)
+        if center:
+            sw_sum = n_samples if no_sample_weights else np.sum(sample_weight)
 
     _copy(n_samples, &y[0], 1, &R[0], 1)
     if not no_sample_weights:
@@ -651,35 +699,27 @@ def R_and_X_colnorm2_sparse(
 
     for j in range(n_features):
         endptr = X_indptr[j + 1]
-        normalize_sum = 0.0
         w_j = w[j]
         X_mean_j = X_mean[j]
+        norm2_cols_X[j] = _centered_colnorm2_sparse(
+            X_data, X_indices, startptr, endptr, sample_weight, no_sample_weights,
+            X_mean_j, sw_sum, n_samples, center,
+        )
 
         if no_sample_weights:
             for i_ind in range(startptr, endptr):
-                i = X_indices[i_ind]
-                normalize_sum += (X_data[i_ind] - X_mean_j) ** 2
-                R[i] -= X_data[i_ind] * w_j
-            norm2_cols_X[j] = normalize_sum
+                R[X_indices[i_ind]] -= X_data[i_ind] * w_j
             if center:
-                norm2_cols_X[j] += (n_samples - endptr + startptr) * X_mean_j ** 2
                 for i in range(n_samples):
                     R[i] += X_mean_j * w_j
         else:
             # R = sw * (y - np.dot(X, w))
             for i_ind in range(startptr, endptr):
                 i = X_indices[i_ind]
-                tmp = sample_weight[i]
-                # second term will be subtracted by loop over range(n_samples)
-                normalize_sum += (
-                    tmp * (X_data[i_ind] - X_mean_j) ** 2 - tmp * X_mean_j ** 2
-                )
-                R[i] -= tmp * X_data[i_ind] * w_j
+                R[i] -= sample_weight[i] * X_data[i_ind] * w_j
             if center:
-                normalize_sum += sw_sum * X_mean_j ** 2
                 for i in range(n_samples):
                     R[i] += sample_weight[i] * X_mean_j * w_j
-            norm2_cols_X[j] = normalize_sum
         startptr = endptr
 
     return R, norm2_cols_X
@@ -1556,13 +1596,9 @@ def R_and_X_colnorm2_multi_task(
     cdef unsigned int n_samples = Y.shape[0]
     cdef unsigned int n_features = W.shape[1]
     cdef unsigned int n_tasks = Y.shape[1]
-    cdef floating X_mean_j
-    cdef floating normalize_sum
-    cdef floating sw_sum
+    cdef floating sw_sum = 0.0
     cdef int32_t i, i_ind
     cdef unsigned int j
-    cdef int32_t startptr
-    cdef int32_t endptr
     cdef bint center = False
     cdef bint no_sample_weights = sample_weight is None
 
@@ -1576,32 +1612,17 @@ def R_and_X_colnorm2_multi_task(
             if X_mean[j]:
                 center = True
                 break
-        if center and not no_sample_weights:
-            sw_sum = np.sum(sample_weight)
+        if center:
+            sw_sum = n_samples if no_sample_weights else np.sum(sample_weight)
 
     if not X_is_sparse:
         np.einsum("ij,ij->j", X, X, dtype=dtype, out=norm2_cols_X_array)
     else:
         for j in range(n_features):
-            startptr = X_indptr[j]
-            endptr = X_indptr[j + 1]
-            normalize_sum = 0.0
-            X_mean_j = X_mean[j]
-
-            if no_sample_weights:
-                for i_ind in range(startptr, endptr):
-                    normalize_sum += (X_data[i_ind] - X_mean_j) ** 2
-                if center:
-                    normalize_sum += (n_samples - endptr + startptr) * X_mean_j ** 2
-            else:
-                for i_ind in range(startptr, endptr):
-                    i = X_indices[i_ind]
-                    normalize_sum += sample_weight[i] * (
-                        (X_data[i_ind] - X_mean_j) ** 2 - X_mean_j ** 2
-                    )
-                if center:
-                    normalize_sum += sw_sum * X_mean_j ** 2
-            norm2_cols_X[j] = normalize_sum
+            norm2_cols_X[j] = _centered_colnorm2_sparse(
+                X_data, X_indices, X_indptr[j], X_indptr[j + 1], sample_weight,
+                no_sample_weights, X_mean[j], sw_sum, n_samples, center,
+            )
 
     _copy(n_samples * n_tasks, &Y[0, 0], 1, &R[0, 0], 1)
     if not no_sample_weights and X_is_sparse:

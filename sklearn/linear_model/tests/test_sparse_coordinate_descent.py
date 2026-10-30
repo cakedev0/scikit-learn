@@ -6,6 +6,10 @@ from numpy.testing import assert_allclose
 from sklearn.datasets import make_regression
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, ElasticNetCV, Lasso, LassoCV
+from sklearn.linear_model._cd_fast import (
+    R_and_X_colnorm2_multi_task,
+    R_and_X_colnorm2_sparse,
+)
 from sklearn.utils._testing import (
     assert_almost_equal,
     assert_array_almost_equal,
@@ -402,3 +406,54 @@ def test_sparse_read_only_buffer(copy_X):
 
     y = rng.rand(100)
     clf.fit(X, y)
+
+
+@pytest.mark.parametrize("with_sample_weight", [False, True])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_sparse_centered_colnorm2_constant_column(with_sample_weight, dtype):
+    """Check that the centered norm of a constant column is exactly 0.
+
+    The mean of a constant column is only accurate up to rounding errors. The norm
+    must still be 0, otherwise coordinate descent diverges on that column.
+    """
+    rng = np.random.RandomState(0)
+    n_samples = 12
+    X = np.c_[
+        rng.randn(n_samples, 2),
+        np.ones(n_samples),  # constant
+        np.r_[np.zeros(6), np.ones(6)],  # with implicit zeros
+    ].astype(dtype)
+    sw = rng.lognormal(size=n_samples).astype(dtype) if with_sample_weight else None
+    X_mean = np.average(X, axis=0, weights=sw).astype(dtype)
+    X_mean[2] = np.nextafter(dtype(1), dtype(2))  # mean of the constant column
+    sw_ = np.ones(n_samples, dtype=dtype) if sw is None else sw
+    expected = np.sum(sw_[:, None] * (X - X_mean) ** 2, axis=0)
+    expected[2] = 0
+    X_csc = sp.csc_matrix(X)
+    y = rng.randn(n_samples).astype(dtype)
+
+    _, norm2 = R_and_X_colnorm2_sparse(
+        w=np.zeros(X.shape[1], dtype=dtype),
+        X_data=X_csc.data,
+        X_indices=X_csc.indices,
+        X_indptr=X_csc.indptr,
+        y=y,
+        sample_weight=sw,
+        X_mean=X_mean,
+    )
+    assert norm2[2] == 0
+    assert_allclose(norm2, expected, rtol=1e-5)
+
+    _, norm2 = R_and_X_colnorm2_multi_task(
+        W=np.zeros((2, X.shape[1]), dtype=dtype, order="F"),
+        X=None,
+        X_is_sparse=True,
+        X_data=X_csc.data,
+        X_indices=X_csc.indices,
+        X_indptr=X_csc.indptr,
+        Y=np.asfortranarray(np.c_[y, y]),
+        sample_weight=sw,
+        X_mean=X_mean,
+    )
+    assert norm2[2] == 0
+    assert_allclose(norm2, expected, rtol=1e-5)
