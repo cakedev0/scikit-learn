@@ -9,7 +9,7 @@ cdef void simultaneous_sort(
     floating* values,
     intp_t* indices,
     intp_t n,
-    bint use_three_way_partition=False,
+    SortPartitioning partitioning=TWO_WAY,
 ) noexcept nogil:
     """Sort values and indices simultaneously by values.
 
@@ -19,14 +19,17 @@ cdef void simultaneous_sort(
              return values[i], indices[i]
 
     Algorithm: Introsort (Musser, SP&E, 1997) with two variants for the
-    quicksort part:
+    partitioning of the quicksort part:
 
-    - If use_three_way_partition is True, use 3-way partitioning:
-      [x < pivot] [x == pivot] [x > pivot]. This variant is fast when
-      working with many duplicate values, otherwise it's slower.
-    - If use_three_way_partition is False, use 2-way partitioning:
-      [x <= pivot] [pivot] [x >= pivot]. There are three parts too, but the middle
-      part is only the selected pivot element, not all values equal to the pivot.
+    - TWO_WAY: 2-way partitioning, [x <= pivot] [pivot] [x >= pivot]. There
+      are three parts too, but the middle part is only the selected pivot
+      element, not all values equal to the pivot. This variant is fast when
+      values are distinct, but slow when working with many duplicate values.
+    - MIXED: 2-way partitioning, except at the recursion levels where the
+      median of 3 pivot sample contains duplicates, which use 3-way
+      partitioning: [x < pivot] [x == pivot] [x > pivot]. This variant is
+      fast in both cases, but can be slower than TWO_WAY on some structured
+      inputs (e.g. periodic values).
 
     Notes
     -----
@@ -43,10 +46,10 @@ cdef void simultaneous_sort(
     if n == 0:
         return
     cdef intp_t maxd = 2 * <intp_t>log2(n)
-    if use_three_way_partition:
-        introsort_3way(values, indices, n, maxd)
-    else:
+    if partitioning == TWO_WAY:
         introsort_2way(values, indices, n, maxd)
+    else:
+        introsort_mixed(values, indices, n, maxd)
 
 
 def _py_simultaneous_sort(
@@ -54,20 +57,17 @@ def _py_simultaneous_sort(
     intp_t[::1] indices,
     intp_t n,
     *,
-    bint use_three_way_partition,
+    SortPartitioning partitioning,
 ):
     """Python wrapper used for testing."""
-    simultaneous_sort(&values[0], &indices[0], n, use_three_way_partition)
+    simultaneous_sort(&values[0], &indices[0], n, partitioning)
 
 
 cdef void introsort_2way(
-    floating* values,
-    intp_t* indices,
-    intp_t n,
-    intp_t maxd,
+    floating* values, intp_t* indices, intp_t n, intp_t maxd
 ) noexcept nogil:
     cdef floating pivot
-    cdef intp_t pivot_idx, i, j
+    cdef intp_t pivot_idx
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -76,25 +76,7 @@ cdef void introsort_2way(
         maxd -= 1
 
         pivot = inplace_median3(values, indices, n)
-
-        i = 1  # the median3 step ensures values[0] <= pivot
-        j = n - 2  # the median3 step ensures values[-1] >= pivot
-        while True:
-            # Find element >= pivot from left
-            while i <= j and values[i] < pivot:
-                i += 1
-            # Find element <= pivot from right
-            while i <= j and values[j] > pivot:
-                j -= 1
-            if i >= j:
-                break
-            swap(values, indices, i, j)
-            i += 1
-            j -= 1
-
-        # Put pivot at pivot_idx
-        pivot_idx = i
-        swap(values, indices, pivot_idx, n - 1)
+        pivot_idx = partition_2way(values, indices, n, pivot)
 
         # Recursively sort left side of the pivot
         introsort_2way(values, indices, pivot_idx, maxd)
@@ -108,16 +90,11 @@ cdef void introsort_2way(
     insertion_sort(values, indices, n)
 
 
-cdef void introsort_3way(
-    floating* values, intp_t *indices,
-    intp_t n, intp_t maxd
+cdef void introsort_mixed(
+    floating* values, intp_t* indices, intp_t n, intp_t maxd
 ) noexcept nogil:
-    """
-    Introsort with median of 3 pivot selection and 3-way partition function
-    (fast for repeated elements, e.g. lots of zeros).
-    """
     cdef floating pivot
-    cdef intp_t i, l, r
+    cdef intp_t pivot_idx, l, r
 
     while n > 15:
         if maxd <= 0:   # max depth limit exceeded ("gone quadratic")
@@ -125,36 +102,83 @@ cdef void introsort_3way(
             return
         maxd -= 1
 
-        pivot = median3(values, n)
+        pivot = inplace_median3(values, indices, n)
 
-        i = l = 0
-        r = n
-        while i < r:
-            if values[i] < pivot:
-                swap(values, indices, i, l)
-                i += 1
-                l += 1
-            elif values[i] > pivot:
-                r -= 1
-                swap(values, indices, i, r)
-            else:
-                i += 1
+        if values[0] == pivot or values[n // 2] == pivot:
+            # The median of 3 sample has duplicates: many values are likely
+            # equal to the pivot, group them all with a 3-way partition.
+            partition_3way(values, indices, n, pivot, &l, &r)
+            introsort_mixed(values, indices, l, maxd)
+            values += r
+            indices += r
+            n -= r
+            continue
 
-        # Three-way partition:
-        # - values[:l] contains elements < pivot
-        # - values[l:r] contains elements == pivot
-        # - values[r:] contains elements > pivot
+        pivot_idx = partition_2way(values, indices, n, pivot)
 
-        # Recursively sort left side:
-        introsort_3way(values, indices, l, maxd)
+        # Recursively sort left side of the pivot
+        introsort_mixed(values, indices, pivot_idx, maxd)
 
         # Continue with right side:
-        values += r
-        indices += r
-        n -= r
+        values += pivot_idx + 1
+        indices += pivot_idx + 1
+        n -= pivot_idx + 1
 
     # in the small-array case, insertion sort is faster
     insertion_sort(values, indices, n)
+
+
+cdef inline intp_t partition_2way(
+    floating* values, intp_t* indices, intp_t n, floating pivot
+) noexcept nogil:
+    """Two-way partition around the pivot placed at the end by inplace_median3.
+
+    Returns the final index of the pivot: values before it are <= pivot, values
+    after it are >= pivot.
+    """
+    cdef intp_t i = 1  # the median3 step ensures values[0] <= pivot
+    cdef intp_t j = n - 2  # the median3 step ensures values[-1] >= pivot
+    while True:
+        # Find element >= pivot from left
+        while i <= j and values[i] < pivot:
+            i += 1
+        # Find element <= pivot from right
+        while i <= j and values[j] > pivot:
+            j -= 1
+        if i >= j:
+            break
+        swap(values, indices, i, j)
+        i += 1
+        j -= 1
+
+    # Put pivot at its final index
+    swap(values, indices, i, n - 1)
+    return i
+
+
+cdef inline void partition_3way(
+    floating* values, intp_t* indices, intp_t n, floating pivot,
+    intp_t* l_out, intp_t* r_out,
+) noexcept nogil:
+    """Three-way partition around pivot, such that:
+
+    - values[:l] contains elements < pivot
+    - values[l:r] contains elements == pivot
+    - values[r:] contains elements > pivot
+    """
+    cdef intp_t i = 0, l = 0, r = n
+    while i < r:
+        if values[i] < pivot:
+            swap(values, indices, i, l)
+            i += 1
+            l += 1
+        elif values[i] > pivot:
+            r -= 1
+            swap(values, indices, i, r)
+        else:
+            i += 1
+    l_out[0] = l
+    r_out[0] = r
 
 # ------------ HEAP SORT -------------
 
@@ -216,26 +240,6 @@ cdef inline floating inplace_median3(floating* values, intp_t* indices, intp_t n
         if values[0] > values[n - 1]:
             swap(values, indices, 0, n - 1)
     return values[n - 1]
-
-
-cdef inline floating median3(floating* feature_values, intp_t n) noexcept nogil:
-    # Median of three pivot selection, after Bentley and McIlroy (1993).
-    # Engineering a sort function. SP&E. Requires 8/3 comparisons on average.
-    cdef floating a = feature_values[0], b = feature_values[n / 2], c = feature_values[n - 1]
-    if a < b:
-        if b < c:
-            return b
-        elif a < c:
-            return c
-        else:
-            return a
-    elif b < c:
-        if a < c:
-            return a
-        else:
-            return c
-    else:
-        return b
 
 
 cdef inline void swap(floating* values, intp_t* indices,
