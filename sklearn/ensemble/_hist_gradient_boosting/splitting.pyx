@@ -199,6 +199,9 @@ cdef class Splitter:
         unsigned int abs_min_samples_threads
         unsigned int abs_min_bins_threads
         double mean_n_bins
+        # Scratch for compute_histograms_and_find_splits, all -1 between calls.
+        int [::1] slot_left
+        int [::1] slot_right
 
     def __init__(self,
                  const X_BINNED_DTYPE_C [::1, :] X_binned,
@@ -242,6 +245,8 @@ cdef class Splitter:
         self.fuse_partition = fuse_partition
         self.abs_min_samples_threads = abs_min_samples_threads
         self.abs_min_bins_threads = abs_min_bins_threads
+        self.slot_left = np.full(self.n_features, -1, dtype=np.int32)
+        self.slot_right = np.full(self.n_features, -1, dtype=np.int32)
         self.mean_n_bins = (
             np.mean(np.asarray(n_bins_non_missing)) + 1
             if len(n_bins_non_missing) else 1
@@ -1000,8 +1005,8 @@ cdef class Splitter:
             const unsigned int [:] features_left = self.all_features
             const unsigned int [:] features_right = self.all_features
             # Position of each feature in features_<side>, -1 if not a candidate.
-            int [::1] slot_left
-            int [::1] slot_right
+            int [::1] slot_left = self.slot_left
+            int [::1] slot_right = self.slot_right
             int n_left = 0
             int n_right = 0
             int i
@@ -1020,18 +1025,16 @@ cdef class Splitter:
         else:
             histograms_left, histograms_right = parent_histograms, histograms
 
-        slot_left_arr = np.full(self.n_features, -1, dtype=np.int32)
-        slot_right_arr = np.full(self.n_features, -1, dtype=np.int32)
         if split_left:
             features_left = self._draw_split_features(allowed_features)
             n_left = features_left.shape[0]
-            slot_left_arr[np.asarray(features_left)] = np.arange(n_left)
         if split_right:
             features_right = self._draw_split_features(allowed_features)
             n_right = features_right.shape[0]
-            slot_right_arr[np.asarray(features_right)] = np.arange(n_right)
-        slot_left = slot_left_arr
-        slot_right = slot_right_arr
+        for i in range(n_left):
+            slot_left[features_left[i]] = i
+        for i in range(n_right):
+            slot_right[features_right[i]] = i
 
         split_infos = <split_info_struct *> malloc(
             max(1, n_left + n_right) * sizeof(split_info_struct))
@@ -1073,6 +1076,10 @@ cdef class Splitter:
                         lower_bound_right, upper_bound_right,
                         &split_infos[n_left + slot])
 
+        for i in range(n_left):
+            slot_left[features_left[i]] = -1
+        for i in range(n_right):
+            slot_right[features_right[i]] = -1
         if n_left > 0:
             best_left = self._find_best_feature_to_split_helper(
                 split_infos, n_left)
@@ -1089,7 +1096,7 @@ cdef class Splitter:
             if split_right else None
         )
         free(split_infos)
-        return np.asarray(histograms), np.asarray(parent_histograms), out_left, out_right
+        return histograms, parent_histograms, out_left, out_right
 
     cdef int _find_best_feature_to_split_helper(
         self,

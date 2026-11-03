@@ -352,7 +352,7 @@ cdef class HistogramBuilder:
                     feature_idx, n_bins, parent_histograms, histograms
                 )
 
-        return np.asarray(histograms), np.asarray(parent_histograms)
+        return histograms, parent_histograms
 
 
 cpdef void _build_histogram_naive(

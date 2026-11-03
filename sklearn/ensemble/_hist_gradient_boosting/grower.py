@@ -330,7 +330,10 @@ class TreeGrower:
             raise ValueError("Categorical features cannot have monotonic constraints.")
 
         hessians_are_constant = hessians.shape[0] == 1
-        exp_flags = os.environ.get("SKLEARN_HGB_EXP", "").split(",")
+        # With a single thread there are no parallel regions to merge.
+        exp_flags = (
+            os.environ.get("SKLEARN_HGB_EXP", "").split(",") if n_threads > 1 else []
+        )
         self._fuse3 = "fuse3" in exp_flags
         self._fuse2 = "fuse2" in exp_flags or self._fuse3
         self._fuse = "fuse" in exp_flags or self._fuse2
