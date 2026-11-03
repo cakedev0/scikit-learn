@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-from sklearn.utils._sorting import _py_simultaneous_sort
+from sklearn.utils._sorting import SortPartitioning, _py_simultaneous_sort
 
 
-@pytest.mark.parametrize("kind", ["2-way", "3-way"])
-def test_simultaneous_sort_correctness(kind):
+@pytest.mark.parametrize("partitioning", list(SortPartitioning), ids=lambda p: p.name)
+def test_simultaneous_sort_correctness(partitioning):
     rng = np.random.default_rng(0)
     for x in [
         rng.uniform(size=3),
@@ -21,30 +21,26 @@ def test_simultaneous_sort_correctness(kind):
         n = x.size
         ind = np.arange(n, dtype=np.intp)
         x_sorted = x.copy()
-        _py_simultaneous_sort(x_sorted, ind, n, use_three_way_partition=kind == "3-way")
+        _py_simultaneous_sort(x_sorted, ind, n, partitioning=partitioning)
         assert (x_sorted[:-1] <= x_sorted[1:]).all()
         assert_array_equal(x[ind], x_sorted)
         assert_array_equal(np.sort(ind), np.arange(n, dtype=np.intp))
 
 
-@pytest.mark.parametrize("kind", ["2-way", "3-way"])
-def test_simultaneous_sort_no_stackoverflow(kind):
+@pytest.mark.parametrize("partitioning", list(SortPartitioning), ids=lambda p: p.name)
+def test_simultaneous_sort_no_stackoverflow(partitioning):
     """Check that worst case inputs do not exceed the recursion stack limit."""
     n = 1_000_000
     # worst case pattern (i.e. triggers the quadratic path)
     # for naive 2-way partitioning quicksort:
     values = np.zeros(n)
     indices = np.arange(n, dtype=np.intp)
-    _py_simultaneous_sort(
-        values, indices, values.shape[0], use_three_way_partition=kind == "3-way"
-    )
+    _py_simultaneous_sort(values, indices, values.shape[0], partitioning=partitioning)
 
     # worst case pattern for the better (numpy-style) 2-way partitioning:
     values = np.roll(np.arange(n), -1).astype(np.float32)
     indices = np.arange(n, dtype=np.intp)
-    _py_simultaneous_sort(
-        values, indices, values.shape[0], use_three_way_partition=kind == "3-way"
-    )
+    _py_simultaneous_sort(values, indices, values.shape[0], partitioning=partitioning)
 
     # worst case pattern for the 3-way partitioning quicksort
     # with median-of-3 pivot:
@@ -56,6 +52,4 @@ def test_simultaneous_sort_no_stackoverflow(kind):
     # (very unlikely in real-world non-adversarial data)
     indices = np.arange(n, dtype=np.intp)
     assert values.size == indices.size
-    _py_simultaneous_sort(
-        values, indices, values.shape[0], use_three_way_partition=kind == "3-way"
-    )
+    _py_simultaneous_sort(values, indices, values.shape[0], partitioning=partitioning)
