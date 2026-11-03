@@ -102,6 +102,19 @@ def test_fit_predict(csr_container):
     assert_array_equal(bisect_means.labels_, bisect_means.predict(X))
 
 
+def test_fit_predict_float32_far_from_origin():
+    """Check that fit(X).predict(X) matches labels_ for float32 data far from the
+    origin compared to the spread of the clusters (here GPS coordinates)."""
+    rng = np.random.RandomState(0)
+    hubs = np.array([48.86, 2.35]) + rng.normal(scale=0.05, size=(10, 2))
+    X = hubs[rng.randint(10, size=2000)] + rng.normal(scale=0.003, size=(2000, 2))
+    X = X.astype(np.float32)
+
+    bisect_means = BisectingKMeans(n_clusters=10, random_state=0).fit(X)
+
+    assert_array_equal(bisect_means.labels_, bisect_means.predict(X))
+
+
 @pytest.mark.parametrize("csr_container", CSR_CONTAINERS + [None])
 def test_dtype_preserved(csr_container, global_dtype):
     """Check that centers dtype is the same as input data dtype."""
