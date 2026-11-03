@@ -9,6 +9,7 @@ the gradients and hessians of the training data.
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numbers
+import os
 from heapq import heappop, heappush
 from timeit import default_timer as time
 
@@ -23,6 +24,16 @@ from sklearn.ensemble._hist_gradient_boosting.histogram import HistogramBuilder
 from sklearn.ensemble._hist_gradient_boosting.predictor import TreePredictor
 from sklearn.ensemble._hist_gradient_boosting.splitting import Splitter
 from sklearn.utils._bitset import set_raw_bitset_from_binned_bitset
+
+# Experiment switches, read at each TreeGrower init:
+# - SKLEARN_HGB_GUARD: when to run find_node_split / split_indices serially
+#   with a passive OpenMP runtime. "pr" (default): per-thread work bounds,
+#   "abs": absolute work bounds (SKLEARN_HGB_ABS_SAMPLES, SKLEARN_HGB_ABS_BINS),
+#   "none": always use threads, like main.
+# - SKLEARN_HGB_EXP: comma separated list. "fuse" merges the parallel regions
+#   of a split: split_indices (2 -> 1), children histograms (3 -> 1) and
+#   children split finding (2 -> 1).
+_GUARD_MODES = {"pr": 0, "abs": 1, "none": 2}
 
 
 class TreeNode:
@@ -315,6 +326,7 @@ class TreeGrower:
             raise ValueError("Categorical features cannot have monotonic constraints.")
 
         hessians_are_constant = hessians.shape[0] == 1
+        self._fuse = "fuse" in os.environ.get("SKLEARN_HGB_EXP", "").split(",")
         self.histogram_builder = HistogramBuilder(
             X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
         )
@@ -335,6 +347,12 @@ class TreeGrower:
             rng=rng,
             n_threads=n_threads,
             active_wait=active_wait,
+            guard_mode=_GUARD_MODES[os.environ.get("SKLEARN_HGB_GUARD", "pr")],
+            fuse_partition=self._fuse,
+            abs_min_samples_threads=int(
+                os.environ.get("SKLEARN_HGB_ABS_SAMPLES", 20_000)
+            ),
+            abs_min_bins_threads=int(os.environ.get("SKLEARN_HGB_ABS_BINS", 4_000)),
         )
         self.X_binned = X_binned
         self.max_leaf_nodes = max_leaf_nodes
@@ -489,6 +507,41 @@ class TreeGrower:
         else:
             heappush(self.splittable_nodes, node)
 
+    def _compute_best_splits_and_push_pair(
+        self, left, right, should_split_left, should_split_right
+    ):
+        """Same as _compute_best_split_and_push on each child to split."""
+        split_info_left, split_info_right = self.splitter.find_node_split_pair(
+            should_split_left,
+            left.n_samples,
+            left.histograms,
+            left.sum_gradients,
+            left.sum_hessians,
+            left.value,
+            left.children_lower_bound,
+            left.children_upper_bound,
+            should_split_right,
+            right.n_samples,
+            right.histograms,
+            right.sum_gradients,
+            right.sum_hessians,
+            right.value,
+            right.children_lower_bound,
+            right.children_upper_bound,
+            left.allowed_features,
+        )
+        for node, split_info, should_split in (
+            (left, split_info_left, should_split_left),
+            (right, split_info_right, should_split_right),
+        ):
+            if not should_split:
+                continue
+            node.split_info = split_info
+            if split_info.gain <= 0:
+                self._finalize_leaf(node)
+            else:
+                heappush(self.splittable_nodes, node)
+
     def split_next(self):
         """Split the node with highest potential gain.
 
@@ -621,26 +674,47 @@ class TreeGrower:
             # on the other one.
             # Note that both left and right child have the same allowed_features.
             tic = time()
-            smallest_child.histograms = self.histogram_builder.compute_histograms_brute(
-                smallest_child.sample_indices, smallest_child.allowed_features
-            )
-            largest_child.histograms = (
-                self.histogram_builder.compute_histograms_subtraction(
-                    node.histograms,
+            if self._fuse:
+                (
                     smallest_child.histograms,
+                    largest_child.histograms,
+                ) = self.histogram_builder.compute_histograms_pair(
+                    smallest_child.sample_indices,
+                    node.histograms,
                     smallest_child.allowed_features,
                 )
-            )
+            else:
+                smallest_child.histograms = (
+                    self.histogram_builder.compute_histograms_brute(
+                        smallest_child.sample_indices,
+                        smallest_child.allowed_features,
+                    )
+                )
+                largest_child.histograms = (
+                    self.histogram_builder.compute_histograms_subtraction(
+                        node.histograms,
+                        smallest_child.histograms,
+                        smallest_child.allowed_features,
+                    )
+                )
             # node.histograms is reused in largest_child.histograms. To break cyclic
             # memory references and help garbage collection, we set it to None.
             node.histograms = None
             self.total_compute_hist_time += time() - tic
 
             tic = time()
-            if should_split_left:
-                self._compute_best_split_and_push(left_child_node)
-            if should_split_right:
-                self._compute_best_split_and_push(right_child_node)
+            if self._fuse:
+                self._compute_best_splits_and_push_pair(
+                    left_child_node,
+                    right_child_node,
+                    should_split_left,
+                    should_split_right,
+                )
+            else:
+                if should_split_left:
+                    self._compute_best_split_and_push(left_child_node)
+                if should_split_right:
+                    self._compute_best_split_and_push(right_child_node)
             self.total_find_split_time += time() - tic
 
             # Release memory used by histograms as they are no longer needed

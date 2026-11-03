@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 cimport cython
-from cython.parallel import prange
+from cython.parallel import parallel, prange
 from libc.string cimport memset
 
 import numpy as np
@@ -281,6 +281,87 @@ cdef class HistogramBuilder:
                 sibling_histograms,
             )
         return parent_histograms
+
+    def compute_histograms_pair(
+        HistogramBuilder self,
+        const unsigned int [::1] sample_indices,       # IN
+        hist_struct [:, ::1] parent_histograms,        # IN and OUT
+        const unsigned int [:] allowed_features=None,  # IN
+    ):
+        """Compute the histograms of both children of a split.
+
+        Same result as `compute_histograms_brute` on the child with the fewest
+        samples followed by `compute_histograms_subtraction` for its sibling,
+        but in a single parallel region instead of three. When the OpenMP
+        runtime puts idle threads to sleep, each parallel region pays for
+        waking up the whole team.
+
+        Parameters
+        ----------
+        sample_indices : array of int, shape (n_samples_at_node,)
+            The indices of the samples of the child with the fewest samples.
+        parent_histograms : ndarray of HISTOGRAM_DTYPE, \
+                shape (n_features, n_bins)
+            The histograms of the parent, overwritten with those of the child
+            with the most samples.
+        allowed_features : None or ndarray, dtype=np.uint32
+            Indices of the features that are allowed by interaction constraints to be
+            split.
+
+        Returns
+        -------
+        histograms : ndarray of HISTOGRAM_DTYPE, shape (n_features, n_bins)
+            The histograms of the child with the fewest samples.
+        sibling_histograms : ndarray of HISTOGRAM_DTYPE, shape (n_features, n_bins)
+            The histograms of its sibling (``parent_histograms``).
+        """
+        cdef:
+            int n_samples = sample_indices.shape[0]
+            int feature_idx
+            int f_idx
+            int i
+            uint8_t hessians_are_constant = self.hessians_are_constant
+            int n_allowed_features = self.n_features
+            unsigned int n_bins = self.n_bins
+            G_H_DTYPE_C [::1] ordered_gradients = self.ordered_gradients
+            G_H_DTYPE_C [::1] gradients = self.gradients
+            G_H_DTYPE_C [::1] ordered_hessians = self.ordered_hessians
+            G_H_DTYPE_C [::1] hessians = self.hessians
+            hist_struct [:, ::1] histograms = np.empty(
+                shape=(self.n_features, self.n_bins),
+                dtype=HISTOGRAM_DTYPE
+            )
+            bint has_interaction_cst = allowed_features is not None
+            int n_threads = self.n_threads
+
+        if has_interaction_cst:
+            n_allowed_features = allowed_features.shape[0]
+
+        with nogil, parallel(num_threads=n_threads):
+            # The implicit barrier at the end of the gather loop makes all the
+            # ordered gradients visible to the feature loop.
+            if hessians_are_constant:
+                for i in prange(n_samples, schedule='static'):
+                    ordered_gradients[i] = gradients[sample_indices[i]]
+            else:
+                for i in prange(n_samples, schedule='static'):
+                    ordered_gradients[i] = gradients[sample_indices[i]]
+                    ordered_hessians[i] = hessians[sample_indices[i]]
+
+            for f_idx in prange(n_allowed_features, schedule='static'):
+                if has_interaction_cst:
+                    feature_idx = allowed_features[f_idx]
+                else:
+                    feature_idx = f_idx
+
+                self._compute_histogram_brute_single_feature(
+                    feature_idx, sample_indices, histograms
+                )
+                _subtract_histograms(
+                    feature_idx, n_bins, parent_histograms, histograms
+                )
+
+        return np.asarray(histograms), np.asarray(parent_histograms)
 
 
 cpdef void _build_histogram_naive(

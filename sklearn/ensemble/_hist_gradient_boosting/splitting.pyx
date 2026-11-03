@@ -10,7 +10,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 cimport cython
-from cython.parallel import prange
+from cython.parallel import parallel, prange
 import numpy as np
 from libc.math cimport INFINITY, ceil
 from libc.stdlib cimport malloc, free, qsort
@@ -189,6 +189,12 @@ cdef class Splitter:
         unsigned int [::1] right_indices_buffer
         int n_threads
         bint active_wait
+        # Experiment switches (SKLEARN_HGB_GUARD / SKLEARN_HGB_EXP), see grower.py.
+        int guard_mode
+        bint fuse_partition
+        unsigned int abs_min_samples_threads
+        unsigned int abs_min_bins_threads
+        double mean_n_bins
 
     def __init__(self,
                  const X_BINNED_DTYPE_C [::1, :] X_binned,
@@ -205,7 +211,11 @@ cdef class Splitter:
                  Y_DTYPE_C feature_fraction_per_split=1.0,
                  rng=np.random.RandomState(),
                  unsigned int n_threads=1,
-                 bint active_wait=False):
+                 bint active_wait=False,
+                 int guard_mode=0,
+                 bint fuse_partition=False,
+                 unsigned int abs_min_samples_threads=20_000,
+                 unsigned int abs_min_bins_threads=4_000):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -224,6 +234,14 @@ cdef class Splitter:
         self.rng = rng
         self.n_threads = n_threads
         self.active_wait = active_wait
+        self.guard_mode = guard_mode
+        self.fuse_partition = fuse_partition
+        self.abs_min_samples_threads = abs_min_samples_threads
+        self.abs_min_bins_threads = abs_min_bins_threads
+        self.mean_n_bins = (
+            np.mean(np.asarray(n_bins_non_missing)) + 1
+            if len(n_bins_non_missing) else 1
+        )
 
         # The partition array maps each sample index into the leaves of the
         # tree (a leaf in this context is a node that isn't split yet, not
@@ -335,6 +353,9 @@ cdef class Splitter:
                 n_threads > 1
                 and n_threads * min_samples_per_thread_to_split < n_samples
             )
+            int j
+            int left_pos
+            int right_pos
 
             int right_child_position
             unsigned int [::1] left_indices_buffer = self.left_indices_buffer
@@ -360,6 +381,12 @@ cdef class Splitter:
         if is_categorical:
             left_cat_bitset = &cat_bitset_tmp[0]
 
+        if n_threads > 1 and not self.active_wait:
+            if self.guard_mode == 1:
+                use_threads = n_samples >= self.abs_min_samples_threads
+            elif self.guard_mode == 2:
+                use_threads = True
+
         if not use_threads:
             # Single straight scan with two running counters, and a single
             # copy-back instead of one per thread: cheaper than the
@@ -381,6 +408,67 @@ cdef class Splitter:
         right_counts = np.empty(n_threads, dtype=np.int32)
         left_offset = np.zeros(n_threads, dtype=np.int32)
         right_offset = np.zeros(n_threads, dtype=np.int32)
+
+        if self.fuse_partition:
+            for thread_idx in range(n_samples % n_threads):
+                sizes[thread_idx] += 1
+            for thread_idx in range(1, n_threads):
+                offset_in_buffers[thread_idx] = \
+                    offset_in_buffers[thread_idx - 1] + sizes[thread_idx - 1]
+
+            # Same two passes as below, but in one parallel region: the
+            # implicit barrier of the first loop replaces the fork/join, and
+            # each thread computes its own write offsets.
+            with nogil, parallel(num_threads=n_threads):
+                for thread_idx in prange(n_threads, schedule='static',
+                                         chunksize=1):
+                    left_count = 0
+                    right_count = 0
+                    start = offset_in_buffers[thread_idx]
+                    stop = start + sizes[thread_idx]
+                    for i in range(start, stop):
+                        sample_idx = sample_indices[i]
+                        turn_left = sample_goes_left(
+                            missing_go_to_left,
+                            missing_values_bin_idx, bin_idx,
+                            X_binned[sample_idx], is_categorical,
+                            left_cat_bitset)
+                        if turn_left:
+                            left_indices_buffer[start + left_count] = sample_idx
+                            left_count = left_count + 1
+                        else:
+                            right_indices_buffer[start + right_count] = sample_idx
+                            right_count = right_count + 1
+                    left_counts[thread_idx] = left_count
+                    right_counts[thread_idx] = right_count
+
+                for thread_idx in prange(n_threads, schedule='static',
+                                         chunksize=1):
+                    left_pos = 0
+                    right_pos = 0
+                    for j in range(n_threads):
+                        right_pos = right_pos + left_counts[j]
+                    for j in range(thread_idx):
+                        left_pos = left_pos + left_counts[j]
+                        right_pos = right_pos + right_counts[j]
+                    memcpy(
+                        &sample_indices[left_pos],
+                        &left_indices_buffer[offset_in_buffers[thread_idx]],
+                        sizeof(unsigned int) * left_counts[thread_idx]
+                    )
+                    if right_counts[thread_idx] > 0:
+                        memcpy(
+                            &sample_indices[right_pos],
+                            &right_indices_buffer[offset_in_buffers[thread_idx]],
+                            sizeof(unsigned int) * right_counts[thread_idx]
+                        )
+
+            right_child_position = 0
+            for thread_idx in range(n_threads):
+                right_child_position += left_counts[thread_idx]
+            return (sample_indices[:right_child_position],
+                    sample_indices[right_child_position:],
+                    right_child_position)
 
         with nogil:
             for thread_idx in range(n_samples % n_threads):
@@ -554,7 +642,7 @@ cdef class Splitter:
         # leaves some threads with no work while still paying for the overhead
         # of spinning up the parallel region. An actively-waiting OpenMP runtime
         # makes that overhead cheap enough that it's not worth guarding against.
-        use_threads = self.active_wait or (n_split_candidates >= n_threads * 5)
+        use_threads = self._find_split_use_threads(n_split_candidates)
 
         with nogil:
 
@@ -633,6 +721,168 @@ cdef class Splitter:
 
         free(split_infos)
         return out
+
+    cdef bint _find_split_use_threads(self, int n_split_candidates):
+        if self.active_wait or self.guard_mode == 2:
+            return True
+        if self.guard_mode == 1:
+            return n_split_candidates * self.mean_n_bins >= self.abs_min_bins_threads
+        return n_split_candidates >= self.n_threads * 5
+
+    cdef _draw_split_features(self, const unsigned int [:] allowed_features):
+        cdef int n_split_candidates
+        if allowed_features is None:
+            split_features = self.all_features
+        else:
+            split_features = allowed_features
+        n_split_candidates = split_features.shape[0]
+        if self.feature_fraction_per_split < 1.0:
+            n_split_candidates = max(
+                1,
+                int(ceil(self.feature_fraction_per_split * n_split_candidates)),
+            )
+            split_features = self.rng.choice(
+                split_features, n_split_candidates, replace=False,
+            )
+            split_features = np.sort(split_features)
+        return split_features
+
+    cdef void _find_best_split_one_feature(
+            Splitter self,
+            unsigned int feature_idx,
+            const hist_struct [:, ::1] histograms,
+            unsigned int n_samples,
+            Y_DTYPE_C sum_gradients,
+            Y_DTYPE_C sum_hessians,
+            Y_DTYPE_C value,
+            Y_DTYPE_C lower_bound,
+            Y_DTYPE_C upper_bound,
+            split_info_struct * split_info) noexcept nogil:
+        """Loop body of find_node_split, for one candidate feature."""
+        cdef uint8_t missing_go_to_left
+        split_info.feature_idx = feature_idx
+        split_info.gain = -1
+        split_info.is_categorical = self.is_categorical[feature_idx]
+        if self.is_categorical[feature_idx]:
+            self._find_best_bin_to_split_category(
+                feature_idx, self.has_missing_values[feature_idx],
+                histograms, n_samples, sum_gradients, sum_hessians,
+                value, self.monotonic_cst[feature_idx], lower_bound,
+                upper_bound, split_info)
+        else:
+            for missing_go_to_left in range(
+                self.has_missing_values[feature_idx] + 1
+            ):
+                self._find_best_bin_to_split_numerical(
+                    feature_idx, self.has_missing_values[feature_idx],
+                    histograms, n_samples, sum_gradients, sum_hessians,
+                    value, self.monotonic_cst[feature_idx],
+                    lower_bound, upper_bound, missing_go_to_left,
+                    split_info)
+
+    cdef _split_info_from_struct(self, split_info_struct split_info):
+        out = SplitInfo(
+            split_info.gain,
+            split_info.feature_idx,
+            split_info.bin_idx,
+            split_info.missing_go_to_left,
+            split_info.sum_gradient_left,
+            split_info.sum_hessian_left,
+            split_info.sum_gradient_right,
+            split_info.sum_hessian_right,
+            split_info.n_samples_left,
+            split_info.n_samples_right,
+            split_info.value_left,
+            split_info.value_right,
+            split_info.is_categorical,
+            None,
+        )
+        if split_info.is_categorical:
+            out.left_cat_bitset = np.asarray(split_info.left_cat_bitset, dtype=np.uint32)
+        return out
+
+    def find_node_split_pair(
+            Splitter self,
+            bint split_left,
+            unsigned int n_samples_left,
+            hist_struct [:, ::1] histograms_left,
+            const Y_DTYPE_C sum_gradients_left,
+            const Y_DTYPE_C sum_hessians_left,
+            const Y_DTYPE_C value_left,
+            const Y_DTYPE_C lower_bound_left,
+            const Y_DTYPE_C upper_bound_left,
+            bint split_right,
+            unsigned int n_samples_right,
+            hist_struct [:, ::1] histograms_right,
+            const Y_DTYPE_C sum_gradients_right,
+            const Y_DTYPE_C sum_hessians_right,
+            const Y_DTYPE_C value_right,
+            const Y_DTYPE_C lower_bound_right,
+            const Y_DTYPE_C upper_bound_right,
+            const unsigned int [:] allowed_features=None,
+            ):
+        """Same as find_node_split on each child, in one parallel region.
+
+        Returns the SplitInfo of each child, or None for a child with
+        ``split_<side>=False``. Feature subsampling draws the left child first,
+        like two find_node_split calls would.
+        """
+        cdef:
+            const unsigned int [:] features_left = self.all_features
+            const unsigned int [:] features_right = self.all_features
+            int n_left = 0
+            int n_right = 0
+            int n_total
+            int idx
+            int best_left = 0
+            int best_right = 0
+            bint use_threads
+            int n_threads = self.n_threads
+            split_info_struct * split_infos
+
+        if split_left:
+            features_left = self._draw_split_features(allowed_features)
+            n_left = features_left.shape[0]
+        if split_right:
+            features_right = self._draw_split_features(allowed_features)
+            n_right = features_right.shape[0]
+        n_total = n_left + n_right
+        use_threads = self._find_split_use_threads(n_total)
+
+        with nogil:
+            split_infos = <split_info_struct *> malloc(
+                n_total * sizeof(split_info_struct))
+            for idx in prange(n_total, schedule='static',
+                              num_threads=n_threads,
+                              use_threads_if=use_threads):
+                if idx < n_left:
+                    self._find_best_split_one_feature(
+                        features_left[idx], histograms_left, n_samples_left,
+                        sum_gradients_left, sum_hessians_left, value_left,
+                        lower_bound_left, upper_bound_left, &split_infos[idx])
+                else:
+                    self._find_best_split_one_feature(
+                        features_right[idx - n_left], histograms_right,
+                        n_samples_right, sum_gradients_right,
+                        sum_hessians_right, value_right, lower_bound_right,
+                        upper_bound_right, &split_infos[idx])
+            if n_left > 0:
+                best_left = self._find_best_feature_to_split_helper(
+                    split_infos, n_left)
+            if n_right > 0:
+                best_right = n_left + self._find_best_feature_to_split_helper(
+                    split_infos + n_left, n_right)
+
+        out_left = (
+            self._split_info_from_struct(split_infos[best_left])
+            if split_left else None
+        )
+        out_right = (
+            self._split_info_from_struct(split_infos[best_right])
+            if split_right else None
+        )
+        free(split_infos)
+        return out_left, out_right
 
     cdef int _find_best_feature_to_split_helper(
         self,
