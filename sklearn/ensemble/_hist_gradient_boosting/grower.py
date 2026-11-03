@@ -33,6 +33,10 @@ from sklearn.utils._bitset import set_raw_bitset_from_binned_bitset
 # - SKLEARN_HGB_EXP: comma separated list. "fuse" merges the parallel regions
 #   of a split: split_indices (2 -> 1), children histograms (3 -> 1) and
 #   children split finding (2 -> 1).
+#   "fuse2" also merges the histograms and split finding of both children:
+#   2 regions per split.
+#   "fuse3" also moves the gather of the gradients of the child with the
+#   fewest samples into split_indices: 2 regions and 1 barrier per split.
 _GUARD_MODES = {"pr": 0, "abs": 1, "none": 2}
 
 
@@ -326,7 +330,10 @@ class TreeGrower:
             raise ValueError("Categorical features cannot have monotonic constraints.")
 
         hessians_are_constant = hessians.shape[0] == 1
-        self._fuse = "fuse" in os.environ.get("SKLEARN_HGB_EXP", "").split(",")
+        exp_flags = os.environ.get("SKLEARN_HGB_EXP", "").split(",")
+        self._fuse3 = "fuse3" in exp_flags
+        self._fuse2 = "fuse2" in exp_flags or self._fuse3
+        self._fuse = "fuse" in exp_flags or self._fuse2
         self.histogram_builder = HistogramBuilder(
             X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
         )
@@ -530,6 +537,24 @@ class TreeGrower:
             right.children_upper_bound,
             left.allowed_features,
         )
+        self._push_children_splits(
+            left,
+            right,
+            split_info_left,
+            split_info_right,
+            should_split_left,
+            should_split_right,
+        )
+
+    def _push_children_splits(
+        self,
+        left,
+        right,
+        split_info_left,
+        split_info_right,
+        should_split_left,
+        should_split_right,
+    ):
         for node, split_info, should_split in (
             (left, split_info_left, should_split_left),
             (right, split_info_right, should_split_right),
@@ -560,7 +585,11 @@ class TreeGrower:
             sample_indices_left,
             sample_indices_right,
             right_child_pos,
-        ) = self.splitter.split_indices(node.split_info, node.sample_indices)
+        ) = self.splitter.split_indices(
+            node.split_info,
+            node.sample_indices,
+            self.histogram_builder if self._fuse3 else None,
+        )
         self.total_apply_split_time += time() - tic
 
         depth = node.depth + 1
@@ -674,7 +703,35 @@ class TreeGrower:
             # on the other one.
             # Note that both left and right child have the same allowed_features.
             tic = time()
-            if self._fuse:
+            if self._fuse2:
+                (
+                    smallest_child.histograms,
+                    largest_child.histograms,
+                    split_info_left,
+                    split_info_right,
+                ) = self.splitter.compute_histograms_and_find_splits(
+                    self.histogram_builder,
+                    smallest_child.sample_indices,
+                    node.histograms,
+                    smallest_child is left_child_node,
+                    should_split_left,
+                    left_child_node.n_samples,
+                    left_child_node.sum_gradients,
+                    left_child_node.sum_hessians,
+                    left_child_node.value,
+                    left_child_node.children_lower_bound,
+                    left_child_node.children_upper_bound,
+                    should_split_right,
+                    right_child_node.n_samples,
+                    right_child_node.sum_gradients,
+                    right_child_node.sum_hessians,
+                    right_child_node.value,
+                    right_child_node.children_lower_bound,
+                    right_child_node.children_upper_bound,
+                    smallest_child.allowed_features,
+                    gradients_are_ordered=self._fuse3,
+                )
+            elif self._fuse:
                 (
                     smallest_child.histograms,
                     largest_child.histograms,
@@ -703,7 +760,16 @@ class TreeGrower:
             self.total_compute_hist_time += time() - tic
 
             tic = time()
-            if self._fuse:
+            if self._fuse2:
+                self._push_children_splits(
+                    left_child_node,
+                    right_child_node,
+                    split_info_left,
+                    split_info_right,
+                    should_split_left,
+                    should_split_right,
+                )
+            elif self._fuse:
                 self._compute_best_splits_and_push_pair(
                     left_child_node,
                     right_child_node,

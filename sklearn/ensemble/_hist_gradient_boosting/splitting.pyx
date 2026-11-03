@@ -23,6 +23,10 @@ from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport Y_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
 from sklearn.ensemble._hist_gradient_boosting.common cimport MonotonicConstraint
+from sklearn.ensemble._hist_gradient_boosting.common cimport G_H_DTYPE_C
+from sklearn.ensemble._hist_gradient_boosting.common import HISTOGRAM_DTYPE
+from sklearn.ensemble._hist_gradient_boosting.histogram cimport HistogramBuilder
+from sklearn.ensemble._hist_gradient_boosting.histogram cimport _subtract_histograms
 
 
 cdef struct split_info_struct:
@@ -258,7 +262,7 @@ cdef class Splitter:
         self.right_indices_buffer = np.empty_like(self.partition)
 
     def split_indices(Splitter self, split_info, unsigned int [::1]
-                      sample_indices):
+                      sample_indices, HistogramBuilder histogram_builder=None):
         """Split samples into left and right arrays.
 
         The split is performed according to the best possible split
@@ -356,6 +360,18 @@ cdef class Splitter:
             int j
             int left_pos
             int right_pos
+            # With a histogram_builder, also gather the gradients and hessians
+            # of the child with the fewest samples into its ordered_gradients
+            # and ordered_hessians, as compute_histograms_brute would.
+            bint gather = histogram_builder is not None
+            uint8_t hessians_are_constant = self.hessians_are_constant
+            G_H_DTYPE_C [::1] gradients
+            G_H_DTYPE_C [::1] hessians
+            G_H_DTYPE_C [::1] ordered_gradients
+            G_H_DTYPE_C [::1] ordered_hessians
+            int child_split
+            int small_start
+            int n_small
 
             int right_child_position
             unsigned int [::1] left_indices_buffer = self.left_indices_buffer
@@ -381,6 +397,12 @@ cdef class Splitter:
         if is_categorical:
             left_cat_bitset = &cat_bitset_tmp[0]
 
+        if gather:
+            gradients = histogram_builder.gradients
+            hessians = histogram_builder.hessians
+            ordered_gradients = histogram_builder.ordered_gradients
+            ordered_hessians = histogram_builder.ordered_hessians
+
         if n_threads > 1 and not self.active_wait:
             if self.guard_mode == 1:
                 use_threads = n_samples >= self.abs_min_samples_threads
@@ -398,6 +420,19 @@ cdef class Splitter:
                     bin_idx, missing_go_to_left, missing_values_bin_idx,
                     X_binned, is_categorical, left_cat_bitset,
                 )
+            if gather:
+                if right_child_position < n_samples - right_child_position:
+                    small_start = 0
+                    n_small = right_child_position
+                else:
+                    small_start = right_child_position
+                    n_small = n_samples - right_child_position
+                with nogil:
+                    for i in range(n_small):
+                        ordered_gradients[i] = gradients[sample_indices[small_start + i]]
+                    if not hessians_are_constant:
+                        for i in range(n_small):
+                            ordered_hessians[i] = hessians[sample_indices[small_start + i]]
             return (sample_indices[:right_child_position],
                     sample_indices[right_child_position:],
                     right_child_position)
@@ -462,6 +497,26 @@ cdef class Splitter:
                             &right_indices_buffer[offset_in_buffers[thread_idx]],
                             sizeof(unsigned int) * right_counts[thread_idx]
                         )
+                    if gather:
+                        child_split = 0
+                        for j in range(n_threads):
+                            child_split = child_split + left_counts[j]
+                        if child_split < n_samples - child_split:
+                            for j in range(left_counts[thread_idx]):
+                                sample_idx = left_indices_buffer[
+                                    offset_in_buffers[thread_idx] + j]
+                                ordered_gradients[left_pos + j] = gradients[sample_idx]
+                                if not hessians_are_constant:
+                                    ordered_hessians[left_pos + j] = hessians[sample_idx]
+                        else:
+                            for j in range(right_counts[thread_idx]):
+                                sample_idx = right_indices_buffer[
+                                    offset_in_buffers[thread_idx] + j]
+                                ordered_gradients[right_pos - child_split + j] = (
+                                    gradients[sample_idx])
+                                if not hessians_are_constant:
+                                    ordered_hessians[right_pos - child_split + j] = (
+                                        hessians[sample_idx])
 
             right_child_position = 0
             for thread_idx in range(n_threads):
@@ -883,6 +938,158 @@ cdef class Splitter:
         )
         free(split_infos)
         return out_left, out_right
+
+    def compute_histograms_and_find_splits(
+            Splitter self,
+            HistogramBuilder histogram_builder,
+            const unsigned int [::1] sample_indices,
+            hist_struct [:, ::1] parent_histograms,
+            bint left_is_smallest,
+            bint split_left,
+            unsigned int n_samples_left,
+            const Y_DTYPE_C sum_gradients_left,
+            const Y_DTYPE_C sum_hessians_left,
+            const Y_DTYPE_C value_left,
+            const Y_DTYPE_C lower_bound_left,
+            const Y_DTYPE_C upper_bound_left,
+            bint split_right,
+            unsigned int n_samples_right,
+            const Y_DTYPE_C sum_gradients_right,
+            const Y_DTYPE_C sum_hessians_right,
+            const Y_DTYPE_C value_right,
+            const Y_DTYPE_C lower_bound_right,
+            const Y_DTYPE_C upper_bound_right,
+            const unsigned int [:] allowed_features=None,
+            bint gradients_are_ordered=False,
+            ):
+        """Children histograms and best splits, in one parallel region.
+
+        Same as `HistogramBuilder.compute_histograms_pair` followed by
+        `find_node_split_pair`: the split of a feature only needs the
+        histogram of that feature, so each loop iteration builds the
+        histograms of one feature for both children and finds their best bin.
+
+        ``sample_indices`` are those of the child with the fewest samples
+        (the left one if ``left_is_smallest``) and ``parent_histograms`` is
+        overwritten with the histograms of its sibling. With
+        ``gradients_are_ordered``, `split_indices` already gathered their
+        gradients and hessians, and the region needs no barrier.
+
+        Returns
+        -------
+        histograms, sibling_histograms, split_info_left, split_info_right
+            Histograms of the child with the fewest samples and of its
+            sibling. A split info is None for a child with
+            ``split_<side>=False``.
+        """
+        cdef:
+            HistogramBuilder hb = histogram_builder
+            int n_samples = sample_indices.shape[0]
+            int n_allowed_features = self.n_features
+            bint has_interaction_cst = allowed_features is not None
+            unsigned int n_bins = hb.n_bins
+            uint8_t hessians_are_constant = hb.hessians_are_constant
+            G_H_DTYPE_C [::1] ordered_gradients = hb.ordered_gradients
+            G_H_DTYPE_C [::1] gradients = hb.gradients
+            G_H_DTYPE_C [::1] ordered_hessians = hb.ordered_hessians
+            G_H_DTYPE_C [::1] hessians = hb.hessians
+            hist_struct [:, ::1] histograms = np.empty(
+                shape=(hb.n_features, n_bins), dtype=HISTOGRAM_DTYPE)
+            hist_struct [:, ::1] histograms_left
+            hist_struct [:, ::1] histograms_right
+            const unsigned int [:] features_left = self.all_features
+            const unsigned int [:] features_right = self.all_features
+            # Position of each feature in features_<side>, -1 if not a candidate.
+            int [::1] slot_left
+            int [::1] slot_right
+            int n_left = 0
+            int n_right = 0
+            int i
+            int f_idx
+            int feature_idx
+            int slot
+            int best_left = 0
+            int best_right = 0
+            int n_threads = self.n_threads
+            split_info_struct * split_infos
+
+        if has_interaction_cst:
+            n_allowed_features = allowed_features.shape[0]
+        if left_is_smallest:
+            histograms_left, histograms_right = histograms, parent_histograms
+        else:
+            histograms_left, histograms_right = parent_histograms, histograms
+
+        slot_left_arr = np.full(self.n_features, -1, dtype=np.int32)
+        slot_right_arr = np.full(self.n_features, -1, dtype=np.int32)
+        if split_left:
+            features_left = self._draw_split_features(allowed_features)
+            n_left = features_left.shape[0]
+            slot_left_arr[np.asarray(features_left)] = np.arange(n_left)
+        if split_right:
+            features_right = self._draw_split_features(allowed_features)
+            n_right = features_right.shape[0]
+            slot_right_arr[np.asarray(features_right)] = np.arange(n_right)
+        slot_left = slot_left_arr
+        slot_right = slot_right_arr
+
+        split_infos = <split_info_struct *> malloc(
+            max(1, n_left + n_right) * sizeof(split_info_struct))
+
+        with nogil, parallel(num_threads=n_threads):
+            # The implicit barrier at the end of the gather loop makes all the
+            # ordered gradients visible to the feature loop.
+            if not gradients_are_ordered:
+                if hessians_are_constant:
+                    for i in prange(n_samples, schedule='static'):
+                        ordered_gradients[i] = gradients[sample_indices[i]]
+                else:
+                    for i in prange(n_samples, schedule='static'):
+                        ordered_gradients[i] = gradients[sample_indices[i]]
+                        ordered_hessians[i] = hessians[sample_indices[i]]
+
+            for f_idx in prange(n_allowed_features, schedule='static'):
+                if has_interaction_cst:
+                    feature_idx = allowed_features[f_idx]
+                else:
+                    feature_idx = f_idx
+
+                hb._compute_histogram_brute_single_feature(
+                    feature_idx, sample_indices, histograms)
+                _subtract_histograms(
+                    feature_idx, n_bins, parent_histograms, histograms)
+
+                slot = slot_left[feature_idx]
+                if slot >= 0:
+                    self._find_best_split_one_feature(
+                        feature_idx, histograms_left, n_samples_left,
+                        sum_gradients_left, sum_hessians_left, value_left,
+                        lower_bound_left, upper_bound_left, &split_infos[slot])
+                slot = slot_right[feature_idx]
+                if slot >= 0:
+                    self._find_best_split_one_feature(
+                        feature_idx, histograms_right, n_samples_right,
+                        sum_gradients_right, sum_hessians_right, value_right,
+                        lower_bound_right, upper_bound_right,
+                        &split_infos[n_left + slot])
+
+        if n_left > 0:
+            best_left = self._find_best_feature_to_split_helper(
+                split_infos, n_left)
+        if n_right > 0:
+            best_right = n_left + self._find_best_feature_to_split_helper(
+                split_infos + n_left, n_right)
+
+        out_left = (
+            self._split_info_from_struct(split_infos[best_left])
+            if split_left else None
+        )
+        out_right = (
+            self._split_info_from_struct(split_infos[best_right])
+            if split_right else None
+        )
+        free(split_infos)
+        return np.asarray(histograms), np.asarray(parent_histograms), out_left, out_right
 
     cdef int _find_best_feature_to_split_helper(
         self,

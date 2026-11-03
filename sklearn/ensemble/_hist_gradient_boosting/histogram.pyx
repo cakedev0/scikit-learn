@@ -73,16 +73,7 @@ cdef class HistogramBuilder:
     hessians_are_constant : bool
         Whether hessians are constant.
     """
-    cdef public:
-        const X_BINNED_DTYPE_C [::1, :] X_binned
-        unsigned int n_features
-        unsigned int n_bins
-        G_H_DTYPE_C [::1] gradients
-        G_H_DTYPE_C [::1] hessians
-        G_H_DTYPE_C [::1] ordered_gradients
-        G_H_DTYPE_C [::1] ordered_hessians
-        uint8_t hessians_are_constant
-        int n_threads
+    # Attributes are declared in histogram.pxd.
 
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
