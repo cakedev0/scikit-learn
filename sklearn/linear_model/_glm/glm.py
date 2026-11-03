@@ -25,7 +25,7 @@ from sklearn.linear_model._glm._newton_solver import (
     NewtonCholeskySolver,
     NewtonSolver,
 )
-from sklearn.linear_model._linear_loss import LinearModelLoss
+from sklearn.linear_model._linear_loss import LinearModelLoss, _LBFGSReparametrization
 from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _average,
@@ -391,7 +391,14 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
         # Algorithms for optimization:
         # Note again that our losses implement 1/2 * deviance.
         if self.solver_ == "lbfgs":
+            reparametrization = None
             func = linear_loss.loss_gradient
+            if _is_numpy_namespace(xp):
+                reparametrization = _LBFGSReparametrization(
+                    linear_loss, X, sample_weight
+                )
+                func = reparametrization.loss_gradient
+                coef = reparametrization.to_internal(coef)
 
             opt_res = scipy.optimize.minimize(
                 func,
@@ -401,7 +408,11 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
                 options={
                     "maxiter": self.max_iter,
                     "maxls": 50,  # default is 20
-                    "gtol": self.tol,
+                    "gtol": (
+                        self.tol
+                        if reparametrization is None
+                        else reparametrization.gtol(self.tol)
+                    ),
                     # The constant 64 was found empirically to pass the test suite.
                     # The point is that ftol is very small, but a bit larger than
                     # machine precision for float64, which is the dtype used by lbfgs.
@@ -414,6 +425,8 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
                 "lbfgs", opt_res, max_iter=self.max_iter
             )
             coef = opt_res.x
+            if reparametrization is not None:
+                coef = reparametrization.from_internal(coef)
             coef = xp.asarray(
                 coef.copy(order="C" if not _is_numpy_namespace(xp) else "K"),
                 dtype=X.dtype,
