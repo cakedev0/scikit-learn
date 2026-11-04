@@ -73,16 +73,6 @@ cdef class HistogramBuilder:
     hessians_are_constant : bool
         Whether hessians are constant.
     """
-    cdef public:
-        const X_BINNED_DTYPE_C [::1, :] X_binned
-        unsigned int n_features
-        unsigned int n_bins
-        G_H_DTYPE_C [::1] gradients
-        G_H_DTYPE_C [::1] hessians
-        G_H_DTYPE_C [::1] ordered_gradients
-        G_H_DTYPE_C [::1] ordered_hessians
-        uint8_t hessians_are_constant
-        int n_threads
 
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
@@ -221,66 +211,6 @@ cdef class HistogramBuilder:
                 _build_histogram(feature_idx, sample_indices,
                                  X_binned, ordered_gradients,
                                  ordered_hessians, histograms)
-
-    def compute_histograms_subtraction(
-        HistogramBuilder self,
-        hist_struct [:, ::1] parent_histograms,        # IN and OUT
-        hist_struct [:, ::1] sibling_histograms,       # IN
-        const unsigned int [:] allowed_features=None,  # IN
-    ):
-        """Compute the histograms of the node using the subtraction trick.
-
-        hist(parent) = hist(left_child) + hist(right_child)
-
-        For a given feature, the complexity is O(n_bins). This is much more
-        efficient than compute_histograms_brute, but it's only possible for one
-        of the siblings.
-
-        Parameters
-        ----------
-        parent_histograms : ndarray of HISTOGRAM_DTYPE, \
-                shape (n_features, n_bins)
-            The histograms of the parent.
-        sibling_histograms : ndarray of HISTOGRAM_DTYPE, \
-                shape (n_features, n_bins)
-            The histograms of the sibling.
-        allowed_features : None or ndarray, dtype=np.uint32
-            Indices of the features that are allowed by interaction constraints to be
-            split.
-
-        Returns
-        -------
-        histograms : ndarray of HISTOGRAM_DTYPE, shape(n_features, n_bins)
-            The computed histograms of the current node.
-            We repurpose parent_histograms for this and don't need to allocate new
-            memory.
-        """
-
-        cdef:
-            int feature_idx
-            int f_idx
-            int n_allowed_features = self.n_features
-            bint has_interaction_cst = allowed_features is not None
-            int n_threads = self.n_threads
-
-        if has_interaction_cst:
-            n_allowed_features = allowed_features.shape[0]
-
-        # Compute histogram of each feature
-        for f_idx in prange(n_allowed_features, schedule='static', nogil=True,
-                            num_threads=n_threads):
-            if has_interaction_cst:
-                feature_idx = allowed_features[f_idx]
-            else:
-                feature_idx = f_idx
-
-            _subtract_histograms(
-                feature_idx,
-                self.n_bins,
-                parent_histograms,
-                sibling_histograms,
-            )
-        return parent_histograms
 
 
 cpdef void _build_histogram_naive(

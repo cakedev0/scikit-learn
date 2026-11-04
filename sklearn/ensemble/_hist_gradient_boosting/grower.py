@@ -235,9 +235,9 @@ class TreeGrower:
     n_features : int
     n_nodes : int
     total_find_split_time : float
-        Time spent finding the best splits
+        Time spent finding the best split of the root
     total_compute_hist_time : float
-        Time spent computing histograms
+        Time spent computing histograms, and the best splits of all nodes but the root
     total_apply_split_time : float
         Time spent splitting nodes
     with_monotonic_cst : bool
@@ -353,8 +353,8 @@ class TreeGrower:
         self.n_threads = n_threads
         self.splittable_nodes = []
         self.finalized_leaves = []
-        self.total_find_split_time = 0.0  # time spent finding the best splits
-        self.total_compute_hist_time = 0.0  # time spent computing histograms
+        self.total_find_split_time = 0.0  # see class docstring
+        self.total_compute_hist_time = 0.0  # see class docstring
         self.total_apply_split_time = 0.0  # time spent splitting nodes
         self.n_categorical_splits = 0
         self._initialize_root()
@@ -473,7 +473,7 @@ class TreeGrower:
         (min_hessians_to_split, min_gain_to_split, min_samples_leaf)
         """
 
-        node.split_info = self.splitter.find_node_split(
+        split_info = self.splitter.find_node_split(
             n_samples=node.n_samples,
             histograms=node.histograms,
             sum_gradients=node.sum_gradients,
@@ -483,8 +483,12 @@ class TreeGrower:
             upper_bound=node.children_upper_bound,
             allowed_features=node.allowed_features,
         )
+        self._set_split_and_push(node, split_info)
 
-        if node.split_info.gain <= 0:  # no valid split
+    def _set_split_and_push(self, node, split_info):
+        """Set the best split of a node, and push it unless it's a leaf."""
+        node.split_info = split_info
+        if split_info.gain <= 0:  # no valid split
             self._finalize_leaf(node)
         else:
             heappush(self.splittable_nodes, node)
@@ -502,17 +506,24 @@ class TreeGrower:
         # Consider the node with the highest loss reduction (a.k.a. gain)
         node = heappop(self.splittable_nodes)
 
+        depth = node.depth + 1
+        n_leaf_nodes = len(self.finalized_leaves) + len(self.splittable_nodes)
+        n_leaf_nodes += 2
+        children_are_leaves = (
+            self.max_leaf_nodes is not None and n_leaf_nodes == self.max_leaf_nodes
+        ) or (self.max_depth is not None and depth == self.max_depth)
+
         tic = time()
         (
             sample_indices_left,
             sample_indices_right,
             right_child_pos,
-        ) = self.splitter.split_indices(node.split_info, node.sample_indices)
+        ) = self.splitter.split_indices(
+            node.split_info,
+            node.sample_indices,
+            None if children_are_leaves else self.histogram_builder,
+        )
         self.total_apply_split_time += time() - tic
-
-        depth = node.depth + 1
-        n_leaf_nodes = len(self.finalized_leaves) + len(self.splittable_nodes)
-        n_leaf_nodes += 2
 
         left_child_node = TreeNode(
             depth=depth,
@@ -560,15 +571,11 @@ class TreeGrower:
         self.n_nodes += 2
         self.n_categorical_splits += node.split_info.is_categorical
 
-        if self.max_leaf_nodes is not None and n_leaf_nodes == self.max_leaf_nodes:
+        if children_are_leaves:
             self._finalize_leaf(left_child_node)
             self._finalize_leaf(right_child_node)
-            self._finalize_splittable_nodes()
-            return left_child_node, right_child_node
-
-        if self.max_depth is not None and depth == self.max_depth:
-            self._finalize_leaf(left_child_node)
-            self._finalize_leaf(right_child_node)
+            if self.max_leaf_nodes is not None and n_leaf_nodes == self.max_leaf_nodes:
+                self._finalize_splittable_nodes()
             return left_child_node, right_child_node
 
         if left_child_node.n_samples < self.min_samples_leaf * 2:
@@ -621,27 +628,41 @@ class TreeGrower:
             # on the other one.
             # Note that both left and right child have the same allowed_features.
             tic = time()
-            smallest_child.histograms = self.histogram_builder.compute_histograms_brute(
-                smallest_child.sample_indices, smallest_child.allowed_features
-            )
-            largest_child.histograms = (
-                self.histogram_builder.compute_histograms_subtraction(
-                    node.histograms,
-                    smallest_child.histograms,
-                    smallest_child.allowed_features,
-                )
+            (
+                smallest_child.histograms,
+                largest_child.histograms,
+                split_info_left,
+                split_info_right,
+            ) = self.splitter.compute_histograms_and_find_splits(
+                self.histogram_builder,
+                smallest_child.sample_indices,
+                node.histograms,
+                smallest_child is left_child_node,
+                should_split_left,
+                left_child_node.n_samples,
+                left_child_node.sum_gradients,
+                left_child_node.sum_hessians,
+                left_child_node.value,
+                left_child_node.children_lower_bound,
+                left_child_node.children_upper_bound,
+                should_split_right,
+                right_child_node.n_samples,
+                right_child_node.sum_gradients,
+                right_child_node.sum_hessians,
+                right_child_node.value,
+                right_child_node.children_lower_bound,
+                right_child_node.children_upper_bound,
+                smallest_child.allowed_features,
             )
             # node.histograms is reused in largest_child.histograms. To break cyclic
             # memory references and help garbage collection, we set it to None.
             node.histograms = None
             self.total_compute_hist_time += time() - tic
 
-            tic = time()
             if should_split_left:
-                self._compute_best_split_and_push(left_child_node)
+                self._set_split_and_push(left_child_node, split_info_left)
             if should_split_right:
-                self._compute_best_split_and_push(right_child_node)
-            self.total_find_split_time += time() - tic
+                self._set_split_and_push(right_child_node, split_info_right)
 
             # Release memory used by histograms as they are no longer needed
             # for leaf nodes since they won't be split.
