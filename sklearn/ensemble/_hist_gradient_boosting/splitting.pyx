@@ -1051,7 +1051,7 @@ cdef class Splitter:
                         ordered_gradients[i] = gradients[sample_indices[i]]
                         ordered_hessians[i] = hessians[sample_indices[i]]
 
-            for f_idx in prange(n_allowed_features, schedule='static'):
+            for f_idx in prange(n_allowed_features, schedule='dynamic', chunksize=1):
                 if has_interaction_cst:
                     feature_idx = allowed_features[f_idx]
                 else:
