@@ -9,6 +9,7 @@ cdef extern from *:
     #ifdef _OPENMP
         #include <omp.h>
         #define SKLEARN_OPENMP_PARALLELISM_ENABLED 1
+        #define SKLEARN_OMP_BARRIER() _Pragma("omp barrier")
     #else
         #define SKLEARN_OPENMP_PARALLELISM_ENABLED 0
         #define omp_lock_t int
@@ -17,6 +18,8 @@ cdef extern from *:
         #define omp_set_lock(l) (void)0
         #define omp_unset_lock(l) (void)0
         #define omp_get_thread_num() 0
+        #define omp_get_num_threads() 1
+        #define SKLEARN_OMP_BARRIER() (void)0
         #define omp_get_max_threads() 1
     #endif
     """
@@ -30,4 +33,11 @@ cdef extern from *:
     void omp_set_lock(omp_lock_t*) noexcept nogil
     void omp_unset_lock(omp_lock_t*) noexcept nogil
     int omp_get_thread_num() noexcept nogil
+    int omp_get_num_threads() noexcept nogil
+    void omp_barrier "SKLEARN_OMP_BARRIER"() noexcept nogil
     int omp_get_max_threads() noexcept nogil
+
+
+cdef inline int block_start(int n, int thread, int n_threads_) noexcept nogil:
+    """First index of `thread`'s block in a static partition of range(n)."""
+    return <int>((<long long> n * thread) / n_threads_)

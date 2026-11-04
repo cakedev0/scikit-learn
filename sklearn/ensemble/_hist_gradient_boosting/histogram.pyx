@@ -14,6 +14,7 @@ from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport G_H_DTYPE_C
 from sklearn.utils._typedefs cimport uint8_t
+from sklearn.utils._openmp_helpers cimport block_start, omp_get_num_threads, omp_get_thread_num
 
 
 # Notes:
@@ -122,6 +123,8 @@ cdef class HistogramBuilder:
             int feature_idx
             int f_idx
             int i
+            int tid
+            int nt
             # need local views to avoid python interactions
             uint8_t hessians_are_constant = self.hessians_are_constant
             int n_allowed_features = self.n_features
@@ -147,28 +150,33 @@ cdef class HistogramBuilder:
             # for root) Ordering the gradients and hessians helps to improve
             # cache hit.
             if sample_indices.shape[0] != gradients.shape[0]:
-                if hessians_are_constant:
-                    for i in prange(n_samples, schedule='static',
-                                    num_threads=n_threads):
-                        ordered_gradients[i] = gradients[sample_indices[i]]
-                else:
-                    for i in prange(n_samples, schedule='static',
-                                    num_threads=n_threads):
-                        ordered_gradients[i] = gradients[sample_indices[i]]
-                        ordered_hessians[i] = hessians[sample_indices[i]]
+                with parallel(num_threads=n_threads):
+                    tid = omp_get_thread_num()
+                    nt = omp_get_num_threads()
+                    if hessians_are_constant:
+                        for i in range(block_start(n_samples, tid, nt),
+                                       block_start(n_samples, tid + 1, nt)):
+                            ordered_gradients[i] = gradients[sample_indices[i]]
+                    else:
+                        for i in range(block_start(n_samples, tid, nt),
+                                       block_start(n_samples, tid + 1, nt)):
+                            ordered_gradients[i] = gradients[sample_indices[i]]
+                            ordered_hessians[i] = hessians[sample_indices[i]]
 
             # Compute histogram of each feature
-            for f_idx in prange(
-                n_allowed_features, schedule='static', num_threads=n_threads
-            ):
-                if has_interaction_cst:
-                    feature_idx = allowed_features[f_idx]
-                else:
-                    feature_idx = f_idx
+            with parallel(num_threads=n_threads):
+                tid = omp_get_thread_num()
+                nt = omp_get_num_threads()
+                for f_idx in range(block_start(n_allowed_features, tid, nt),
+                                   block_start(n_allowed_features, tid + 1, nt)):
+                    if has_interaction_cst:
+                        feature_idx = allowed_features[f_idx]
+                    else:
+                        feature_idx = f_idx
 
-                self._compute_histogram_brute_single_feature(
-                    feature_idx, sample_indices, histograms
-                )
+                    self._compute_histogram_brute_single_feature(
+                        feature_idx, sample_indices, histograms
+                    )
 
         return histograms
 
@@ -250,6 +258,8 @@ cdef class HistogramBuilder:
         cdef:
             int feature_idx
             int f_idx
+            int tid
+            int nt
             int n_allowed_features = self.n_features
             bint has_interaction_cst = allowed_features is not None
             int n_threads = self.n_threads
@@ -258,19 +268,22 @@ cdef class HistogramBuilder:
             n_allowed_features = allowed_features.shape[0]
 
         # Compute histogram of each feature
-        for f_idx in prange(n_allowed_features, schedule='static', nogil=True,
-                            num_threads=n_threads):
-            if has_interaction_cst:
-                feature_idx = allowed_features[f_idx]
-            else:
-                feature_idx = f_idx
+        with nogil, parallel(num_threads=n_threads):
+            tid = omp_get_thread_num()
+            nt = omp_get_num_threads()
+            for f_idx in range(block_start(n_allowed_features, tid, nt),
+                               block_start(n_allowed_features, tid + 1, nt)):
+                if has_interaction_cst:
+                    feature_idx = allowed_features[f_idx]
+                else:
+                    feature_idx = f_idx
 
-            _subtract_histograms(
-                feature_idx,
-                self.n_bins,
-                parent_histograms,
-                sibling_histograms,
-            )
+                _subtract_histograms(
+                    feature_idx,
+                    self.n_bins,
+                    parent_histograms,
+                    sibling_histograms,
+                )
         return parent_histograms
 
     def compute_histograms_pair(
