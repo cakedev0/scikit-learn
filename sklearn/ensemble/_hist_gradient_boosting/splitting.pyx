@@ -462,8 +462,8 @@ cdef class Splitter:
                     left_counts[thread_idx] = left_count
                     right_counts[thread_idx] = right_count
 
-                # Cython's prange is "omp for nowait": the second pass needs an
-                # explicit barrier to read all the counts.
+                # The second pass reads all the counts, and since Cython 3.3 a prange
+                # has no barrier at its end ("omp for nowait").
                 omp_barrier()
 
                 # map indices in left/right_indices_buffer back into
