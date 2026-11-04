@@ -1881,3 +1881,44 @@ def test_get_heuristic_optimal_n_threads_monotonic_in_n_samples():
         for n_samples in [1, 10, 100, 1000, 10**4, 10**5, 10**6, 10**7]
     ]
     assert n_threads_by_n_samples == sorted(n_threads_by_n_samples)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"max_features": 0.5},
+        {"categorical_features": [0]},
+        {"monotonic_cst": [0, 1, -1, 0, 0, 0]},
+        {"interaction_cst": [{1, 2}, {3, 4, 5}]},
+        {"max_depth": 3},
+    ],
+)
+def test_same_trees_with_any_number_of_threads(monkeypatch, params):
+    # Most of the tests in this module fit on a single thread since the heuristic
+    # gives one thread to small problems: also check the multi-threaded paths.
+    rng = np.random.RandomState(0)
+    X = rng.normal(size=(5_000, 6))
+    X[:, 0] = rng.randint(0, 8, size=X.shape[0])
+    X[rng.uniform(size=X.shape) < 0.05] = np.nan
+    X[:, 0] = np.nan_to_num(X[:, 0])
+    y = np.nansum(X[:, 1:3], axis=1) + rng.normal(size=X.shape[0])
+
+    def fit(n_threads):
+        monkeypatch.setattr(
+            HistGradientBoostingRegressor,
+            "_get_heuristic_optimal_n_threads",
+            staticmethod(lambda *args, **kwargs: n_threads),
+        )
+        est = HistGradientBoostingRegressor(
+            max_iter=5, random_state=0, early_stopping=False, **params
+        )
+        return est.fit(X, y)
+
+    # With active wait, split_indices uses threads on smaller nodes.
+    monkeypatch.setattr(hgb_module, "_openmp_uses_active_wait", lambda: True)
+    reference, threaded = fit(1), fit(4)
+    assert len(reference._predictors) == len(threaded._predictors)
+    for preds_1, preds_4 in zip(reference._predictors, threaded._predictors):
+        for pred_1, pred_4 in zip(preds_1, preds_4):
+            assert pred_1.nodes.tobytes() == pred_4.nodes.tobytes()

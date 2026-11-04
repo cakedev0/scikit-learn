@@ -9,6 +9,11 @@ cdef extern from *:
     #ifdef _OPENMP
         #include <omp.h>
         #define SKLEARN_OPENMP_PARALLELISM_ENABLED 1
+        #ifdef _MSC_VER
+            #define SKLEARN_OMP_BARRIER() __pragma(omp barrier)
+        #else
+            #define SKLEARN_OMP_BARRIER() _Pragma("omp barrier")
+        #endif
     #else
         #define SKLEARN_OPENMP_PARALLELISM_ENABLED 0
         #define omp_lock_t int
@@ -18,6 +23,7 @@ cdef extern from *:
         #define omp_unset_lock(l) (void)0
         #define omp_get_thread_num() 0
         #define omp_get_max_threads() 1
+        #define SKLEARN_OMP_BARRIER() (void)0
     #endif
     """
     bint SKLEARN_OPENMP_PARALLELISM_ENABLED
@@ -31,3 +37,4 @@ cdef extern from *:
     void omp_unset_lock(omp_lock_t*) noexcept nogil
     int omp_get_thread_num() noexcept nogil
     int omp_get_max_threads() noexcept nogil
+    void omp_barrier "SKLEARN_OMP_BARRIER"() noexcept nogil

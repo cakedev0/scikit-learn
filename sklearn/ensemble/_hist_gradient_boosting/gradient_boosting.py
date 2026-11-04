@@ -951,12 +951,8 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
             )
             print(
                 "{:<32} {:.3f}s".format(
-                    "Time spent computing histograms:", acc_compute_hist_time
-                )
-            )
-            print(
-                "{:<32} {:.3f}s".format(
-                    "Time spent finding best splits:", acc_find_split_time
+                    "Time spent on histograms+splits:",
+                    acc_compute_hist_time + acc_find_split_time,
                 )
             )
             print(
@@ -991,9 +987,9 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
         threads are not left idle or unevenly loaded) and against ``n_samples``
         (so that small datasets use fewer threads).
 
-        Within that fixed thread count, `Splitter.split_indices` and
-        `Splitter.find_node_split` still run serially when the workload of the
-        node at hand is too small, a cheap per-node decision.
+        Within that fixed thread count, `Splitter.split_indices` still runs
+        serially when the node at hand has too few samples, a cheap per-node
+        decision.
         """
         # For very small problems, multi-threading is always counter-productive.
         # Checked before calling _openmp_uses_active_wait, which spawns a

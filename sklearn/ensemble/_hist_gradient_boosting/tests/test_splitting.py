@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from numpy.testing import assert_array_equal
+from numpy.testing import assert_allclose, assert_array_equal
 
 from sklearn.ensemble._hist_gradient_boosting.common import (
     G_H_DTYPE,
@@ -10,6 +10,7 @@ from sklearn.ensemble._hist_gradient_boosting.common import (
 )
 from sklearn.ensemble._hist_gradient_boosting.histogram import HistogramBuilder
 from sklearn.ensemble._hist_gradient_boosting.splitting import (
+    SplitInfo,
     Splitter,
     compute_node_value,
 )
@@ -1068,3 +1069,203 @@ def test_split_feature_fraction_per_split(forbidden_features):
 
     # Make sure, our counterfactual always splits on same feature.
     assert len(set(split_features_all)) == 1
+
+
+@pytest.mark.parametrize("n_threads", [1, 4])
+@pytest.mark.parametrize("hessians_are_constant", [True, False])
+@pytest.mark.parametrize("left_is_smallest", [True, False])
+def test_split_indices_gathers_gradients(
+    n_threads, hessians_are_constant, left_is_smallest
+):
+    # split_indices fills the ordered gradients and hessians of the histogram
+    # builder with those of the child with the fewest samples.
+    rng = np.random.RandomState(42)
+    n_samples = 10_000  # enough for the threaded path of active_wait=True
+    bin_threshold = 50 if left_is_smallest else 200
+    X_binned = rng.randint(0, 255, size=(n_samples, 2), dtype=X_BINNED_DTYPE)
+    X_binned = np.asfortranarray(X_binned)
+    gradients = rng.uniform(size=n_samples).astype(G_H_DTYPE)
+    hessians = rng.uniform(size=n_samples).astype(G_H_DTYPE)
+    if hessians_are_constant:
+        hessians = np.ones(1, dtype=G_H_DTYPE)
+
+    builder = HistogramBuilder(
+        X_binned, 256, gradients, hessians, hessians_are_constant, n_threads
+    )
+    n_bins_non_missing = np.full(2, 255, dtype=np.uint32)
+    splitter = Splitter(
+        X_binned,
+        n_bins_non_missing,
+        255,
+        np.zeros(2, dtype=np.uint8),
+        np.zeros(2, dtype=np.uint8),
+        np.zeros(2, dtype=np.int8),
+        0.0,
+        hessians_are_constant=hessians_are_constant,
+        n_threads=n_threads,
+        active_wait=True,
+    )
+    split_info = SplitInfo(
+        gain=1.0,
+        feature_idx=1,
+        bin_idx=bin_threshold,
+        missing_go_to_left=False,
+        sum_gradient_left=0.0,
+        sum_hessian_left=0.0,
+        sum_gradient_right=0.0,
+        sum_hessian_right=0.0,
+        n_samples_left=0,
+        n_samples_right=0,
+        value_left=0.0,
+        value_right=0.0,
+        is_categorical=False,
+        left_cat_bitset=None,
+    )
+    left, right, _ = splitter.split_indices(split_info, splitter.partition, builder)
+    left, right = np.asarray(left), np.asarray(right)
+    smallest = left if left.shape[0] < right.shape[0] else right
+    assert (smallest is left) == left_is_smallest
+
+    assert_array_equal(
+        np.asarray(builder.ordered_gradients)[: smallest.shape[0]], gradients[smallest]
+    )
+    if not hessians_are_constant:
+        assert_array_equal(
+            np.asarray(builder.ordered_hessians)[: smallest.shape[0]],
+            hessians[smallest],
+        )
+
+
+@pytest.mark.parametrize("n_threads", [1, 4])
+@pytest.mark.parametrize("hessians_are_constant", [True, False])
+@pytest.mark.parametrize("allowed_features", [None, [1, 3, 4]])
+@pytest.mark.parametrize("feature_fraction_per_split", [1.0, 0.5])
+def test_compute_histograms_and_find_splits(
+    n_threads, hessians_are_constant, allowed_features, feature_fraction_per_split
+):
+    # Same result as computing the histograms of each child from their samples,
+    # followed by find_node_split on each child.
+    rng = np.random.RandomState(42)
+    n_samples, n_features, n_bins = 2000, 6, 32
+    X_binned = rng.randint(0, n_bins - 1, size=(n_samples, n_features))
+    X_binned = np.asfortranarray(X_binned.astype(X_BINNED_DTYPE))
+    y = X_binned[:, 1] - X_binned[:, 3] + rng.normal(size=n_samples)
+    gradients = (y - y.mean()).astype(G_H_DTYPE)
+    hessians = rng.uniform(1, 2, size=n_samples).astype(G_H_DTYPE)
+    if hessians_are_constant:
+        hessians = np.ones(1, dtype=G_H_DTYPE)
+    if allowed_features is not None:
+        allowed_features = np.array(allowed_features, dtype=np.uint32)
+
+    def make_splitter():
+        return Splitter(
+            X_binned,
+            np.full(n_features, n_bins - 1, dtype=np.uint32),
+            n_bins - 1,
+            np.zeros(n_features, dtype=np.uint8),
+            np.zeros(n_features, dtype=np.uint8),
+            np.zeros(n_features, dtype=np.int8),
+            0.0,
+            min_samples_leaf=1,
+            hessians_are_constant=hessians_are_constant,
+            feature_fraction_per_split=feature_fraction_per_split,
+            rng=np.random.RandomState(0),
+            n_threads=n_threads,
+            active_wait=True,
+        )
+
+    def make_builder():
+        return HistogramBuilder(
+            X_binned, n_bins, gradients, hessians, hessians_are_constant, n_threads
+        )
+
+    def sums(indices):
+        if hessians_are_constant:
+            return gradients[indices].sum().item(), float(indices.shape[0])
+        return gradients[indices].sum().item(), hessians[indices].sum().item()
+
+    splitter, builder = make_splitter(), make_builder()
+    all_samples = np.arange(n_samples, dtype=np.uint32)
+    parent_histograms = np.asarray(
+        builder.compute_histograms_brute(all_samples, allowed_features)
+    )
+    # A split chosen by hand, shared by both computations.
+    feature_idx = 1 if allowed_features is not None else 0
+    split_info = SplitInfo(
+        gain=1.0,
+        feature_idx=feature_idx,
+        bin_idx=10,
+        missing_go_to_left=False,
+        sum_gradient_left=0.0,
+        sum_hessian_left=0.0,
+        sum_gradient_right=0.0,
+        sum_hessian_right=0.0,
+        n_samples_left=0,
+        n_samples_right=0,
+        value_left=0.0,
+        value_right=0.0,
+        is_categorical=False,
+        left_cat_bitset=None,
+    )
+    left, right, _ = splitter.split_indices(split_info, splitter.partition, builder)
+    left, right = np.asarray(left).copy(), np.asarray(right).copy()
+    assert left.shape[0] < right.shape[0]
+
+    def child_args(indices):
+        sum_gradients, sum_hessians = sums(indices)
+        value = compute_node_value(sum_gradients, sum_hessians, -np.inf, np.inf, 0.0)
+        return indices.shape[0], sum_gradients, sum_hessians, value
+
+    n_left, g_left, h_left, v_left = child_args(left)
+    n_right, g_right, h_right, v_right = child_args(right)
+    hists_small, hists_large, si_left, si_right = (
+        splitter.compute_histograms_and_find_splits(
+            builder,
+            left,
+            parent_histograms.copy(),
+            True,
+            True,
+            n_left,
+            g_left,
+            h_left,
+            v_left,
+            -np.inf,
+            np.inf,
+            True,
+            n_right,
+            g_right,
+            h_right,
+            v_right,
+            -np.inf,
+            np.inf,
+            allowed_features,
+        )
+    )
+
+    # The reference: two histograms from the samples, and find_node_split.
+    ref_splitter, ref_builder = make_splitter(), make_builder()
+    ref_left = np.asarray(ref_builder.compute_histograms_brute(left, allowed_features))
+    ref_right = np.asarray(
+        ref_builder.compute_histograms_brute(right, allowed_features)
+    )
+    ref_si_left = ref_splitter.find_node_split(
+        n_left, ref_left, g_left, h_left, v_left, allowed_features=allowed_features
+    )
+    ref_si_right = ref_splitter.find_node_split(
+        n_right, ref_right, g_right, h_right, v_right, allowed_features=allowed_features
+    )
+
+    features = range(n_features) if allowed_features is None else allowed_features
+    for f in features:
+        for field in ("count", "sum_gradients", "sum_hessians"):
+            assert_allclose(
+                np.asarray(hists_small)[f][field], ref_left[f][field], atol=1e-3
+            )
+            assert_allclose(
+                np.asarray(hists_large)[f][field], ref_right[f][field], atol=1e-3
+            )
+    for si, ref_si in ((si_left, ref_si_left), (si_right, ref_si_right)):
+        assert si.feature_idx == ref_si.feature_idx
+        assert si.bin_idx == ref_si.bin_idx
+        assert si.n_samples_left == ref_si.n_samples_left
+        assert_allclose(si.gain, ref_si.gain, rtol=1e-3)
