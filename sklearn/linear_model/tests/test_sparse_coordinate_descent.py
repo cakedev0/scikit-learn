@@ -408,6 +408,26 @@ def test_sparse_read_only_buffer(copy_X):
     clf.fit(X, y)
 
 
+@pytest.mark.filterwarnings("ignore:With alpha=0:UserWarning")
+@pytest.mark.filterwarnings("ignore::sklearn.exceptions.ConvergenceWarning")
+@pytest.mark.parametrize("Estimator", [Lasso, ElasticNet])
+def test_sparse_constant_column_unpenalized_sample_weight(Estimator):
+    """Check that sparse and dense X give the same unpenalized fit with sample weights
+    and a constant column."""
+    # The rounding errors that trigger the divergence depend on the data and the
+    # platform, so a single seed would not be a reliable check.
+    for seed in range(100):
+        rng = np.random.RandomState(seed)
+        X = rng.randn(12, 3)
+        y = X @ [0.3, -0.2, 0.1] + rng.randn(12)
+        X = np.c_[X, np.ones(12)]
+        sw = rng.lognormal(size=12)
+        est = Estimator(alpha=0, tol=1e-10, max_iter=10_000)
+        pred_dense = est.fit(X, y, sample_weight=sw).predict(X)
+        pred_sparse = est.fit(sp.csc_array(X), y, sample_weight=sw).predict(X)
+        assert_allclose(pred_sparse, pred_dense, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("with_sample_weight", [False, True])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_sparse_centered_colnorm2_constant_column(with_sample_weight, dtype):
