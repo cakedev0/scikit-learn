@@ -2890,6 +2890,16 @@ def enet_coordinate_descent_multinomial(
         )
         # Guarantee norm2_cols_X >= 0:
         norm2_cols_X[norm2_cols_X < 0] = 0
+        # See the comment in R_and_X_colnorm2_sparse: with intercepts, the norm of a
+        # constant column is only made of rounding errors.
+        if X_is_sparse:
+            for j in range(n_features):
+                if is_constant_sparse_column(
+                    X_data, X_indptr[j], X_indptr[j + 1], n_samples
+                ):
+                    norm2_cols_X[:, j] = 0
+        else:
+            norm2_cols_X[:, np.all(X == X[0], axis=0)] = 0
 
     # Gap Safe Screening Rules, see https://arxiv.org/abs/1802.07481, Eq. 11
     if do_screening:
