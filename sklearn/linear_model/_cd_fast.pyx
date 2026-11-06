@@ -592,6 +592,23 @@ def enet_coordinate_descent(
     return np.asarray(w), gap, tol, n_iter + 1
 
 
+cdef inline bint is_constant_sparse_column(
+    const floating[::1] X_data,
+    int32_t startptr,
+    int32_t endptr,
+    unsigned int n_samples,
+) noexcept nogil:
+    """Return whether X_data[startptr:endptr] is a full column of a single value."""
+    cdef int32_t i_ind
+
+    if endptr - startptr != <int32_t> n_samples:
+        return False
+    for i_ind in range(startptr + 1, endptr):
+        if X_data[i_ind] != X_data[startptr]:
+            return False
+    return True
+
+
 def R_and_X_colnorm2_sparse(
     const floating[::1] w,
     const floating[::1] X_data,
@@ -680,6 +697,11 @@ def R_and_X_colnorm2_sparse(
                 for i in range(n_samples):
                     R[i] += sample_weight[i] * X_mean_j * w_j
             norm2_cols_X[j] = normalize_sum
+        # A centered constant column has a tiny norm instead of 0 because of rounding
+        # errors. Coordinate descent only skips a norm of exactly 0: otherwise, it
+        # divides rounding errors by each other and diverges.
+        if center and is_constant_sparse_column(X_data, startptr, endptr, n_samples):
+            norm2_cols_X[j] = 0.0
         startptr = endptr
 
     return R, norm2_cols_X
@@ -1602,6 +1624,11 @@ def R_and_X_colnorm2_multi_task(
                 if center:
                     normalize_sum += sw_sum * X_mean_j ** 2
             norm2_cols_X[j] = normalize_sum
+            # See the comment in R_and_X_colnorm2_sparse.
+            if center and is_constant_sparse_column(
+                X_data, startptr, endptr, n_samples
+            ):
+                norm2_cols_X[j] = 0.0
 
     _copy(n_samples * n_tasks, &Y[0, 0], 1, &R[0, 0], 1)
     if not no_sample_weights and X_is_sparse:
@@ -2863,6 +2890,16 @@ def enet_coordinate_descent_multinomial(
         )
         # Guarantee norm2_cols_X >= 0:
         norm2_cols_X[norm2_cols_X < 0] = 0
+        # See the comment in R_and_X_colnorm2_sparse: with intercepts, the norm of a
+        # constant column is only made of rounding errors.
+        if X_is_sparse:
+            for j in range(n_features):
+                if is_constant_sparse_column(
+                    X_data, X_indptr[j], X_indptr[j + 1], n_samples
+                ):
+                    norm2_cols_X[:, j] = 0
+        else:
+            norm2_cols_X[:, np.all(X == X[0], axis=0)] = 0
 
     # Gap Safe Screening Rules, see https://arxiv.org/abs/1802.07481, Eq. 11
     if do_screening:
