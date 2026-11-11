@@ -389,7 +389,11 @@ class EMeans(_BaseKMeans):
             init = check_array(init, dtype=X.dtype, copy=True, order="C")
             self._validate_center_shape(X, init)
 
-        x_squared_norms = row_norms(X, squared=True)
+        # Only k-means++ needs the squared norms of all the samples: the steps
+        # compute those of their batch rows.
+        x_squared_norms = None
+        if isinstance(init, str) and init == "k-means++":
+            x_squared_norms = row_norms(X, squared=True)
         centers = self._init_centroids(
             X,
             x_squared_norms=x_squared_norms,
@@ -444,7 +448,6 @@ class EMeans(_BaseKMeans):
                     epoch_inertia += emeans_step(
                         X,
                         sample_weight,
-                        x_squared_norms,
                         permutation[start : min(start + batch_size, n_rows)],
                         centers,
                         weight_ema,

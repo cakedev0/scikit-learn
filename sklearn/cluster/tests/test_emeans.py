@@ -13,7 +13,6 @@ from sklearn.cluster._k_means_emeans import _emeans_step_dense, _emeans_step_spa
 from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
 from sklearn.utils._testing import assert_allclose, assert_array_equal
-from sklearn.utils.extmath import row_norms
 from sklearn.utils.fixes import CSR_CONTAINERS
 
 
@@ -81,7 +80,6 @@ def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
     inertia = step(
         X,
         sample_weight,
-        row_norms(X, squared=True),
         batch_indices,
         centers,
         weight_ema,
@@ -109,7 +107,6 @@ def test_emeans_step_full_step_size_gives_batch_means():
     _emeans_step_dense(
         X,
         np.ones(200),
-        row_norms(X, squared=True),
         batch_indices,
         centers,
         np.full(4, 1e-5),
@@ -170,9 +167,10 @@ def test_emeans_inertia_close_to_kmeans(n_features):
     assert emeans.inertia_ < 1.03 * kmeans.inertia_
 
 
-def test_emeans_recovers_blobs():
+@pytest.mark.parametrize("init", ["random", "k-means++"])
+def test_emeans_recovers_blobs(init):
     X, y = make_blobs(n_samples=3000, n_features=5, centers=5, random_state=42)
-    emeans = EMeans(n_clusters=5, random_state=0).fit(X)
+    emeans = EMeans(n_clusters=5, init=init, random_state=0).fit(X)
     assert adjusted_rand_score(y, emeans.labels_) == pytest.approx(1)
 
 

@@ -32,7 +32,6 @@ cdef intp_t CHUNK_SIZE = 256
 def _emeans_step_dense(
     const floating[:, ::1] X,              # IN
     const floating[::1] sample_weight,     # IN
-    const floating[::1] x_squared_norms,   # IN
     const intp_t[::1] batch_indices,       # IN
     floating[:, ::1] centers,              # INOUT
     double[::1] weight_ema,                # INOUT
@@ -50,9 +49,6 @@ def _emeans_step_dense(
 
     sample_weight : ndarray of shape (n_samples,), dtype=floating
         The weights for each observation in X.
-
-    x_squared_norms : ndarray of shape (n_samples,), dtype=floating
-        Squared euclidean norm of each observation, only used for the inertia.
 
     batch_indices : ndarray of shape (batch_size,), dtype=intp
         Indices of the rows of the batch.
@@ -129,7 +125,6 @@ def _emeans_step_dense(
                 chunk_inertia[chunk_idx] = _assign_chunk_dense(
                     &X[0, 0],
                     &sample_weight[0],
-                    &x_squared_norms[0],
                     &batch_indices[start],
                     min(CHUNK_SIZE, n_batch - start),
                     &centers[0, 0],
@@ -184,7 +179,6 @@ def _emeans_step_dense(
 def _emeans_step_sparse(
     X,                                     # IN
     const floating[::1] sample_weight,     # IN
-    const floating[::1] x_squared_norms,   # IN
     const intp_t[::1] batch_indices,       # IN
     floating[:, ::1] centers,              # INOUT
     double[::1] weight_ema,                # INOUT
@@ -241,7 +235,6 @@ def _emeans_step_sparse(
                 &X_indices[0],
                 &X_indptr[0],
                 &sample_weight[0],
-                &x_squared_norms[0],
                 &batch_indices[start],
                 min(CHUNK_SIZE, n_batch - start),
                 &centers[0, 0],
@@ -306,7 +299,6 @@ cdef inline floating _squared_norm(
 cdef double _assign_chunk_dense(
     const floating *X,                      # IN (n_samples, n_features)
     const floating *sample_weight,          # IN (n_samples,)
-    const floating *x_squared_norms,        # IN (n_samples,)
     const intp_t *rows,                     # IN (n_rows,)
     intp_t n_rows,
     const floating *centers,                # IN (n_clusters, n_features)
@@ -319,8 +311,8 @@ cdef double _assign_chunk_dense(
 ) noexcept nogil:
     """Assign `X[rows]` to their nearest center and return their inertia."""
     cdef:
-        intp_t r, i, j, label
-        floating dist, min_dist
+        intp_t r, j, label
+        floating dist, min_dist, x_squared_norm
         double inertia = 0.0
 
     for r in range(n_rows):
@@ -344,8 +336,10 @@ cdef double _assign_chunk_dense(
                 min_dist = dist
                 label = j
         labels[r] = <int> label
-        i = rows[r]
-        inertia += sample_weight[i] * max(x_squared_norms[i] + min_dist, 0.0)
+        # ||x||² of the gathered row, while it is in cache: computing it here
+        # avoids a full pass over X before the fit.
+        x_squared_norm = _squared_norm(&X_chunk[r * n_features], n_features)
+        inertia += sample_weight[rows[r]] * max(x_squared_norm + min_dist, 0.0)
 
     return inertia
 
@@ -355,7 +349,6 @@ cdef double _assign_chunk_sparse(
     const int *X_indices,                   # IN (nnz,)
     const int *X_indptr,                    # IN (n_samples + 1,)
     const floating *sample_weight,          # IN (n_samples,)
-    const floating *x_squared_norms,        # IN (n_samples,)
     const intp_t *rows,                     # IN (n_rows,)
     intp_t n_rows,
     const floating *centers,                # IN (n_clusters, n_features)
@@ -367,7 +360,7 @@ cdef double _assign_chunk_sparse(
     """Assign `X[rows]` to their nearest center and return their inertia."""
     cdef:
         intp_t r, i, j, k, label
-        floating dot, dist, min_dist
+        floating dot, dist, min_dist, x_squared_norm
         floating max_floating = FLT_MAX if floating is float else DBL_MAX
         double inertia = 0.0
 
@@ -385,7 +378,10 @@ cdef double _assign_chunk_sparse(
                 min_dist = dist
                 label = j
         labels[r] = <int> label
-        inertia += sample_weight[i] * max(x_squared_norms[i] + min_dist, 0.0)
+        x_squared_norm = 0.0
+        for k in range(X_indptr[i], X_indptr[i + 1]):
+            x_squared_norm = x_squared_norm + X_data[k] * X_data[k]
+        inertia += sample_weight[i] * max(x_squared_norm + min_dist, 0.0)
 
     return inertia
 
