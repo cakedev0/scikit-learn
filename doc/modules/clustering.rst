@@ -324,6 +324,43 @@ small, as shown in the example and cited reference.
     D. Sculley, *Proceedings of the 19th international conference on World
     wide web* (2010).
 
+.. _emeans:
+
+E-Means
+-------
+
+:class:`EMeans` is another mini-batch variant of :class:`KMeans`. It runs a
+fixed number of passes over the data (epochs), each pass going through the
+samples in a random order, in mini-batches. Each sample of a mini-batch is
+assigned to its nearest center, then each center :math:`c_j` is updated as the
+ratio of two exponential moving averages (EMA): one of the sum :math:`s_j` of
+the samples assigned to it, and one of their weight :math:`n_j`:
+
+.. math::
+
+    S_j \leftarrow (1 - \alpha) S_j + \alpha s_j, \qquad
+    N_j \leftarrow (1 - \alpha) N_j + \alpha n_j, \qquad
+    c_j = S_j / N_j
+
+The step size :math:`\alpha` decreases along a cosine schedule. Every few
+mini-batches, centers whose EMA weight is too small are revived by splitting
+a heavy cluster in two. The final centers are the means of the samples assigned
+to each center during the last epoch.
+
+The batch size and the initial step size are given by scaling laws that the
+authors fitted on a large number of runs, as functions of the number of
+samples, of clusters and of epochs. The only parameter to choose is thus the
+number of epochs `n_epochs`: a few epochs are usually enough to reach the
+inertia of :class:`KMeans` after tens of iterations, which makes
+:class:`EMeans` especially interesting for large datasets with many clusters.
+
+.. dropdown:: References
+
+  * `"e-means: outperforming k-means (in one-tenth the epochs)"
+    <https://arxiv.org/abs/2611.09501>`_
+    S. Bessa, P.-E. Mazaré, G. Szilvasy, H. Touvron, D. Picard, M. Douze and
+    H. Jégou (2026).
+
 .. _affinity_propagation:
 
 Affinity Propagation

@@ -11,6 +11,8 @@ cluster_extension_metadata = {
     {'sources': [cython_gen.process('_k_means_elkan.pyx')], 'dependencies': [openmp_dep]},
   '_k_means_minibatch':
     {'sources': [cython_gen.process('_k_means_minibatch.pyx')], 'dependencies': [openmp_dep]},
+  '_k_means_emeans':
+    {'sources': [cython_gen.process('_k_means_emeans.pyx')], 'dependencies': [openmp_dep]},
 }
 
 foreach ext_name, ext_dict : cluster_extension_metadata

@@ -17,6 +17,7 @@ from sklearn.cluster._bicluster import SpectralBiclustering, SpectralCoclusterin
 from sklearn.cluster._birch import Birch
 from sklearn.cluster._bisect_k_means import BisectingKMeans
 from sklearn.cluster._dbscan import DBSCAN, dbscan
+from sklearn.cluster._emeans import EMeans
 from sklearn.cluster._hdbscan.hdbscan import HDBSCAN
 from sklearn.cluster._kmeans import KMeans, MiniBatchKMeans, k_means, kmeans_plusplus
 from sklearn.cluster._mean_shift import (
@@ -41,6 +42,7 @@ __all__ = [
     "AgglomerativeClustering",
     "Birch",
     "BisectingKMeans",
+    "EMeans",
     "FeatureAgglomeration",
     "KMeans",
     "MeanShift",

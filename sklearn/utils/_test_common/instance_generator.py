@@ -19,6 +19,7 @@ from sklearn.cluster import (
     AgglomerativeClustering,
     Birch,
     BisectingKMeans,
+    EMeans,
     FeatureAgglomeration,
     KMeans,
     MeanShift,
@@ -215,6 +216,7 @@ INIT_PARAMS = {
     # for check_classifiers_predictions
     DummyClassifier: [dict(strategy="stratified"), dict(strategy="most_frequent")],
     ElasticNetCV: dict(max_iter=5, cv=3),
+    EMeans: dict(n_clusters=2, n_epochs=2),
     ElasticNet: dict(max_iter=5),
     ExtraTreesClassifier: dict(n_estimators=5),
     ExtraTreesRegressor: dict(n_estimators=5),
@@ -1081,6 +1083,14 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
     KernelDensity: {
         "check_sample_weight_equivalence_on_dense_data": (
             "sample_weight must have positive values"
+        ),
+    },
+    EMeans: {
+        "check_sample_weight_equivalence_on_dense_data": (
+            "sample_weight is not equivalent to removing/repeating samples."
+        ),
+        "check_sample_weight_equivalence_on_sparse_data": (
+            "sample_weight is not equivalent to removing/repeating samples."
         ),
     },
     KMeans: {

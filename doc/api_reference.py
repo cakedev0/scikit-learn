@@ -173,6 +173,7 @@ API_REFERENCE = {
                     "Birch",
                     "BisectingKMeans",
                     "DBSCAN",
+                    "EMeans",
                     "FeatureAgglomeration",
                     "HDBSCAN",
                     "KMeans",
