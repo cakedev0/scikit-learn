@@ -334,7 +334,7 @@ fixed number of passes over the data (epochs), each pass going through the
 samples in a random order, in mini-batches. Each sample of a mini-batch is
 assigned to its nearest center, then each center :math:`c_j` is updated as the
 ratio of two exponential moving averages (EMA): one of the sum :math:`s_j` of
-the samples assigned to it, and one of their weight :math:`n_j`:
+the samples assigned to it, and one of their number :math:`n_j`:
 
 .. math::
 

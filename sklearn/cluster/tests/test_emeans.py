@@ -9,55 +9,43 @@ from sklearn.cluster._emeans import (
     _resolve_initial_step_size,
     _revive_dead_clusters,
 )
-from sklearn.cluster._k_means_emeans import _emeans_step_dense, _emeans_step_sparse
+from sklearn.cluster._k_means_emeans import _emeans_step
 from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
 from sklearn.utils._testing import assert_allclose, assert_array_equal
-from sklearn.utils.fixes import CSR_CONTAINERS
 
 
-def _reference_step(
-    X, sample_weight, batch_indices, centers, weight_ema, step_size, epoch_stats
-):
+def _reference_step(X, batch_indices, centers, weight_ema, step_size, epoch_stats):
     """NumPy implementation of one e-means step, updating its inputs inplace."""
     X_batch = X[batch_indices]
-    if hasattr(X_batch, "toarray"):
-        X_batch = X_batch.toarray()
-    sw_batch = sample_weight[batch_indices]
     distances = ((X_batch[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     labels = distances.argmin(axis=1)
-    inertia = (sw_batch * distances[np.arange(len(labels)), labels]).sum()
 
     for j in range(centers.shape[0]):
         mask = labels == j
-        weight = sw_batch[mask].sum()
+        count = mask.sum()
         retained = (1 - step_size) * weight_ema[j]
-        if weight <= 0:
+        if count == 0:
             weight_ema[j] = retained
             continue
-        sums = (sw_batch[mask, None] * X_batch[mask]).sum(axis=0)
+        sums = X_batch[mask].sum(axis=0)
         if epoch_stats is not None:
             epoch_stats[0][j] += sums
-            epoch_stats[1][j] += weight
-        new_weight = retained + step_size * weight
+            epoch_stats[1][j] += count
+        new_weight = retained + step_size * count
         centers[j] = (retained * centers[j] + step_size * sums) / new_weight
         weight_ema[j] = new_weight
-    return inertia
 
 
-@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
+def test_emeans_step_matches_reference(dtype, accumulate):
     rng = np.random.RandomState(0)
     n_samples, n_features, n_clusters, batch_size = 1000, 7, 13, 600
     X = rng.normal(size=(n_samples, n_features)).astype(dtype)
-    if csr_container is not None:
-        X[X < 0.5] = 0
-        X = csr_container(X)
-    sample_weight = rng.uniform(size=n_samples).astype(dtype)
-    sample_weight[:100] = 0
     centers = rng.normal(size=(n_clusters, n_features)).astype(dtype)
+    # A center far from the data gets no row.
+    centers[0] = 100
     weight_ema = rng.uniform(size=n_clusters)
     batch_indices = rng.permutation(n_samples)[:batch_size]
 
@@ -71,15 +59,11 @@ def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
         weight_ema.copy(),
         epoch_stats(),
     )
-    inertia_ref = _reference_step(
-        X, sample_weight, batch_indices, centers_ref, weight_ema_ref, 0.3, stats_ref
-    )
+    _reference_step(X, batch_indices, centers_ref, weight_ema_ref, 0.3, stats_ref)
 
-    step = _emeans_step_dense if csr_container is None else _emeans_step_sparse
     stats = epoch_stats() or [None, None]
-    inertia = step(
+    _emeans_step(
         X,
-        sample_weight,
         batch_indices,
         centers,
         weight_ema,
@@ -89,7 +73,6 @@ def test_emeans_step_matches_reference(csr_container, dtype, accumulate):
     )
 
     rtol = 1e-5 if dtype == np.float32 else 1e-10
-    assert_allclose(inertia, inertia_ref, rtol=rtol)
     assert_allclose(centers, centers_ref, rtol=rtol, atol=rtol)
     assert_allclose(weight_ema, weight_ema_ref, rtol=rtol)
     if accumulate:
@@ -104,9 +87,8 @@ def test_emeans_step_full_step_size_gives_batch_means():
     centers = X[:4].copy()
     batch_indices = np.arange(200)
     labels = ((X[:, None] - centers) ** 2).sum(axis=2).argmin(axis=1)
-    _emeans_step_dense(
+    _emeans_step(
         X,
-        np.ones(200),
         batch_indices,
         centers,
         np.full(4, 1e-5),
@@ -119,27 +101,13 @@ def test_emeans_step_full_step_size_gives_batch_means():
     assert_allclose(centers, expected)
 
 
-@pytest.mark.parametrize("csr_container", [None] + CSR_CONTAINERS)
-def test_emeans_does_not_depend_on_n_threads(csr_container):
+def test_emeans_does_not_depend_on_n_threads():
     X, _ = make_blobs(n_samples=5000, n_features=20, centers=30, random_state=0)
-    if csr_container is not None:
-        X[X < 0] = 0
-        X = csr_container(X)
     emeans = EMeans(n_clusters=30, random_state=0)
     with threadpool_limits(limits=1, user_api="openmp"):
         centers_sequential = emeans.fit(X).cluster_centers_
     centers_parallel = emeans.fit(X).cluster_centers_
     assert_array_equal(centers_sequential, centers_parallel)
-
-
-@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
-def test_emeans_dense_sparse(csr_container):
-    X, _ = make_blobs(n_samples=2000, n_features=10, centers=10, random_state=0)
-    X[X < 0] = 0
-    emeans_dense = EMeans(n_clusters=10, random_state=0).fit(X)
-    emeans_sparse = EMeans(n_clusters=10, random_state=0).fit(csr_container(X))
-    assert_allclose(emeans_dense.cluster_centers_, emeans_sparse.cluster_centers_)
-    assert_array_equal(emeans_dense.labels_, emeans_sparse.labels_)
 
 
 def test_emeans_float32_float64():
@@ -246,15 +214,6 @@ def test_emeans_batch_size():
 )
 def test_epochs_n_rows(n_epochs, expected):
     assert _epochs_n_rows(100, n_epochs) == expected
-
-
-def test_emeans_sample_weight_scale():
-    X, _ = make_blobs(n_samples=1000, n_features=5, centers=10, random_state=0)
-    sample_weight = np.random.RandomState(0).uniform(size=1000)
-    emeans = EMeans(n_clusters=10, random_state=0)
-    centers = emeans.fit(X, sample_weight=sample_weight).cluster_centers_
-    centers_scaled = emeans.fit(X, sample_weight=1e-6 * sample_weight).cluster_centers_
-    assert_allclose(centers, centers_scaled)
 
 
 def test_emeans_n_samples_lower_than_n_clusters():

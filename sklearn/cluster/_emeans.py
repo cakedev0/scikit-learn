@@ -8,22 +8,17 @@ import warnings
 from numbers import Integral, Real
 
 import numpy as np
-import scipy.sparse as sp
 
 from sklearn.base import _fit_context
 from sklearn.cluster._k_means_common import CHUNK_SIZE
-from sklearn.cluster._k_means_emeans import _emeans_step_dense, _emeans_step_sparse
+from sklearn.cluster._k_means_emeans import _emeans_step
 from sklearn.cluster._kmeans import _BaseKMeans, _labels_inertia_threadpool_limit
 from sklearn.utils import check_array, check_random_state
 from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.extmath import row_norms
 from sklearn.utils.parallel import _get_threadpool_controller
-from sklearn.utils.validation import (
-    _check_sample_weight,
-    _is_arraylike_not_scalar,
-    validate_data,
-)
+from sklearn.utils.validation import _is_arraylike_not_scalar, validate_data
 
 # The constants below are the ones of the reference implementation
 # (faiss/contrib/e_means/base.py), which differ slightly from the paper.
@@ -41,8 +36,8 @@ _DEAD_CLUSTER_THRESHOLD = 0.1
 # Relative perturbation of the two halves of a split donor center.
 _SPLIT_EPSILON = 1e-4
 
-# Initial EMA weight of each center, relative to the mean sample weight. Tiny,
-# so that the first batch moves the centers to the mean of their rows.
+# Initial EMA weight of each center. Tiny, so that the first batch moves the
+# centers to the mean of their rows.
 _INIT_WEIGHT = 2.0**-16
 
 # The reference implementation turns revival off for n_features <= 2, where it
@@ -216,9 +211,6 @@ class EMeans(_BaseKMeans):
         smaller batches when `n_features <= 16`. The initial step size is
         always given by the scaling law, as a function of the batch size.
 
-    verbose : int, default=0
-        Verbosity mode.
-
     random_state : int, RandomState instance or None, default=None
         Determines random number generation for centroid initialization, the
         order of the samples in each epoch and the revival of dead clusters.
@@ -234,8 +226,7 @@ class EMeans(_BaseKMeans):
         Labels of each point.
 
     inertia_ : float
-        Sum of squared distances of samples to their closest cluster center,
-        weighted by the sample weights if provided.
+        Sum of squared distances of samples to their closest cluster center.
 
     n_iter_ : int
         Number of epochs run.
@@ -263,7 +254,7 @@ class EMeans(_BaseKMeans):
     -----
     The algorithm is described in [1]_. For each mini-batch of samples, each
     sample is assigned to its nearest center, then each center :math:`c_j` is
-    updated from the sum :math:`s_j` and the weight :math:`n_j` of the samples
+    updated from the sum :math:`s_j` and the number :math:`n_j` of the samples
     assigned to it:
 
     .. math::
@@ -306,7 +297,6 @@ class EMeans(_BaseKMeans):
             StrOptions({"auto"}),
             Interval(Integral, 1, None, closed="left"),
         ],
-        "verbose": ["verbose"],
         "random_state": ["random_state"],
     }
 
@@ -317,14 +307,12 @@ class EMeans(_BaseKMeans):
         init="random",
         n_epochs=5,
         batch_size="auto",
-        verbose=0,
         random_state=None,
     ):
         self.n_clusters = n_clusters
         self.init = init
         self.n_epochs = n_epochs
         self.batch_size = batch_size
-        self.verbose = verbose
         self.random_state = random_state
 
     def _check_params_vs_input(self, X):
@@ -344,42 +332,29 @@ class EMeans(_BaseKMeans):
         )
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y=None, sample_weight=None):
+    def fit(self, X, y=None):
         """Compute e-means clustering.
 
         Parameters
         ----------
-        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        X : array-like of shape (n_samples, n_features)
             Training instances to cluster. It must be noted that the data
             will be converted to C ordering, which will cause a memory copy
             if the given data is not C-contiguous.
-            If a sparse matrix is passed, a copy will be made if it's not in
-            CSR format.
 
         y : Ignored
             Not used, present here for API consistency by convention.
-
-        sample_weight : array-like of shape (n_samples,), default=None
-            The weights for each observation in X. If None, all observations
-            are assigned equal weight. `sample_weight` is not used during
-            initialization if `init` is a callable or a user provided array.
 
         Returns
         -------
         self : object
             Fitted estimator.
         """
-        X = validate_data(
-            self,
-            X,
-            accept_sparse="csr",
-            dtype=[np.float64, np.float32],
-            order="C",
-            accept_large_sparse=False,
-        )
+        X = validate_data(self, X, dtype=[np.float64, np.float32], order="C")
         self._check_params_vs_input(X)
         random_state = check_random_state(self.random_state)
-        sample_weight = _check_sample_weight(sample_weight, X, dtype=X.dtype)
+        # Unit weights for the k-means++ init and the final labels pass.
+        sample_weight = np.ones(X.shape[0], dtype=X.dtype)
         self._n_threads = _openmp_effective_n_threads()
         n_samples, n_features = X.shape
         n_clusters = self.n_clusters
@@ -422,56 +397,34 @@ class EMeans(_BaseKMeans):
         n_steps = sum(math.ceil(n_rows / batch_size) for n_rows in epochs_n_rows)
         revival = n_features > _NO_REVIVAL_MAX_FEATURES
 
-        # Scaled by the mean sample weight, so that the result doesn't depend
-        # on the scale of the weights.
-        weight_ema = np.full(
-            n_clusters, _INIT_WEIGHT * sample_weight.mean(), dtype=np.float64
-        )
+        weight_ema = np.full(n_clusters, _INIT_WEIGHT)
         epoch_sums = np.zeros((n_clusters, n_features), dtype=np.float64)
-        epoch_weights = np.zeros(n_clusters, dtype=np.float64)
-        emeans_step = _emeans_step_sparse if sp.issparse(X) else _emeans_step_dense
-
-        if self.verbose:
-            print(
-                f"Clustering {n_samples} samples into {n_clusters} clusters in "
-                f"{self.n_epochs} epochs, batch_size={batch_size}, initial "
-                f"step size={initial_step_size:.3g}"
-            )
+        epoch_counts = np.zeros(n_clusters, dtype=np.float64)
 
         step = 0
         with _get_threadpool_controller().limit(limits="sequential_blas_under_openmp"):
             for epoch, n_rows in enumerate(epochs_n_rows):
                 is_last_epoch = epoch == len(epochs_n_rows) - 1
                 permutation = random_state.permutation(n_samples)
-                epoch_inertia, n_revived = 0.0, 0
                 for start in range(0, n_rows, batch_size):
-                    epoch_inertia += emeans_step(
+                    _emeans_step(
                         X,
-                        sample_weight,
                         permutation[start : min(start + batch_size, n_rows)],
                         centers,
                         weight_ema,
                         _scheduled_step_size(initial_step_size, step, n_steps),
                         epoch_sums if is_last_epoch else None,
-                        epoch_weights if is_last_epoch else None,
+                        epoch_counts if is_last_epoch else None,
                         n_threads,
                     )
                     step += 1
                     if revival and step % _REVIVAL_PERIOD == 0:
-                        n_revived += _revive_dead_clusters(
-                            centers, weight_ema, random_state
-                        )
-                if self.verbose:
-                    print(
-                        f"Epoch {epoch + 1}/{len(epochs_n_rows)}: inertia "
-                        f"{epoch_inertia} (measured on moving centers), "
-                        f"{n_revived} revived clusters"
-                    )
+                        _revive_dead_clusters(centers, weight_ema, random_state)
 
         # The final centers are the means of the last epoch's assignments.
         # Centers that got no sample in the last epoch keep their EMA position.
-        assigned = epoch_weights > 0
-        centers[assigned] = epoch_sums[assigned] / epoch_weights[assigned, None]
+        assigned = epoch_counts > 0
+        centers[assigned] = epoch_sums[assigned] / epoch_counts[assigned, None]
 
         self.cluster_centers_ = centers
         self._n_features_out = n_clusters
@@ -482,3 +435,49 @@ class EMeans(_BaseKMeans):
         self.n_steps_ = n_steps
         self.batch_size_ = batch_size
         return self
+
+    def fit_predict(self, X, y=None):
+        """Compute cluster centers and predict cluster index for each sample.
+
+        Convenience method; equivalent to calling fit(X) followed by
+        predict(X).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            New data to transform.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Index of the cluster each sample belongs to.
+        """
+        return self.fit(X).labels_
+
+    def fit_transform(self, X, y=None):
+        """Compute clustering and transform X to cluster-distance space.
+
+        Equivalent to fit(X).transform(X), but more efficiently implemented.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            New data to transform.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_clusters)
+            X transformed in the new space.
+        """
+        return self.fit(X)._transform(X)
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.input_tags.sparse = False
+        return tags
