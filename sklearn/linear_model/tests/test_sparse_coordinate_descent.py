@@ -5,7 +5,18 @@ from numpy.testing import assert_allclose
 
 from sklearn.datasets import make_regression
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import ElasticNet, ElasticNetCV, Lasso, LassoCV
+from sklearn.linear_model import (
+    ElasticNet,
+    ElasticNetCV,
+    Lasso,
+    LassoCV,
+    MultiTaskElasticNet,
+    MultiTaskLasso,
+)
+from sklearn.linear_model._cd_fast import (
+    R_and_X_colnorm2_multi_task,
+    R_and_X_colnorm2_sparse,
+)
 from sklearn.utils._testing import (
     assert_almost_equal,
     assert_array_almost_equal,
@@ -402,3 +413,78 @@ def test_sparse_read_only_buffer(copy_X):
 
     y = rng.rand(100)
     clf.fit(X, y)
+
+
+@pytest.mark.filterwarnings("ignore:With alpha=0:UserWarning")
+@pytest.mark.filterwarnings("ignore::sklearn.exceptions.ConvergenceWarning")
+@pytest.mark.parametrize(
+    "Estimator", [Lasso, ElasticNet, MultiTaskLasso, MultiTaskElasticNet]
+)
+def test_sparse_constant_column_unpenalized_sample_weight(Estimator):
+    """Check that sparse and dense X give the same unpenalized fit with sample weights
+    and a constant column."""
+    # The rounding errors that trigger the divergence depend on the data and the
+    # platform, so a single seed would not be a reliable check.
+    for seed in range(100):
+        rng = np.random.RandomState(seed)
+        X = rng.randn(12, 3)
+        y = X @ [0.3, -0.2, 0.1] + rng.randn(12)
+        if Estimator in (MultiTaskLasso, MultiTaskElasticNet):
+            y = np.c_[y, X @ [0.1, 0.3, -0.2] + rng.randn(12)]
+        X = np.c_[X, np.ones(12)]
+        sw = rng.lognormal(size=12)
+        est = Estimator(alpha=0, tol=1e-10, max_iter=10_000)
+        pred_dense = est.fit(X, y, sample_weight=sw).predict(X)
+        pred_sparse = est.fit(sp.csc_array(X), y, sample_weight=sw).predict(X)
+        assert_allclose(pred_sparse, pred_dense, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("with_sample_weight", [False, True])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_sparse_colnorm2_constant_column(with_sample_weight, dtype):
+    """Check the squared norm of a constant column, with and without centering.
+
+    Once centered, it must be exactly 0 even if its mean is only accurate up to
+    rounding errors. Without centering, it is a regular feature.
+    """
+    rng = np.random.RandomState(0)
+    n_samples = 12
+    X = np.c_[rng.randn(n_samples, 2), np.ones(n_samples)].astype(dtype)
+    X_csc = sp.csc_array(X)
+    y = rng.randn(n_samples).astype(dtype)
+    sw = rng.lognormal(size=n_samples).astype(dtype) if with_sample_weight else None
+    sw_ = np.ones(n_samples, dtype=dtype) if sw is None else sw
+
+    def colnorm2(X_mean):
+        _, norm2 = R_and_X_colnorm2_sparse(
+            w=np.zeros(X.shape[1], dtype=dtype),
+            X_data=X_csc.data,
+            X_indices=X_csc.indices,
+            X_indptr=X_csc.indptr,
+            y=y,
+            sample_weight=sw,
+            X_mean=X_mean,
+        )
+        _, norm2_multi_task = R_and_X_colnorm2_multi_task(
+            W=np.zeros((2, X.shape[1]), dtype=dtype, order="F"),
+            X=None,
+            X_is_sparse=True,
+            X_data=X_csc.data,
+            X_indices=X_csc.indices,
+            X_indptr=X_csc.indptr,
+            Y=np.asfortranarray(np.c_[y, y]),
+            sample_weight=sw,
+            X_mean=X_mean,
+        )
+        assert_allclose(norm2_multi_task, norm2, rtol=1e-5)
+        return np.asarray(norm2)
+
+    X_mean = np.average(X, axis=0, weights=sw).astype(dtype)
+    X_mean[2] = np.nextafter(dtype(1), dtype(2))
+    norm2 = colnorm2(X_mean)
+    assert norm2[2] == 0
+    expected = np.sum(sw_[:, None] * (X - X_mean) ** 2, axis=0)
+    assert_allclose(norm2[:2], expected[:2], rtol=1e-5)
+
+    norm2 = colnorm2(np.zeros(X.shape[1], dtype=dtype))
+    assert_allclose(norm2, np.sum(sw_[:, None] * X**2, axis=0), rtol=1e-5)
