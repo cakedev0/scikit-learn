@@ -200,9 +200,9 @@ def test_scaling_laws():
 
 
 def test_emeans_batch_size():
-    X = np.random.RandomState(0).normal(size=(100, 3))
-    assert EMeans(n_clusters=3, batch_size=10).fit(X).batch_size_ == 10
-    assert EMeans(n_clusters=3, batch_size=1000).fit(X).batch_size_ == 100
+    X = np.random.RandomState(0).normal(size=(1000, 3))
+    emeans = EMeans(n_clusters=5, random_state=0).fit(X)
+    assert emeans.batch_size_ == _resolve_batch_size(1000, 5, 3, 5)
 
 
 @pytest.mark.parametrize(

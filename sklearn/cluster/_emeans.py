@@ -205,12 +205,6 @@ class EMeans(_BaseKMeans):
         `n_epochs > 1`, the fractional pass comes before the last epoch, which
         is always a full pass.
 
-    batch_size : int or 'auto', default='auto'
-        Size of the mini batches. 'auto' uses the scaling law of the authors,
-        which grows almost linearly with the number of samples and favors
-        smaller batches when `n_features <= 16`. The initial step size is
-        always given by the scaling law, as a function of the batch size.
-
     random_state : int, RandomState instance or None, default=None
         Determines random number generation for centroid initialization, the
         order of the samples in each epoch and the revival of dead clusters.
@@ -229,7 +223,9 @@ class EMeans(_BaseKMeans):
         Sum of squared distances of samples to their closest cluster center.
 
     batch_size_ : int
-        Batch size used for fitting.
+        Size of the mini-batches, given by the scaling law of the authors. It
+        grows almost linearly with the number of samples and is smaller when
+        `n_features <= 16`.
 
     n_features_in_ : int
         Number of features seen during :term:`fit`.
@@ -287,10 +283,6 @@ class EMeans(_BaseKMeans):
         "n_clusters": [Interval(Integral, 1, None, closed="left")],
         "init": [StrOptions({"k-means++", "random"}), callable, "array-like"],
         "n_epochs": [Interval(Real, 0, None, closed="neither")],
-        "batch_size": [
-            StrOptions({"auto"}),
-            Interval(Integral, 1, None, closed="left"),
-        ],
         "random_state": ["random_state"],
     }
 
@@ -300,13 +292,11 @@ class EMeans(_BaseKMeans):
         *,
         init="random",
         n_epochs=5,
-        batch_size="auto",
         random_state=None,
     ):
         self.n_clusters = n_clusters
         self.init = init
         self.n_epochs = n_epochs
-        self.batch_size = batch_size
         self.random_state = random_state
 
     def _check_params_vs_input(self, X):
@@ -320,8 +310,7 @@ class EMeans(_BaseKMeans):
         warnings.warn(
             "EMeans is known to have a memory leak on Windows with MKL, when "
             "there are less chunks than available threads. You can prevent it "
-            f"by setting batch_size >= {self._n_threads * CHUNK_SIZE} or by "
-            "setting the environment variable "
+            "by setting the environment variable "
             f"OMP_NUM_THREADS={n_active_threads}"
         )
 
@@ -373,12 +362,9 @@ class EMeans(_BaseKMeans):
         )
         centers = np.array(centers, dtype=X.dtype, order="C", copy=True)
 
-        if self.batch_size == "auto":
-            batch_size = _resolve_batch_size(
-                n_samples, n_clusters, n_features, self.n_epochs
-            )
-        else:
-            batch_size = min(self.batch_size, n_samples)
+        batch_size = _resolve_batch_size(
+            n_samples, n_clusters, n_features, self.n_epochs
+        )
         initial_step_size = _resolve_initial_step_size(
             n_samples, n_clusters, self.n_epochs, batch_size
         )
