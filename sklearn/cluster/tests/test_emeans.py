@@ -131,7 +131,7 @@ def test_emeans_inertia_close_to_kmeans(n_features):
     )
     kmeans = KMeans(n_clusters=100, n_init=1, random_state=0).fit(X)
     emeans = EMeans(n_clusters=100, random_state=0).fit(X)
-    assert emeans.n_iter_ < kmeans.n_iter_
+    assert emeans.n_epochs < kmeans.n_iter_
     assert emeans.inertia_ < 1.03 * kmeans.inertia_
 
 
@@ -203,9 +203,6 @@ def test_emeans_batch_size():
     X = np.random.RandomState(0).normal(size=(100, 3))
     assert EMeans(n_clusters=3, batch_size=10).fit(X).batch_size_ == 10
     assert EMeans(n_clusters=3, batch_size=1000).fit(X).batch_size_ == 100
-    emeans = EMeans(n_clusters=3, batch_size=30, n_epochs=3).fit(X)
-    assert emeans.n_steps_ == 12
-    assert emeans.n_iter_ == 3
 
 
 @pytest.mark.parametrize(

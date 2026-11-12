@@ -228,12 +228,6 @@ class EMeans(_BaseKMeans):
     inertia_ : float
         Sum of squared distances of samples to their closest cluster center.
 
-    n_iter_ : int
-        Number of epochs run.
-
-    n_steps_ : int
-        Number of mini-batches processed.
-
     batch_size_ : int
         Batch size used for fitting.
 
@@ -431,8 +425,6 @@ class EMeans(_BaseKMeans):
         self.labels_, self.inertia_ = _labels_inertia_threadpool_limit(
             X, sample_weight, centers, n_threads=self._n_threads
         )
-        self.n_iter_ = len(epochs_n_rows)
-        self.n_steps_ = n_steps
         self.batch_size_ = batch_size
         return self
 
