@@ -1370,3 +1370,33 @@ def test_poisson_regressor_array_api_warm_start(
         reg_xp.predict(X_xp)
         # fit again and ensure there is no error
         reg_xp.fit(X_xp, y_xp)
+
+
+def test_lbfgs_large_scale_feature():
+    """lbfgs converges with a feature in the thousands.
+
+    Its first L-BFGS-B trial step used to overflow the loss, and L-BFGS-B then
+    returned the starting point as converged, without any warning.
+    """
+    rng = np.random.default_rng(0)
+    z = rng.uniform(1500, 2000, size=(1_000, 1))
+    y = rng.gamma(shape=2, scale=np.exp(11 - z[:, 0] / 500) / 2)
+    lbfgs = GammaRegressor(solver="lbfgs", tol=1e-8).fit(z, y)
+    newton = GammaRegressor(solver="newton-cholesky", tol=1e-10).fit(z, y)
+    assert_allclose(lbfgs.coef_, newton.coef_, rtol=1e-5)
+    assert_allclose(lbfgs.intercept_, newton.intercept_, rtol=1e-5)
+
+
+@pytest.mark.parametrize("offset", [1e2, 1e4])
+def test_lbfgs_offset_features(offset, global_random_seed):
+    """lbfgs finds the same coef_ when a constant is added to the features.
+
+    Non-regression test for gh-35029.
+    """
+    rng = np.random.RandomState(global_random_seed)
+    X = rng.normal(size=(500, 5))
+    y = rng.poisson(np.exp(X @ rng.uniform(-0.5, 0.5, size=5)))
+    params = dict(solver="lbfgs", alpha=1e-3, tol=1e-8)
+    reference = PoissonRegressor(**params).fit(X, y)
+    shifted = PoissonRegressor(**params).fit(X + offset, y)
+    assert_allclose(shifted.coef_, reference.coef_, rtol=1e-5, atol=1e-6)
