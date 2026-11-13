@@ -13,7 +13,7 @@ from sklearn.ensemble._hist_gradient_boosting.common import HISTOGRAM_DTYPE
 from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport G_H_DTYPE_C
-from sklearn.utils._typedefs cimport uint8_t
+from sklearn.utils._typedefs cimport uint8_t, uint32_t
 
 
 # Notes:
@@ -72,6 +72,13 @@ cdef class HistogramBuilder:
         loss w.r.t the predictions, evaluated at iteration i - 1.
     hessians_are_constant : bool
         Whether hessians are constant.
+    n_threads : int
+        Number of OpenMP threads to use.
+    n_bins_non_missing : ndarray of uint32, shape (n_features,), default=None
+        The number of bins used by the non-missing values of each feature.
+        Only these bins and the missing values bin are computed in the
+        histograms of non-root nodes: the splitter never reads the other ones.
+        If None, all the bins are computed.
     """
     cdef public:
         const X_BINNED_DTYPE_C [::1, :] X_binned
@@ -83,12 +90,14 @@ cdef class HistogramBuilder:
         G_H_DTYPE_C [::1] ordered_hessians
         uint8_t hessians_are_constant
         int n_threads
+        const uint32_t [::1] n_bins_non_missing
 
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
                  G_H_DTYPE_C [::1] hessians,
                  uint8_t hessians_are_constant,
-                 int n_threads):
+                 int n_threads,
+                 n_bins_non_missing=None):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -102,6 +111,9 @@ cdef class HistogramBuilder:
         self.ordered_hessians = hessians.copy()
         self.hessians_are_constant = hessians_are_constant
         self.n_threads = n_threads
+        if n_bins_non_missing is None:
+            n_bins_non_missing = np.full(self.n_features, n_bins - 1, dtype=np.uint32)
+        self.n_bins_non_missing = n_bins_non_missing
 
     def compute_histograms_brute(
         HistogramBuilder self,
@@ -200,8 +212,14 @@ cdef class HistogramBuilder:
             uint8_t hessians_are_constant = \
                 self.hessians_are_constant
 
-        # Set histograms to zero.
-        memset(&histograms[feature_idx, 0], 0, self.n_bins * sizeof(hist_struct))
+        # Set histograms to zero. The root needs all its bins set, as
+        # TreeGrower._initialize_root sums a whole feature histogram.
+        if root_node:
+            memset(&histograms[feature_idx, 0], 0, self.n_bins * sizeof(hist_struct))
+        else:
+            memset(&histograms[feature_idx, 0], 0,
+                   self.n_bins_non_missing[feature_idx] * sizeof(hist_struct))
+            memset(&histograms[feature_idx, self.n_bins - 1], 0, sizeof(hist_struct))
 
         if root_node:
             if hessians_are_constant:
@@ -276,7 +294,13 @@ cdef class HistogramBuilder:
 
             _subtract_histograms(
                 feature_idx,
-                self.n_bins,
+                self.n_bins_non_missing[feature_idx],
+                parent_histograms,
+                sibling_histograms,
+            )
+            _subtract_histogram_bin(
+                feature_idx,
+                self.n_bins - 1,
                 parent_histograms,
                 sibling_histograms,
             )
@@ -305,6 +329,18 @@ cpdef void _build_histogram_naive(
         out[feature_idx, bin_idx].sum_gradients += ordered_gradients[i]
         out[feature_idx, bin_idx].sum_hessians += ordered_hessians[i]
         out[feature_idx, bin_idx].count += 1
+
+
+cdef inline void _subtract_histogram_bin(
+        const int feature_idx,
+        unsigned int bin_idx,
+        hist_struct [:, ::1] hist_a,  # IN and OUT
+        hist_struct [:, ::1] hist_b,  # IN
+) noexcept nogil:
+    """compute hist_a[bin_idx] = hist_a[bin_idx] - hist_b[bin_idx]"""
+    hist_a[feature_idx, bin_idx].sum_gradients -= hist_b[feature_idx, bin_idx].sum_gradients
+    hist_a[feature_idx, bin_idx].sum_hessians -= hist_b[feature_idx, bin_idx].sum_hessians
+    hist_a[feature_idx, bin_idx].count -= hist_b[feature_idx, bin_idx].count
 
 
 cpdef void _subtract_histograms(
