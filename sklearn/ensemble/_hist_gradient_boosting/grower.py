@@ -268,6 +268,7 @@ class TreeGrower:
         *,
         n_threads,
         active_wait,
+        node_heuristics=True,
     ):
         self._validate_parameters(
             X_binned,
@@ -335,6 +336,7 @@ class TreeGrower:
             rng=rng,
             n_threads=n_threads,
             active_wait=active_wait,
+            node_heuristics=node_heuristics,
         )
         self.X_binned = X_binned
         self.max_leaf_nodes = max_leaf_nodes
