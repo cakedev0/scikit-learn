@@ -13,7 +13,13 @@ from sklearn.ensemble._hist_gradient_boosting.common import HISTOGRAM_DTYPE
 from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport G_H_DTYPE_C
-from sklearn.utils._typedefs cimport uint8_t
+from sklearn.utils._typedefs cimport intp_t, uint8_t
+from sklearn.ensemble._hist_gradient_boosting._team cimport (
+    task_fn, team_active, team_run
+)
+
+# Number of samples gathered by one chunk of the team.
+cdef intp_t GATHER_CHUNK_SIZE = 4096
 
 
 # Notes:
@@ -84,6 +90,13 @@ cdef class HistogramBuilder:
         uint8_t hessians_are_constant
         int n_threads
 
+    # Arguments of the tasks run by the team, see `_team.pyx`.
+    cdef:
+        const unsigned int [::1] _task_sample_indices
+        const unsigned int [:] _task_allowed_features
+        hist_struct [:, ::1] _task_histograms
+        hist_struct [:, ::1] _task_sibling_histograms
+
     def __init__(self, const X_BINNED_DTYPE_C [::1, :] X_binned,
                  unsigned int n_bins, G_H_DTYPE_C [::1] gradients,
                  G_H_DTYPE_C [::1] hessians,
@@ -148,6 +161,22 @@ cdef class HistogramBuilder:
 
         if has_interaction_cst:
             n_allowed_features = allowed_features.shape[0]
+
+        if team_active():
+            self._task_sample_indices = sample_indices
+            self._task_allowed_features = allowed_features
+            self._task_histograms = histograms
+            n_samples = sample_indices.shape[0]
+            with nogil:
+                if sample_indices.shape[0] != gradients.shape[0]:
+                    team_run(<task_fn> _gather_task, <void*> self, n_samples,
+                             GATHER_CHUNK_SIZE)
+                team_run(<task_fn> _brute_task, <void*> self,
+                         n_allowed_features, 1)
+            self._task_sample_indices = None
+            self._task_allowed_features = None
+            self._task_histograms = None
+            return histograms
 
         with nogil:
             n_samples = sample_indices.shape[0]
@@ -266,6 +295,18 @@ cdef class HistogramBuilder:
         if has_interaction_cst:
             n_allowed_features = allowed_features.shape[0]
 
+        if team_active():
+            self._task_allowed_features = allowed_features
+            self._task_histograms = parent_histograms
+            self._task_sibling_histograms = sibling_histograms
+            with nogil:
+                team_run(<task_fn> _subtraction_task, <void*> self,
+                         n_allowed_features, 1)
+            self._task_allowed_features = None
+            self._task_histograms = None
+            self._task_sibling_histograms = None
+            return parent_histograms
+
         # Compute histogram of each feature
         for f_idx in prange(n_allowed_features, schedule='static', nogil=True,
                             num_threads=n_threads):
@@ -281,6 +322,67 @@ cdef class HistogramBuilder:
                 sibling_histograms,
             )
         return parent_histograms
+
+
+cdef void _gather_task(
+    HistogramBuilder self, intp_t start, intp_t stop
+) noexcept nogil:
+    """ordered_gradients[i] = gradients[sample_indices[i]], same for hessians."""
+    cdef:
+        intp_t i
+        const unsigned int * sample_indices = &self._task_sample_indices[0]
+        const G_H_DTYPE_C * gradients = &self.gradients[0]
+        const G_H_DTYPE_C * hessians = &self.hessians[0]
+        G_H_DTYPE_C * ordered_gradients = &self.ordered_gradients[0]
+        G_H_DTYPE_C * ordered_hessians = &self.ordered_hessians[0]
+
+    if self.hessians_are_constant:
+        for i in range(start, stop):
+            ordered_gradients[i] = gradients[sample_indices[i]]
+    else:
+        for i in range(start, stop):
+            ordered_gradients[i] = gradients[sample_indices[i]]
+            ordered_hessians[i] = hessians[sample_indices[i]]
+
+
+cdef void _brute_task(
+    HistogramBuilder self, intp_t start, intp_t stop
+) noexcept nogil:
+    """Histograms of the features `start <= f_idx < stop`."""
+    cdef:
+        intp_t f_idx
+        int feature_idx
+        bint has_interaction_cst = self._task_allowed_features is not None
+
+    for f_idx in range(start, stop):
+        if has_interaction_cst:
+            feature_idx = self._task_allowed_features[f_idx]
+        else:
+            feature_idx = f_idx
+        self._compute_histogram_brute_single_feature(
+            feature_idx, self._task_sample_indices, self._task_histograms
+        )
+
+
+cdef void _subtraction_task(
+    HistogramBuilder self, intp_t start, intp_t stop
+) noexcept nogil:
+    cdef:
+        intp_t f_idx
+        int feature_idx
+        bint has_interaction_cst = self._task_allowed_features is not None
+
+    for f_idx in range(start, stop):
+        if has_interaction_cst:
+            feature_idx = self._task_allowed_features[f_idx]
+        else:
+            feature_idx = f_idx
+        _subtract_histograms(
+            feature_idx,
+            self.n_bins,
+            self._task_histograms,
+            self._task_sibling_histograms,
+        )
 
 
 cpdef void _build_histogram_naive(

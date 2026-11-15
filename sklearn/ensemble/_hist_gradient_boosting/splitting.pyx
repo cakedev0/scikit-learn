@@ -18,7 +18,10 @@ from libc.string cimport memcpy
 
 from sklearn.utils._bitset cimport BITSET_DTYPE_C, BITSET_INNER_DTYPE_C
 from sklearn.utils._bitset cimport in_bitset, init_bitset, set_bitset
-from sklearn.utils._typedefs cimport uint8_t
+from sklearn.utils._typedefs cimport intp_t, uint8_t
+from sklearn.ensemble._hist_gradient_boosting._team cimport (
+    task_fn, team_active, team_run
+)
 from sklearn.ensemble._hist_gradient_boosting.common cimport X_BINNED_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport Y_DTYPE_C
 from sklearn.ensemble._hist_gradient_boosting.common cimport hist_struct
@@ -189,6 +192,21 @@ cdef class Splitter:
         unsigned int [::1] right_indices_buffer
         int n_threads
         bint active_wait
+        # EXPERIMENT: False to always share the work of a node between the
+        # threads, as on main.
+        bint node_heuristics
+
+    # Arguments of the split finding task run by the team, see `_team.pyx`.
+    cdef:
+        hist_struct [:, ::1] _task_histograms
+        const unsigned int [:] _task_split_features
+        split_info_struct * _task_split_infos
+        unsigned int _task_n_samples
+        Y_DTYPE_C _task_sum_gradients
+        Y_DTYPE_C _task_sum_hessians
+        Y_DTYPE_C _task_value
+        Y_DTYPE_C _task_lower_bound
+        Y_DTYPE_C _task_upper_bound
 
     def __init__(self,
                  const X_BINNED_DTYPE_C [::1, :] X_binned,
@@ -205,7 +223,8 @@ cdef class Splitter:
                  Y_DTYPE_C feature_fraction_per_split=1.0,
                  rng=np.random.RandomState(),
                  unsigned int n_threads=1,
-                 bint active_wait=False):
+                 bint active_wait=False,
+                 bint node_heuristics=True):
 
         self.X_binned = X_binned
         self.n_features = X_binned.shape[1]
@@ -224,6 +243,7 @@ cdef class Splitter:
         self.rng = rng
         self.n_threads = n_threads
         self.active_wait = active_wait
+        self.node_heuristics = node_heuristics
 
         # The partition array maps each sample index into the leaves of the
         # tree (a leaf in this context is a node that isn't split yet, not
@@ -331,9 +351,9 @@ cdef class Splitter:
             # enough to make threading worth it on smaller workloads; a passively
             # waiting one needs a much bigger workload to amortize that cost.
             int min_samples_per_thread_to_split = 500 if self.active_wait else 5000
-            bint use_threads = (
-                n_threads > 1
-                and n_threads * min_samples_per_thread_to_split < n_samples
+            bint use_threads = n_threads > 1 and (
+                not self.node_heuristics
+                or n_threads * min_samples_per_thread_to_split < n_samples
             )
 
             int right_child_position
@@ -355,6 +375,8 @@ cdef class Splitter:
             int thread_idx
             int sample_idx
             uint8_t turn_left
+            bint use_team = team_active()
+            partition_task_ctx ctx
 
         # only set left_cat_bitset when is_categorical is True
         if is_categorical:
@@ -390,31 +412,51 @@ cdef class Splitter:
                 offset_in_buffers[thread_idx] = \
                     offset_in_buffers[thread_idx - 1] + sizes[thread_idx - 1]
 
+            if use_team:
+                ctx.sample_indices = &sample_indices[0]
+                ctx.X_binned = &X_binned[0]
+                ctx.left_indices_buffer = &left_indices_buffer[0]
+                ctx.right_indices_buffer = &right_indices_buffer[0]
+                ctx.sizes = &sizes[0]
+                ctx.offset_in_buffers = &offset_in_buffers[0]
+                ctx.left_counts = &left_counts[0]
+                ctx.right_counts = &right_counts[0]
+                ctx.left_offset = &left_offset[0]
+                ctx.right_offset = &right_offset[0]
+                ctx.bin_idx = bin_idx
+                ctx.missing_go_to_left = missing_go_to_left
+                ctx.missing_values_bin_idx = missing_values_bin_idx
+                ctx.is_categorical = is_categorical
+                if is_categorical:
+                    ctx.left_cat_bitset = &cat_bitset_tmp[0]
+                team_run(_partition_map_task, &ctx, n_threads, 1)
+
             # map indices from sample_indices to left/right_indices_buffer
-            for thread_idx in prange(n_threads, schedule='static',
-                                     chunksize=1, num_threads=n_threads):
-                left_count = 0
-                right_count = 0
+            if not use_team:
+                for thread_idx in prange(n_threads, schedule='static',
+                                         chunksize=1, num_threads=n_threads):
+                    left_count = 0
+                    right_count = 0
 
-                start = offset_in_buffers[thread_idx]
-                stop = start + sizes[thread_idx]
-                for i in range(start, stop):
-                    sample_idx = sample_indices[i]
-                    turn_left = sample_goes_left(
-                        missing_go_to_left,
-                        missing_values_bin_idx, bin_idx,
-                        X_binned[sample_idx], is_categorical,
-                        left_cat_bitset)
+                    start = offset_in_buffers[thread_idx]
+                    stop = start + sizes[thread_idx]
+                    for i in range(start, stop):
+                        sample_idx = sample_indices[i]
+                        turn_left = sample_goes_left(
+                            missing_go_to_left,
+                            missing_values_bin_idx, bin_idx,
+                            X_binned[sample_idx], is_categorical,
+                            left_cat_bitset)
 
-                    if turn_left:
-                        left_indices_buffer[start + left_count] = sample_idx
-                        left_count = left_count + 1
-                    else:
-                        right_indices_buffer[start + right_count] = sample_idx
-                        right_count = right_count + 1
+                        if turn_left:
+                            left_indices_buffer[start + left_count] = sample_idx
+                            left_count = left_count + 1
+                        else:
+                            right_indices_buffer[start + right_count] = sample_idx
+                            right_count = right_count + 1
 
-                left_counts[thread_idx] = left_count
-                right_counts[thread_idx] = right_count
+                    left_counts[thread_idx] = left_count
+                    right_counts[thread_idx] = right_count
 
             # position of right child = just after the left child
             right_child_position = 0
@@ -433,32 +475,36 @@ cdef class Splitter:
             # map indices in left/right_indices_buffer back into
             # sample_indices. This also updates self.partition since
             # sample_indices is a view.
-            for thread_idx in prange(n_threads, schedule='static',
-                                     chunksize=1, num_threads=n_threads):
-                memcpy(
-                    &sample_indices[left_offset[thread_idx]],
-                    &left_indices_buffer[offset_in_buffers[thread_idx]],
-                    sizeof(unsigned int) * left_counts[thread_idx]
-                )
-                if right_counts[thread_idx] > 0:
-                    # If we're splitting the rightmost node of the tree, i.e. the
-                    # rightmost node in the partition array, and if n_threads >= 2, one
-                    # might have right_counts[-1] = 0 and right_offset[-1] = len(sample_indices)
-                    # leading to evaluating
-                    #
-                    #    &sample_indices[right_offset[-1]] = &samples_indices[n_samples_at_node]
-                    #                                      = &partition[n_samples_in_tree]
-                    #
-                    # which is an out-of-bounds read access that can cause a segmentation fault.
-                    # When boundscheck=True, removing this check produces this exception:
-                    #
-                    #    IndexError: Out of bounds on buffer access
-                    #
+            if use_team:
+                team_run(_partition_copy_task, &ctx, n_threads, 1)
+
+            if not use_team:
+                for thread_idx in prange(n_threads, schedule='static',
+                                         chunksize=1, num_threads=n_threads):
                     memcpy(
-                        &sample_indices[right_offset[thread_idx]],
-                        &right_indices_buffer[offset_in_buffers[thread_idx]],
-                        sizeof(unsigned int) * right_counts[thread_idx]
+                        &sample_indices[left_offset[thread_idx]],
+                        &left_indices_buffer[offset_in_buffers[thread_idx]],
+                        sizeof(unsigned int) * left_counts[thread_idx]
                     )
+                    if right_counts[thread_idx] > 0:
+                        # If we're splitting the rightmost node of the tree, i.e. the
+                        # rightmost node in the partition array, and if n_threads >= 2, one
+                        # might have right_counts[-1] = 0 and right_offset[-1] = len(sample_indices)
+                        # leading to evaluating
+                        #
+                        #    &sample_indices[right_offset[-1]] = &samples_indices[n_samples_at_node]
+                        #                                      = &partition[n_samples_in_tree]
+                        #
+                        # which is an out-of-bounds read access that can cause a segmentation fault.
+                        # When boundscheck=True, removing this check produces this exception:
+                        #
+                        #    IndexError: Out of bounds on buffer access
+                        #
+                        memcpy(
+                            &sample_indices[right_offset[thread_idx]],
+                            &right_indices_buffer[offset_in_buffers[thread_idx]],
+                            sizeof(unsigned int) * right_counts[thread_idx]
+                        )
 
         return (sample_indices[:right_child_position],
                 sample_indices[right_child_position:],
@@ -530,6 +576,7 @@ cdef class Splitter:
             Y_DTYPE_C feature_fraction_per_split = self.feature_fraction_per_split
             const unsigned int [:] split_features
             uint8_t missing_go_to_left
+            bint use_team = team_active()
 
         if allowed_features is None:
             split_features = self.all_features
@@ -554,55 +601,76 @@ cdef class Splitter:
         # leaves some threads with no work while still paying for the overhead
         # of spinning up the parallel region. An actively-waiting OpenMP runtime
         # makes that overhead cheap enough that it's not worth guarding against.
-        use_threads = self.active_wait or (n_split_candidates >= n_threads * 5)
+        use_threads = (
+            not self.node_heuristics
+            or self.active_wait
+            or (n_split_candidates >= n_threads * 5)
+        )
+
+        if use_team:
+            self._task_histograms = histograms
+            self._task_split_features = split_features
+            self._task_n_samples = n_samples
+            self._task_sum_gradients = sum_gradients
+            self._task_sum_hessians = sum_hessians
+            self._task_value = value
+            self._task_lower_bound = lower_bound
+            self._task_upper_bound = upper_bound
 
         with nogil:
 
             split_infos = <split_info_struct *> malloc(
                 n_split_candidates * sizeof(split_info_struct))
 
+            if use_team:
+                self._task_split_infos = split_infos
+                team_run(<task_fn> _find_split_task, <void*> self,
+                         n_split_candidates,
+                         1 if use_threads else n_split_candidates)
+
             # split_info_idx is index of split_infos of size n_split_candidates.
             # features_idx is the index of the feature column in X.
-            for split_info_idx in prange(n_split_candidates, schedule='static',
-                                         num_threads=n_threads,
-                                         use_threads_if=use_threads):
-                feature_idx = split_features[split_info_idx]
+            if not use_team:
+                for split_info_idx in prange(n_split_candidates, schedule='static',
+                                             num_threads=n_threads,
+                                             use_threads_if=use_threads):
+                    feature_idx = split_features[split_info_idx]
 
-                split_infos[split_info_idx].feature_idx = feature_idx
+                    split_infos[split_info_idx].feature_idx = feature_idx
 
-                # For each feature, find best bin to split on
-                # Start with a gain of -1 if no better split is found, that
-                # means one of the constraints isn't respected
-                # (min_samples_leaf, etc.) and the grower will later turn the
-                # node into a leaf.
-                split_infos[split_info_idx].gain = -1
-                split_infos[split_info_idx].is_categorical = is_categorical[feature_idx]
+                    # For each feature, find best bin to split on
+                    # Start with a gain of -1 if no better split is found, that
+                    # means one of the constraints isn't respected
+                    # (min_samples_leaf, etc.) and the grower will later turn the
+                    # node into a leaf.
+                    split_infos[split_info_idx].gain = -1
+                    split_infos[split_info_idx].is_categorical = is_categorical[feature_idx]
 
-                if is_categorical[feature_idx]:
-                    self._find_best_bin_to_split_category(
-                        feature_idx, has_missing_values[feature_idx],
-                        histograms, n_samples, sum_gradients, sum_hessians,
-                        value, monotonic_cst[feature_idx], lower_bound,
-                        upper_bound, &split_infos[split_info_idx])
-                else:
-                    # We scan bins from left to right and, if there are any
-                    # missing values, we scan a second time with missing
-                    # values in the left child. This way, we can consider
-                    # whichever case yields the best gain: either missing
-                    # values go to the right or to the left. See algo 3 from
-                    # the XGBoost paper
-                    # https://arxiv.org/abs/1603.02754
-                    # Note: for the categorical features above, this isn't
-                    # needed since missing values are considered a native
-                    # category.
-                    for missing_go_to_left in range(has_missing_values[feature_idx] + 1):
-
-                        self._find_best_bin_to_split_numerical(
+                    if is_categorical[feature_idx]:
+                        self._find_best_bin_to_split_category(
                             feature_idx, has_missing_values[feature_idx],
                             histograms, n_samples, sum_gradients, sum_hessians,
-                            value, monotonic_cst[feature_idx],
-                            lower_bound, upper_bound, missing_go_to_left,
-                            &split_infos[split_info_idx])
+                            value, monotonic_cst[feature_idx], lower_bound,
+                            upper_bound, &split_infos[split_info_idx])
+                    else:
+                        # We scan bins from left to right and, if there are any
+                        # missing values, we scan a second time with missing
+                        # values in the left child. This way, we can consider
+                        # whichever case yields the best gain: either missing
+                        # values go to the right or to the left. See algo 3 from
+                        # the XGBoost paper
+                        # https://arxiv.org/abs/1603.02754
+                        # Note: for the categorical features above, this isn't
+                        # needed since missing values are considered a native
+                        # category.
+                        for missing_go_to_left in range(has_missing_values[feature_idx] + 1):
+
+                            self._find_best_bin_to_split_numerical(
+                                feature_idx, has_missing_values[feature_idx],
+                                histograms, n_samples, sum_gradients, sum_hessians,
+                                value, monotonic_cst[feature_idx],
+                                lower_bound, upper_bound, missing_go_to_left,
+                                &split_infos[split_info_idx])
 
             # then compute best possible split among all features
             # split_info is set to the best of split_infos
@@ -632,6 +700,9 @@ cdef class Splitter:
             out.left_cat_bitset = np.asarray(split_info.left_cat_bitset, dtype=np.uint32)
 
         free(split_infos)
+        if use_team:
+            self._task_histograms = None
+            self._task_split_features = None
         return out
 
     cdef int _find_best_feature_to_split_helper(
@@ -1076,6 +1147,112 @@ cdef inline Y_DTYPE_C _loss_from_value(
     <1603.02754>.`
     """
     return sum_gradient * value
+
+cdef struct partition_task_ctx:
+    # Arguments of the tasks of `Splitter.split_indices`, where an item is one
+    # of the n_threads slices of the node's samples.
+    unsigned int * sample_indices
+    const X_BINNED_DTYPE_C * X_binned
+    unsigned int * left_indices_buffer
+    unsigned int * right_indices_buffer
+    int * sizes
+    int * offset_in_buffers
+    int * left_counts
+    int * right_counts
+    int * left_offset
+    int * right_offset
+    X_BINNED_DTYPE_C bin_idx
+    uint8_t missing_go_to_left
+    uint8_t missing_values_bin_idx
+    uint8_t is_categorical
+    BITSET_INNER_DTYPE_C * left_cat_bitset
+
+
+cdef void _partition_map_task(void * ctx_, intp_t first, intp_t last) noexcept nogil:
+    """Map indices from sample_indices to left/right_indices_buffer."""
+    cdef:
+        partition_task_ctx * ctx = <partition_task_ctx *> ctx_
+        BITSET_DTYPE_C left_cat_bitset
+        intp_t slice_idx
+        int start, stop, i, left_count, right_count
+        unsigned int sample_idx
+
+    if ctx.is_categorical:
+        memcpy(&left_cat_bitset[0], ctx.left_cat_bitset, sizeof(BITSET_DTYPE_C))
+
+    for slice_idx in range(first, last):
+        left_count = 0
+        right_count = 0
+        start = ctx.offset_in_buffers[slice_idx]
+        stop = start + ctx.sizes[slice_idx]
+        for i in range(start, stop):
+            sample_idx = ctx.sample_indices[i]
+            if sample_goes_left(
+                ctx.missing_go_to_left, ctx.missing_values_bin_idx,
+                ctx.bin_idx, ctx.X_binned[sample_idx], ctx.is_categorical,
+                left_cat_bitset,
+            ):
+                ctx.left_indices_buffer[start + left_count] = sample_idx
+                left_count += 1
+            else:
+                ctx.right_indices_buffer[start + right_count] = sample_idx
+                right_count += 1
+        ctx.left_counts[slice_idx] = left_count
+        ctx.right_counts[slice_idx] = right_count
+
+
+cdef void _partition_copy_task(void * ctx_, intp_t first, intp_t last) noexcept nogil:
+    """Map indices in left/right_indices_buffer back into sample_indices."""
+    cdef:
+        partition_task_ctx * ctx = <partition_task_ctx *> ctx_
+        intp_t slice_idx
+
+    for slice_idx in range(first, last):
+        memcpy(
+            ctx.sample_indices + ctx.left_offset[slice_idx],
+            ctx.left_indices_buffer + ctx.offset_in_buffers[slice_idx],
+            sizeof(unsigned int) * ctx.left_counts[slice_idx]
+        )
+        if ctx.right_counts[slice_idx] > 0:
+            memcpy(
+                ctx.sample_indices + ctx.right_offset[slice_idx],
+                ctx.right_indices_buffer + ctx.offset_in_buffers[slice_idx],
+                sizeof(unsigned int) * ctx.right_counts[slice_idx]
+            )
+
+
+cdef void _find_split_task(Splitter self, intp_t first, intp_t last) noexcept nogil:
+    """Best split of the candidate features `first <= split_info_idx < last`."""
+    cdef:
+        intp_t split_info_idx
+        int feature_idx
+        uint8_t missing_go_to_left
+        split_info_struct * split_info
+
+    for split_info_idx in range(first, last):
+        feature_idx = self._task_split_features[split_info_idx]
+        split_info = &self._task_split_infos[split_info_idx]
+        split_info.feature_idx = feature_idx
+        split_info.gain = -1
+        split_info.is_categorical = self.is_categorical[feature_idx]
+
+        if self.is_categorical[feature_idx]:
+            self._find_best_bin_to_split_category(
+                feature_idx, self.has_missing_values[feature_idx],
+                self._task_histograms, self._task_n_samples,
+                self._task_sum_gradients, self._task_sum_hessians,
+                self._task_value, self.monotonic_cst[feature_idx],
+                self._task_lower_bound, self._task_upper_bound, split_info)
+        else:
+            for missing_go_to_left in range(self.has_missing_values[feature_idx] + 1):
+                self._find_best_bin_to_split_numerical(
+                    feature_idx, self.has_missing_values[feature_idx],
+                    self._task_histograms, self._task_n_samples,
+                    self._task_sum_gradients, self._task_sum_hessians,
+                    self._task_value, self.monotonic_cst[feature_idx],
+                    self._task_lower_bound, self._task_upper_bound,
+                    missing_go_to_left, split_info)
+
 
 cdef inline uint8_t sample_goes_left(
         uint8_t missing_go_to_left,

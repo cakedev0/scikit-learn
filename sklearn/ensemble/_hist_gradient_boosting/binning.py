@@ -9,6 +9,8 @@ approximately the same number of samples.
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -303,6 +305,10 @@ class _BinMapper(TransformerMixin, BaseEstimator):
             ),
         )
 
+        if os.environ.get("SKLEARN_HGB_CAPS", "1") == "0":
+            # EXPERIMENT: as on main.
+            n_threads = max_n_threads
+
         non_cat_thresholds = Parallel(n_jobs=n_threads, backend="threading")(
             delayed(_find_binning_thresholds)(
                 X[:, f_idx], max_bins, sample_weight=sample_weight
@@ -358,6 +364,9 @@ class _BinMapper(TransformerMixin, BaseEstimator):
 
         max_n_threads = _openmp_effective_n_threads(self.max_n_threads)
         n_threads = max(1, min(round(X.shape[0] / 2000), max_n_threads))
+        if os.environ.get("SKLEARN_HGB_CAPS", "1") == "0":
+            # EXPERIMENT: as on main.
+            n_threads = max_n_threads
 
         binned = np.zeros_like(X, dtype=X_BINNED_DTYPE, order="F")
         _map_to_bins(

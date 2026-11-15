@@ -5,6 +5,7 @@
 
 import itertools
 import math
+import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext, suppress
 from functools import partial
@@ -13,6 +14,7 @@ from time import time
 
 import numpy as np
 
+from sklearn._loss._loss import CyHalfMultinomialLoss, CyLossFunction
 from sklearn._loss.loss import (
     _LOSSES,
     BaseLoss,
@@ -31,8 +33,11 @@ from sklearn.base import (
 )
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble._hist_gradient_boosting._gradient_boosting import (
+    _team_gradient,
+    _team_gradient_multinomial,
     _update_raw_predictions,
 )
+from sklearn.ensemble._hist_gradient_boosting._team import run_in_team
 from sklearn.ensemble._hist_gradient_boosting.binning import _BinMapper
 from sklearn.ensemble._hist_gradient_boosting.common import G_H_DTYPE, X_DTYPE, Y_DTYPE
 from sklearn.ensemble._hist_gradient_boosting.grower import TreeGrower
@@ -68,6 +73,15 @@ _MAX_N_THREADS_ACTIVE_WAIT = (
     (5_000_000, 8),
     (50_000_000, 16),
     (75_000_000, 32),
+    (math.inf, 64),
+)
+# EXPERIMENT: with a single parallel region for the boosting loop, whatever the
+# wait policy of the OpenMP runtime. Fitted on thread sweeps of 32 datasets on
+# 5 machines (2 hybrid Intel CPUs, an Apple M2, one Xeon socket, one EPYC).
+_MAX_N_THREADS_TEAM = (
+    (200_000, 4),
+    (1_000_000, 8),
+    (100_000_000, 32),
     (math.inf, 64),
 )
 _MAX_N_THREADS_PASSIVE_WAIT = (
@@ -637,14 +651,30 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
 
         n_samples, n_features = X_binned_train.shape
 
-        n_threads = self._get_heuristic_optimal_n_threads(
-            max_n_threads,
-            n_samples,
-            n_features,
-        )
-        # Only matters with several threads, in which case the heuristic above
-        # already ran the (cached) detection.
-        active_wait = n_threads > 1 and _openmp_uses_active_wait()
+        # EXPERIMENT. SKLEARN_HGB_TEAM: "0" for a parallel region per kernel,
+        # "1" for one region per tree, "2" for one region for the boosting
+        # loop (see `_team.pyx`). SKLEARN_HGB_CAPS: "0" for all the threads
+        # everywhere as on main, "node" for the per-node decisions of the
+        # splitter only, "1" for these and the cap on the number of threads.
+        team_mode = os.environ.get("SKLEARN_HGB_TEAM", "0")
+        caps_mode = os.environ.get("SKLEARN_HGB_CAPS", "1")
+        # The threads of a team don't sleep between two tasks, whatever the
+        # wait policy of the OpenMP runtime.
+        team_wait = True if team_mode == "2" else None
+        if caps_mode == "1":
+            n_threads = self._get_heuristic_optimal_n_threads(
+                max_n_threads, n_samples, n_features, team=team_mode == "2"
+            )
+        else:
+            n_threads = max_n_threads
+        node_heuristics = caps_mode != "0"
+        if team_wait is not None:
+            active_wait = team_wait
+        else:
+            # Only matters with several threads and the per-node decisions.
+            active_wait = (
+                n_threads > 1 and node_heuristics and _openmp_uses_active_wait()
+            )
 
         # Uses binned data to check for missing values
         has_missing_values = (
@@ -812,144 +842,207 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
             n_samples=n_samples, dtype=G_H_DTYPE, order="F"
         )
 
-        for iteration in range(begin_at_stage, self.max_iter):
-            if self.verbose >= 2:
-                iteration_start_time = time()
-                print(
-                    "[{}/{}] ".format(iteration + 1, self.max_iter), end="", flush=True
-                )
+        use_team = team_mode in ("1", "2")
+        # In the region of the team, the loss kernels would run on one thread.
+        team_gradient = (
+            team_mode == "2"
+            and self.n_trees_per_iteration_ == 1
+            and isinstance(self._loss.closs, CyLossFunction)
+        )
 
-            # Update gradients and hessians, inplace
-            # Note that self._loss expects shape (n_samples,) for
-            # n_trees_per_iteration = 1 else shape (n_samples, n_trees_per_iteration).
-            if self._loss.constant_hessian:
-                self._loss.gradient(
-                    y_true=y_train,
-                    raw_prediction=raw_predictions,
-                    sample_weight=sample_weight_train,
-                    gradient_out=gradient,
-                    n_threads=n_threads,
-                )
-            else:
-                self._loss.gradient_hessian(
-                    y_true=y_train,
-                    raw_prediction=raw_predictions,
-                    sample_weight=sample_weight_train,
-                    gradient_out=gradient,
-                    hessian_out=hessian,
-                    n_threads=n_threads,
-                )
+        team_multinomial = team_mode == "2" and isinstance(
+            self._loss.closs, CyHalfMultinomialLoss
+        )
 
-            # Append a list since there may be more than 1 predictor per iter
-            predictors.append([])
-
-            # 2-d views of shape (n_samples, n_trees_per_iteration_) or (n_samples, 1)
-            # on gradient and hessian to simplify the loop over n_trees_per_iteration_.
-            if gradient.ndim == 1:
-                g_view = gradient.reshape((-1, 1))
-                h_view = hessian.reshape((-1, 1))
-            else:
-                g_view = gradient
-                h_view = hessian
-
-            # Build `n_trees_per_iteration` trees.
-            for k in range(self.n_trees_per_iteration_):
-                grower = TreeGrower(
-                    X_binned=X_binned_train,
-                    gradients=g_view[:, k],
-                    hessians=h_view[:, k],
-                    n_bins=n_bins,
-                    n_bins_non_missing=self._bin_mapper.n_bins_non_missing_,
-                    has_missing_values=has_missing_values,
-                    is_categorical=self._is_categorical_remapped,
-                    monotonic_cst=monotonic_cst_remapped,
-                    interaction_cst=interaction_cst,
-                    max_leaf_nodes=self.max_leaf_nodes,
-                    max_depth=self.max_depth,
-                    min_samples_leaf=self.min_samples_leaf,
-                    l2_regularization=self.l2_regularization,
-                    feature_fraction_per_split=self.max_features,
-                    rng=self._feature_subsample_rng,
-                    shrinkage=self.learning_rate,
-                    n_threads=n_threads,
-                    active_wait=active_wait,
-                )
-                grower.grow()
-
-                acc_apply_split_time += grower.total_apply_split_time
-                acc_find_split_time += grower.total_find_split_time
-                acc_compute_hist_time += grower.total_compute_hist_time
-
-                if not self._loss.differentiable:
-                    _update_leaves_values(
-                        loss=self._loss,
-                        grower=grower,
-                        y_true=y_train,
-                        raw_prediction=raw_predictions[:, k],
-                        sample_weight=sample_weight_train,
+        def boosting_loop():
+            nonlocal acc_apply_split_time, acc_find_split_time
+            nonlocal acc_compute_hist_time, acc_prediction_time
+            for iteration in range(begin_at_stage, self.max_iter):
+                if self.verbose >= 2:
+                    iteration_start_time = time()
+                    print(
+                        "[{}/{}] ".format(iteration + 1, self.max_iter),
+                        end="",
+                        flush=True,
                     )
 
-                predictor = grower.make_predictor(
-                    binning_thresholds=self._bin_mapper.bin_thresholds_
-                )
-                predictors[-1].append(predictor)
-
-                # Update raw_predictions with the predictions of the newly
-                # created tree.
-                tic_pred = time()
-                _update_raw_predictions(raw_predictions[:, k], grower, n_threads)
-                toc_pred = time()
-                acc_prediction_time += toc_pred - tic_pred
-
-            should_early_stop = False
-            if self.do_early_stopping_:
-                # Update raw_predictions_val with the newest tree(s)
-                if need_raw_predictions_val:
-                    for k, pred in enumerate(self._predictors[-1]):
-                        raw_predictions_val[:, k] += pred.predict_binned(
-                            X_binned_val,
-                            self._bin_mapper.missing_values_bin_idx_,
-                            n_threads,
-                        )
-
-                if self.scoring == "loss":
-                    should_early_stop = self._check_early_stopping_loss(
-                        raw_predictions=raw_predictions,
-                        y_train=y_train,
-                        sample_weight_train=sample_weight_train,
-                        raw_predictions_val=raw_predictions_val,
-                        y_val=y_val,
-                        sample_weight_val=sample_weight_val,
+                # Update gradients and hessians, inplace
+                # Note that self._loss expects shape (n_samples,) for
+                # n_trees_per_iteration = 1 else shape
+                # (n_samples, n_trees_per_iteration).
+                if team_gradient:
+                    _team_gradient(
+                        self._loss.closs,
+                        y_train,
+                        raw_predictions[:, 0],
+                        sample_weight_train,
+                        gradient,
+                        None if self._loss.constant_hessian else hessian,
+                    )
+                elif team_multinomial:
+                    _team_gradient_multinomial(
+                        y_train,
+                        raw_predictions,
+                        sample_weight_train,
+                        gradient,
+                        hessian,
+                    )
+                elif self._loss.constant_hessian:
+                    self._loss.gradient(
+                        y_true=y_train,
+                        raw_prediction=raw_predictions,
+                        sample_weight=sample_weight_train,
+                        gradient_out=gradient,
+                        n_threads=n_threads,
+                    )
+                else:
+                    self._loss.gradient_hessian(
+                        y_true=y_train,
+                        raw_prediction=raw_predictions,
+                        sample_weight=sample_weight_train,
+                        gradient_out=gradient,
+                        hessian_out=hessian,
                         n_threads=n_threads,
                     )
 
+                # Append a list since there may be more than 1 predictor per iter
+                predictors.append([])
+
+                # 2-d views of shape (n_samples, n_trees_per_iteration_) or
+                # (n_samples, 1) on gradient and hessian to simplify the loop over
+                # n_trees_per_iteration_.
+                if gradient.ndim == 1:
+                    g_view = gradient.reshape((-1, 1))
+                    h_view = hessian.reshape((-1, 1))
                 else:
-                    # If the scorer is a predefined string, then we optimize the
-                    # evaluation by reusing the incrementally computed raw predictions.
-                    if scoring_is_predefined_string:
-                        raw_predictions_small_train = raw_predictions[
-                            indices_small_train
-                        ]
+                    g_view = gradient
+                    h_view = hessian
+
+                # Build `n_trees_per_iteration` trees.
+                for k in range(self.n_trees_per_iteration_):
+
+                    def grow_tree():
+                        grower = TreeGrower(
+                            X_binned=X_binned_train,
+                            gradients=g_view[:, k],
+                            hessians=h_view[:, k],
+                            n_bins=n_bins,
+                            n_bins_non_missing=self._bin_mapper.n_bins_non_missing_,
+                            has_missing_values=has_missing_values,
+                            is_categorical=self._is_categorical_remapped,
+                            monotonic_cst=monotonic_cst_remapped,
+                            interaction_cst=interaction_cst,
+                            max_leaf_nodes=self.max_leaf_nodes,
+                            max_depth=self.max_depth,
+                            min_samples_leaf=self.min_samples_leaf,
+                            l2_regularization=self.l2_regularization,
+                            feature_fraction_per_split=self.max_features,
+                            rng=self._feature_subsample_rng,
+                            shrinkage=self.learning_rate,
+                            n_threads=n_threads,
+                            active_wait=active_wait,
+                            node_heuristics=node_heuristics,
+                        )
+                        grower.grow()
+                        if use_team and self._loss.differentiable:
+                            # Also in the region of the team: one region less.
+                            _update_raw_predictions(
+                                raw_predictions[:, k], grower, n_threads
+                            )
+                        return grower
+
+                    # EXPERIMENT: grow the tree in a single parallel region, see
+                    # `_team.pyx`.
+                    if use_team:
+                        grower = run_in_team(grow_tree, n_threads)
                     else:
-                        raw_predictions_small_train = None
+                        grower = grow_tree()
 
-                    should_early_stop = self._check_early_stopping_scorer(
-                        X_binned_small_train,
-                        y_small_train,
-                        sample_weight_small_train,
-                        X_binned_val,
-                        y_val,
-                        sample_weight_val,
-                        raw_predictions_small_train=raw_predictions_small_train,
-                        raw_predictions_val=raw_predictions_val,
+                    acc_apply_split_time += grower.total_apply_split_time
+                    acc_find_split_time += grower.total_find_split_time
+                    acc_compute_hist_time += grower.total_compute_hist_time
+
+                    if not self._loss.differentiable:
+                        _update_leaves_values(
+                            loss=self._loss,
+                            grower=grower,
+                            y_true=y_train,
+                            raw_prediction=raw_predictions[:, k],
+                            sample_weight=sample_weight_train,
+                        )
+
+                    predictor = grower.make_predictor(
+                        binning_thresholds=self._bin_mapper.bin_thresholds_
                     )
+                    predictors[-1].append(predictor)
 
-            if self.verbose >= 2:
-                self._print_iteration_stats(iteration_start_time)
+                    # Update raw_predictions with the predictions of the newly
+                    # created tree.
+                    tic_pred = time()
+                    if not (use_team and self._loss.differentiable):
+                        _update_raw_predictions(
+                            raw_predictions[:, k], grower, n_threads
+                        )
+                    toc_pred = time()
+                    acc_prediction_time += toc_pred - tic_pred
 
-            # maybe we could also early stop if all the trees are stumps?
-            if should_early_stop:
-                break
+                should_early_stop = False
+                if self.do_early_stopping_:
+                    # Update raw_predictions_val with the newest tree(s)
+                    if need_raw_predictions_val:
+                        for k, pred in enumerate(self._predictors[-1]):
+                            raw_predictions_val[:, k] += pred.predict_binned(
+                                X_binned_val,
+                                self._bin_mapper.missing_values_bin_idx_,
+                                n_threads,
+                            )
+
+                    if self.scoring == "loss":
+                        should_early_stop = self._check_early_stopping_loss(
+                            raw_predictions=raw_predictions,
+                            y_train=y_train,
+                            sample_weight_train=sample_weight_train,
+                            raw_predictions_val=raw_predictions_val,
+                            y_val=y_val,
+                            sample_weight_val=sample_weight_val,
+                            n_threads=n_threads,
+                        )
+
+                    else:
+                        # If the scorer is a predefined string, then we optimize the
+                        # evaluation by reusing the incrementally computed raw
+                        # predictions.
+                        if scoring_is_predefined_string:
+                            raw_predictions_small_train = raw_predictions[
+                                indices_small_train
+                            ]
+                        else:
+                            raw_predictions_small_train = None
+
+                        should_early_stop = self._check_early_stopping_scorer(
+                            X_binned_small_train,
+                            y_small_train,
+                            sample_weight_small_train,
+                            X_binned_val,
+                            y_val,
+                            sample_weight_val,
+                            raw_predictions_small_train=raw_predictions_small_train,
+                            raw_predictions_val=raw_predictions_val,
+                        )
+
+                if self.verbose >= 2:
+                    self._print_iteration_stats(iteration_start_time)
+
+                # maybe we could also early stop if all the trees are stumps?
+                if should_early_stop:
+                    break
+
+        # EXPERIMENT: "2" runs all the iterations in a single parallel
+        # region, "1" opens one region per tree.
+        if team_mode == "2":
+            run_in_team(boosting_loop, n_threads)
+        else:
+            boosting_loop()
 
         if self.verbose:
             duration = time() - fit_start_time
@@ -992,7 +1085,9 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
         return self
 
     @staticmethod
-    def _get_heuristic_optimal_n_threads(max_n_threads, n_samples, n_features):
+    def _get_heuristic_optimal_n_threads(
+        max_n_threads, n_samples, n_features, team=False
+    ):
         """Number of threads for all the OpenMP parallel regions of `fit`.
 
         A `fit` call uses the same thread count in all its parallel regions
@@ -1021,10 +1116,16 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
         if max_n_threads == 1 or n_values <= 20_000:
             return 1
 
-        active_wait = _openmp_uses_active_wait()
-        max_n_threads_by_size = (
-            _MAX_N_THREADS_ACTIVE_WAIT if active_wait else _MAX_N_THREADS_PASSIVE_WAIT
-        )
+        if team:
+            active_wait = True
+            max_n_threads_by_size = _MAX_N_THREADS_TEAM
+        else:
+            active_wait = _openmp_uses_active_wait()
+            max_n_threads_by_size = (
+                _MAX_N_THREADS_ACTIVE_WAIT
+                if active_wait
+                else _MAX_N_THREADS_PASSIVE_WAIT
+            )
         max_n_threads = min(
             max_n_threads,
             next(cap for limit, cap in max_n_threads_by_size if n_values <= limit),
@@ -1038,6 +1139,10 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
         # particular when active wait is enabled.
         n_features_per_thread = math.ceil(n_features / max_n_threads)
         n_threads_for_features = math.ceil(n_features / n_features_per_thread)
+        if team:
+            # The threads of a team that are done with their features take
+            # those of the others: no need for even shares.
+            n_threads_for_features = min(n_features, max_n_threads)
 
         if not active_wait:
             return n_threads_for_features

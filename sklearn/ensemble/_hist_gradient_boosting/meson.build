@@ -12,6 +12,7 @@ hist_gradient_boosting_extension_metadata = {
   'splitting': {'sources': [cython_gen.process('splitting.pyx')], 'dependencies': [openmp_dep]},
   '_binning': {'sources': [cython_gen.process('_binning.pyx')], 'dependencies': [openmp_dep]},
   '_predictor': {'sources': [cython_gen.process('_predictor.pyx')], 'dependencies': [openmp_dep]},
+  '_team': {'sources': [cython_gen.process('_team.pyx')], 'dependencies': [openmp_dep]},
   'common': {'sources': [cython_gen.process('common.pyx')]},
 }
 
