@@ -3348,3 +3348,25 @@ def test_intercept_scaling_deprecated(est, intercept_scaling):
     msg = "The parameter 'intercept_scaling' was deprecated"
     with pytest.warns(FutureWarning, match=msg):
         lr.fit(X, y)
+
+
+@pytest.mark.parametrize("container", [np.asarray] + CSR_CONTAINERS)
+def test_newton_cd_multinomial_constant_column(container):
+    """Check that multinomial newton-cd ignores a constant column with intercepts."""
+    # The rounding errors that trigger the divergence depend on the data and the
+    # platform, so a single seed would not be a reliable check.
+    for seed in range(30):
+        rng = np.random.RandomState(seed)
+        X = rng.randn(100, 3)
+        y = np.minimum(rng.poisson(np.exp(X @ [0.3, -0.2, 0.1] + 0.5)), 2)
+        sw = rng.lognormal(size=100)
+        X_constant = np.c_[X, np.ones(100)]
+        lbfgs = LogisticRegression(C=np.inf, solver="lbfgs", tol=1e-8, max_iter=1000)
+        lbfgs.fit(X, y, sample_weight=sw)
+        newton_cd = LogisticRegression(C=np.inf, solver="newton-cd", tol=1e-8)
+        newton_cd.fit(container(X_constant), y, sample_weight=sw)
+        assert_allclose(
+            newton_cd.predict_proba(container(X_constant)),
+            lbfgs.predict_proba(X),
+            rtol=1e-4,
+        )
