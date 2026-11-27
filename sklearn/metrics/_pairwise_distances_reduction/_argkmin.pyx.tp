@@ -14,6 +14,7 @@ from numbers import Integral
 from scipy.sparse import issparse
 from sklearn.utils import check_array, check_scalar
 from sklearn.utils.fixes import _in_unstable_openblas_configuration
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils.parallel import _get_threadpool_controller
 
 {{for name_suffix in ['64', '32']}}
@@ -56,56 +57,67 @@ cdef class ArgKmin{{name_suffix}}(BaseDistancesReduction{{name_suffix}}):
 
         No instance should directly be created outside of this class method.
         """
-        if metric in ("euclidean", "sqeuclidean"):
-            # Specialized implementation of ArgKmin for the Euclidean distance
-            # for the dense-dense and sparse-sparse cases.
-            # This implementation computes the distances by chunk using
-            # a decomposition of the Squared Euclidean distance.
-            # This specialisation has an improved arithmetic intensity for both
-            # the dense and sparse settings, allowing in most case speed-ups of
-            # several orders of magnitude compared to the generic ArgKmin
-            # implementation.
-            # For more information see MiddleTermComputer.
-            use_squared_distances = metric == "sqeuclidean"
-            pda = EuclideanArgKmin{{name_suffix}}(
-                X=X, Y=Y, k=k,
-                use_squared_distances=use_squared_distances,
-                chunk_size=chunk_size,
-                strategy=strategy,
-                metric_kwargs=metric_kwargs,
-            )
-        else:
-            # Fall back on a generic implementation that handles most scipy
-            # metrics by computing the distances between 2 vectors at a time.
-            pda = ArgKmin{{name_suffix}}(
-                datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
-                k=k,
-                chunk_size=chunk_size,
-                strategy=strategy,
-            )
+        # Read the number of OpenMP threads before limiting BLAS: with OpenBLAS's
+        # OpenMP threading layer, `limits=1, user_api="blas"` also sets it to 1.
+        n_threads = _openmp_effective_n_threads()
 
         # Limit the number of threads in second level of nested parallelism for BLAS
-        # to avoid threads over-subscription (in GEMM for instance).
-        # The constructors above must stay outside of this limit: they read the
-        # number of OpenMP threads, and with OpenBLAS's OpenMP threading layer,
-        # `limits=1, user_api="blas"` also sets it to 1.
+        # to avoid threads over-subscription (in DOT or GEMM for instance).
         with _get_threadpool_controller().limit(limits=1, user_api="blas"):
-            if pda.execute_in_parallel_on_Y:
-                pda._parallel_on_Y()
-            else:
-                pda._parallel_on_X()
+          if metric in ("euclidean", "sqeuclidean"):
+              # Specialized implementation of ArgKmin for the Euclidean distance
+              # for the dense-dense and sparse-sparse cases.
+              # This implementation computes the distances by chunk using
+              # a decomposition of the Squared Euclidean distance.
+              # This specialisation has an improved arithmetic intensity for both
+              # the dense and sparse settings, allowing in most case speed-ups of
+              # several orders of magnitude compared to the generic ArgKmin
+              # implementation.
+              # Note that squared norms of X and Y are precomputed in the
+              # constructor of this class by issuing BLAS calls that may use
+              # multithreading (depending on the BLAS implementation), hence calling
+              # the constructor needs to be protected under the threadpool_limits
+              # context, along with the main calls to _parallel_on_Y and
+              # _parallel_on_X.
+              # For more information see MiddleTermComputer.
+              use_squared_distances = metric == "sqeuclidean"
+              pda = EuclideanArgKmin{{name_suffix}}(
+                  X=X, Y=Y, k=k,
+                  n_threads=n_threads,
+                  use_squared_distances=use_squared_distances,
+                  chunk_size=chunk_size,
+                  strategy=strategy,
+                  metric_kwargs=metric_kwargs,
+              )
+          else:
+              # Fall back on a generic implementation that handles most scipy
+              # metrics by computing the distances between 2 vectors at a time.
+              pda = ArgKmin{{name_suffix}}(
+                  datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
+                  n_threads=n_threads,
+                  k=k,
+                  chunk_size=chunk_size,
+                  strategy=strategy,
+              )
+
+          if pda.execute_in_parallel_on_Y:
+              pda._parallel_on_Y()
+          else:
+              pda._parallel_on_X()
 
         return pda._finalize_results(return_distance)
 
     def __init__(
         self,
         DatasetsPair{{name_suffix}} datasets_pair,
+        intp_t n_threads,
         chunk_size=None,
         strategy=None,
         intp_t k=1,
     ):
         super().__init__(
             datasets_pair=datasets_pair,
+            n_threads=n_threads,
             chunk_size=chunk_size,
             strategy=strategy,
         )
@@ -318,6 +330,7 @@ cdef class EuclideanArgKmin{{name_suffix}}(ArgKmin{{name_suffix}}):
         X,
         Y,
         intp_t k,
+        intp_t n_threads,
         bint use_squared_distances=False,
         chunk_size=None,
         strategy=None,
@@ -337,6 +350,7 @@ cdef class EuclideanArgKmin{{name_suffix}}(ArgKmin{{name_suffix}}):
         super().__init__(
             # The datasets pair here is used for exact distances computations
             datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric="euclidean"),
+            n_threads=n_threads,
             chunk_size=chunk_size,
             strategy=strategy,
             k=k,

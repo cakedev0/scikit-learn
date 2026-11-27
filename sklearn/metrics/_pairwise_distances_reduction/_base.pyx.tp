@@ -14,7 +14,6 @@ from sklearn.utils._typedefs cimport intp_t, float32_t, float64_t, int32_t
 
 from sklearn import get_config
 from sklearn.utils import check_scalar
-from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 
 #####################
 
@@ -133,6 +132,7 @@ cdef class BaseDistancesReduction{{name_suffix}}:
     def __init__(
         self,
         DatasetsPair{{name_suffix}} datasets_pair,
+        intp_t n_threads,
         chunk_size=None,
         strategy=None,
      ):
@@ -144,7 +144,10 @@ cdef class BaseDistancesReduction{{name_suffix}}:
 
         self.chunk_size = check_scalar(chunk_size, "chunk_size", Integral, min_val=20)
 
-        self.effective_n_threads = _openmp_effective_n_threads()
+        # Computed by the caller: `compute` creates the instance under a BLAS limit,
+        # and with OpenBLAS's OpenMP threading layer, `limits=1, user_api="blas"`
+        # also sets the number of OpenMP threads to 1.
+        self.effective_n_threads = n_threads
 
         self.datasets_pair = datasets_pair
 

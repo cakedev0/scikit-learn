@@ -17,6 +17,7 @@ from numbers import Real
 from scipy.sparse import issparse
 from sklearn.utils import check_array, check_scalar
 from sklearn.utils.fixes import _in_unstable_openblas_configuration
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils.parallel import _get_threadpool_controller
 
 cnp.import_array()
@@ -78,39 +79,45 @@ cdef class RadiusNeighbors{{name_suffix}}(BaseDistancesReduction{{name_suffix}})
 
         No instance should directly be created outside of this class method.
         """
-        if metric in ("euclidean", "sqeuclidean"):
-            # Specialized implementation of RadiusNeighbors for the Euclidean
-            # distance for the dense-dense and sparse-sparse cases.
-            # This implementation computes the distances by chunk using
-            # a decomposition of the Squared Euclidean distance.
-            # This specialisation has an improved arithmetic intensity for both
-            # the dense and sparse settings, allowing in most case speed-ups of
-            # several orders of magnitude compared to the generic RadiusNeighbors
-            # implementation.
-            # For more information see MiddleTermComputer.
-            use_squared_distances = metric == "sqeuclidean"
-            pda = EuclideanRadiusNeighbors{{name_suffix}}(
-                X=X, Y=Y, radius=radius,
-                use_squared_distances=use_squared_distances,
-                chunk_size=chunk_size,
-                strategy=strategy,
-                sort_results=sort_results,
-                metric_kwargs=metric_kwargs,
-            )
-        else:
-             # Fall back on a generic implementation that handles most scipy
-             # metrics by computing the distances between 2 vectors at a time.
-            pda = RadiusNeighbors{{name_suffix}}(
-                datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
-                radius=radius,
-                chunk_size=chunk_size,
-                strategy=strategy,
-                sort_results=sort_results,
-            )
+        # Read the number of OpenMP threads before limiting BLAS: with OpenBLAS's
+        # OpenMP threading layer, `limits=1, user_api="blas"` also sets it to 1.
+        n_threads = _openmp_effective_n_threads()
 
         # Limit the number of threads in second level of nested parallelism for BLAS
-        # to avoid threads over-subscription (in GEMM for instance).
+        # to avoid threads over-subscription (in DOT or GEMM for instance).
         with _get_threadpool_controller().limit(limits=1, user_api="blas"):
+            if metric in ("euclidean", "sqeuclidean"):
+                # Specialized implementation of RadiusNeighbors for the Euclidean
+                # distance for the dense-dense and sparse-sparse cases.
+                # This implementation computes the distances by chunk using
+                # a decomposition of the Squared Euclidean distance.
+                # This specialisation has an improved arithmetic intensity for both
+                # the dense and sparse settings, allowing in most case speed-ups of
+                # several orders of magnitude compared to the generic RadiusNeighbors
+                # implementation.
+                # For more information see MiddleTermComputer.
+                use_squared_distances = metric == "sqeuclidean"
+                pda = EuclideanRadiusNeighbors{{name_suffix}}(
+                    X=X, Y=Y, radius=radius,
+                    n_threads=n_threads,
+                    use_squared_distances=use_squared_distances,
+                    chunk_size=chunk_size,
+                    strategy=strategy,
+                    sort_results=sort_results,
+                    metric_kwargs=metric_kwargs,
+                )
+            else:
+                 # Fall back on a generic implementation that handles most scipy
+                 # metrics by computing the distances between 2 vectors at a time.
+                pda = RadiusNeighbors{{name_suffix}}(
+                    datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
+                    n_threads=n_threads,
+                    radius=radius,
+                    chunk_size=chunk_size,
+                    strategy=strategy,
+                    sort_results=sort_results,
+                )
+
             if pda.execute_in_parallel_on_Y:
                 pda._parallel_on_Y()
             else:
@@ -123,12 +130,14 @@ cdef class RadiusNeighbors{{name_suffix}}(BaseDistancesReduction{{name_suffix}})
         self,
         DatasetsPair{{name_suffix}} datasets_pair,
         float64_t radius,
+        intp_t n_threads,
         chunk_size=None,
         strategy=None,
         sort_results=False,
     ):
         super().__init__(
             datasets_pair=datasets_pair,
+            n_threads=n_threads,
             chunk_size=chunk_size,
             strategy=strategy,
         )
@@ -323,6 +332,7 @@ cdef class EuclideanRadiusNeighbors{{name_suffix}}(RadiusNeighbors{{name_suffix}
         X,
         Y,
         float64_t radius,
+        intp_t n_threads,
         bint use_squared_distances=False,
         chunk_size=None,
         strategy=None,
@@ -344,6 +354,7 @@ cdef class EuclideanRadiusNeighbors{{name_suffix}}(RadiusNeighbors{{name_suffix}
             # The datasets pair here is used for exact distances computations
             datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric="euclidean"),
             radius=radius,
+            n_threads=n_threads,
             chunk_size=chunk_size,
             strategy=strategy,
             sort_results=sort_results,

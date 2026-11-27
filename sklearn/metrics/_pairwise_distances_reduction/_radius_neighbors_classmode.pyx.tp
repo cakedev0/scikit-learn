@@ -8,6 +8,7 @@ from sklearn.utils._typedefs cimport intp_t, float64_t, uint8_t
 
 import numpy as np
 from scipy.sparse import issparse
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 from sklearn.utils.parallel import _get_threadpool_controller
 
 
@@ -45,22 +46,27 @@ cdef class RadiusNeighborsClassMode{{name_suffix}}(RadiusNeighbors{{name_suffix}
         dict metric_kwargs=None,
         str strategy=None,
     ):
-        # Use a generic implementation that handles most scipy
-        # metrics by computing the distances between 2 vectors at a time.
-        pda = RadiusNeighborsClassMode{{name_suffix}}(
-            datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
-            radius=radius,
-            chunk_size=chunk_size,
-            strategy=strategy,
-            weights=weights,
-            Y_labels=Y_labels,
-            unique_Y_labels=unique_Y_labels,
-            outlier_label=outlier_label,
-        )
+        # Read the number of OpenMP threads before limiting BLAS: with OpenBLAS's
+        # OpenMP threading layer, `limits=1, user_api="blas"` also sets it to 1.
+        n_threads = _openmp_effective_n_threads()
 
         # Limit the number of threads in second level of nested parallelism for BLAS
         # to avoid threads over-subscription (in GEMM for instance).
         with _get_threadpool_controller().limit(limits=1, user_api="blas"):
+            # Use a generic implementation that handles most scipy
+            # metrics by computing the distances between 2 vectors at a time.
+            pda = RadiusNeighborsClassMode{{name_suffix}}(
+                datasets_pair=DatasetsPair{{name_suffix}}.get_for(X, Y, metric, metric_kwargs),
+                n_threads=n_threads,
+                radius=radius,
+                chunk_size=chunk_size,
+                strategy=strategy,
+                weights=weights,
+                Y_labels=Y_labels,
+                unique_Y_labels=unique_Y_labels,
+                outlier_label=outlier_label,
+            )
+
             if pda.execute_in_parallel_on_Y:
                 pda._parallel_on_Y()
             else:
@@ -74,6 +80,7 @@ cdef class RadiusNeighborsClassMode{{name_suffix}}(RadiusNeighbors{{name_suffix}
         const intp_t[::1] Y_labels,
         const intp_t[::1] unique_Y_labels,
         float64_t radius,
+        intp_t n_threads,
         chunk_size=None,
         strategy=None,
         weights=None,
@@ -81,6 +88,7 @@ cdef class RadiusNeighborsClassMode{{name_suffix}}(RadiusNeighbors{{name_suffix}
     ):
         super().__init__(
             datasets_pair=datasets_pair,
+            n_threads=n_threads,
             chunk_size=chunk_size,
             strategy=strategy,
             radius=radius,
